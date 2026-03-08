@@ -1,0 +1,535 @@
+"""ERPClaw Compliance -- controls domain module
+
+Actions for control tests and compliance calendar (2 tables, 12 actions).
+Imported by db_query.py (unified router).
+"""
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timezone, date
+
+try:
+    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
+    from erpclaw_lib.response import ok, err, row_to_dict
+    from erpclaw_lib.audit import audit
+except ImportError:
+    pass
+
+# Register naming prefixes
+ENTITY_PREFIXES.setdefault("control_test", "CTRL-")
+ENTITY_PREFIXES.setdefault("compliance_calendar", "CCAL-")
+
+_now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+_today_iso = lambda: date.today().isoformat()
+
+VALID_CONTROL_TYPES = ("preventive", "detective", "corrective", "compensating")
+VALID_FREQUENCIES = ("continuous", "daily", "weekly", "monthly", "quarterly", "semi_annual", "annual")
+VALID_TEST_RESULTS = ("not_tested", "effective", "ineffective", "partially_effective", "not_applicable")
+VALID_DEFICIENCY_TYPES = ("significant", "material_weakness", "control_deficiency")
+VALID_COMPLIANCE_TYPES = ("filing", "certification", "renewal", "inspection", "report", "training", "other")
+VALID_RECURRENCES = ("none", "monthly", "quarterly", "semi_annual", "annual")
+VALID_CALENDAR_STATUSES = ("upcoming", "in_progress", "completed", "overdue", "waived")
+
+
+def _validate_company(conn, company_id):
+    if not company_id:
+        err("--company-id is required")
+    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+        err(f"Company {company_id} not found")
+
+
+def _validate_enum(value, valid_values, field_name):
+    if value and value not in valid_values:
+        err(f"Invalid {field_name}: {value}. Must be one of: {', '.join(valid_values)}")
+
+
+# ===========================================================================
+# CONTROL TEST ACTIONS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. add-control-test
+# ---------------------------------------------------------------------------
+def add_control_test(conn, args):
+    _validate_company(conn, args.company_id)
+
+    control_name = getattr(args, "control_name", None)
+    if not control_name:
+        err("--control-name is required")
+
+    control_type = getattr(args, "control_type", None) or "preventive"
+    _validate_enum(control_type, VALID_CONTROL_TYPES, "control-type")
+
+    frequency = getattr(args, "frequency", None) or "quarterly"
+    _validate_enum(frequency, VALID_FREQUENCIES, "frequency")
+
+    test_id = str(uuid.uuid4())
+    naming = get_next_name(conn, "control_test", company_id=args.company_id)
+    now = _now_iso()
+    conn.execute("""
+        INSERT INTO control_test (
+            id, naming_series, control_name, control_description,
+            control_type, frequency, test_date, tester,
+            test_procedure, test_result, evidence,
+            deficiency_type, remediation_plan, next_test_date,
+            company_id, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        test_id, naming, control_name,
+        getattr(args, "control_description", None),
+        control_type, frequency,
+        getattr(args, "test_date", None) or _today_iso(),
+        getattr(args, "tester", None),
+        getattr(args, "test_procedure", None),
+        "not_tested",
+        getattr(args, "evidence", None),
+        None,  # deficiency_type
+        None,  # remediation_plan
+        getattr(args, "next_test_date", None),
+        args.company_id, now, now,
+    ))
+    audit(conn, "control_test", test_id, "compliance-add-control-test", args.company_id)
+    conn.commit()
+    ok({
+        "id": test_id, "naming_series": naming,
+        "control_name": control_name, "test_result_status": "not_tested",
+    })
+
+
+# ---------------------------------------------------------------------------
+# 2. update-control-test
+# ---------------------------------------------------------------------------
+def update_control_test(conn, args):
+    test_id = getattr(args, "control_test_id", None)
+    if not test_id:
+        err("--control-test-id is required")
+    if not conn.execute("SELECT id FROM control_test WHERE id = ?", (test_id,)).fetchone():
+        err(f"Control test {test_id} not found")
+
+    updates, params, changed = [], [], []
+    for arg_name, col_name in {
+        "control_name": "control_name",
+        "control_description": "control_description",
+        "test_procedure": "test_procedure",
+        "tester": "tester",
+        "evidence": "evidence",
+        "next_test_date": "next_test_date",
+        "notes": "notes",
+    }.items():
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            updates.append(f"{col_name} = ?")
+            params.append(val)
+            changed.append(col_name)
+
+    control_type = getattr(args, "control_type", None)
+    if control_type is not None:
+        _validate_enum(control_type, VALID_CONTROL_TYPES, "control-type")
+        updates.append("control_type = ?")
+        params.append(control_type)
+        changed.append("control_type")
+
+    frequency = getattr(args, "frequency", None)
+    if frequency is not None:
+        _validate_enum(frequency, VALID_FREQUENCIES, "frequency")
+        updates.append("frequency = ?")
+        params.append(frequency)
+        changed.append("frequency")
+
+    if not updates:
+        err("No fields to update")
+
+    updates.append("updated_at = datetime('now')")
+    params.append(test_id)
+    conn.execute(f"UPDATE control_test SET {', '.join(updates)} WHERE id = ?", params)
+    audit(conn, "control_test", test_id, "compliance-update-control-test", None, {"updated_fields": changed})
+    conn.commit()
+    ok({"id": test_id, "updated_fields": changed})
+
+
+# ---------------------------------------------------------------------------
+# 3. get-control-test
+# ---------------------------------------------------------------------------
+def get_control_test(conn, args):
+    test_id = getattr(args, "control_test_id", None)
+    if not test_id:
+        err("--control-test-id is required")
+    row = conn.execute("SELECT * FROM control_test WHERE id = ?", (test_id,)).fetchone()
+    if not row:
+        err(f"Control test {test_id} not found")
+    ok(row_to_dict(row))
+
+
+# ---------------------------------------------------------------------------
+# 4. list-control-tests
+# ---------------------------------------------------------------------------
+def list_control_tests(conn, args):
+    where, params = ["1=1"], []
+    if getattr(args, "company_id", None):
+        where.append("company_id = ?")
+        params.append(args.company_id)
+    if getattr(args, "control_type", None):
+        where.append("control_type = ?")
+        params.append(args.control_type)
+    if getattr(args, "test_result", None):
+        where.append("test_result = ?")
+        params.append(args.test_result)
+    if getattr(args, "frequency", None):
+        where.append("frequency = ?")
+        params.append(args.frequency)
+    if getattr(args, "search", None):
+        where.append("(control_name LIKE ? OR control_description LIKE ?)")
+        params.extend([f"%{args.search}%", f"%{args.search}%"])
+
+    where_sql = " AND ".join(where)
+    total = conn.execute(f"SELECT COUNT(*) FROM control_test WHERE {where_sql}", params).fetchone()[0]
+    params.extend([args.limit, args.offset])
+    rows = conn.execute(
+        f"SELECT * FROM control_test WHERE {where_sql} ORDER BY test_date DESC LIMIT ? OFFSET ?",
+        params
+    ).fetchall()
+    ok({
+        "rows": [row_to_dict(r) for r in rows],
+        "total_count": total, "limit": args.limit, "offset": args.offset,
+        "has_more": (args.offset + args.limit) < total,
+    })
+
+
+# ---------------------------------------------------------------------------
+# 5. execute-control-test
+# ---------------------------------------------------------------------------
+def execute_control_test(conn, args):
+    test_id = getattr(args, "control_test_id", None)
+    if not test_id:
+        err("--control-test-id is required")
+    if not conn.execute("SELECT id FROM control_test WHERE id = ?", (test_id,)).fetchone():
+        err(f"Control test {test_id} not found")
+
+    test_result = getattr(args, "test_result", None)
+    if not test_result:
+        err("--test-result is required")
+    _validate_enum(test_result, VALID_TEST_RESULTS, "test-result")
+
+    now = _now_iso()
+    updates = [
+        "test_result = ?", "test_date = ?", "updated_at = ?"
+    ]
+    params = [test_result, _today_iso(), now]
+
+    tester = getattr(args, "tester", None)
+    if tester:
+        updates.append("tester = ?")
+        params.append(tester)
+
+    evidence = getattr(args, "evidence", None)
+    if evidence:
+        updates.append("evidence = ?")
+        params.append(evidence)
+
+    # Set deficiency_type if result is ineffective
+    deficiency_type = getattr(args, "deficiency_type", None)
+    if deficiency_type:
+        _validate_enum(deficiency_type, VALID_DEFICIENCY_TYPES, "deficiency-type")
+        updates.append("deficiency_type = ?")
+        params.append(deficiency_type)
+
+    notes = getattr(args, "notes", None)
+    if notes:
+        updates.append("remediation_plan = ?")
+        params.append(notes)
+
+    params.append(test_id)
+    conn.execute(f"UPDATE control_test SET {', '.join(updates)} WHERE id = ?", params)
+    audit(conn, "control_test", test_id, "compliance-execute-control-test", None, {"test_result": test_result})
+    conn.commit()
+    ok({"id": test_id, "test_result_status": test_result, "test_date": _today_iso()})
+
+
+# ===========================================================================
+# COMPLIANCE CALENDAR ACTIONS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 6. add-calendar-item
+# ---------------------------------------------------------------------------
+def add_calendar_item(conn, args):
+    _validate_company(conn, args.company_id)
+
+    title = getattr(args, "title", None)
+    if not title:
+        err("--title is required")
+
+    compliance_type = getattr(args, "compliance_type", None) or "filing"
+    _validate_enum(compliance_type, VALID_COMPLIANCE_TYPES, "compliance-type")
+
+    due_date = getattr(args, "due_date", None)
+    if not due_date:
+        err("--due-date is required")
+
+    recurrence = getattr(args, "recurrence", None)
+    if recurrence:
+        _validate_enum(recurrence, VALID_RECURRENCES, "recurrence")
+
+    item_id = str(uuid.uuid4())
+    naming = get_next_name(conn, "compliance_calendar", company_id=args.company_id)
+    now = _now_iso()
+    conn.execute("""
+        INSERT INTO compliance_calendar (
+            id, title, compliance_type, due_date, reminder_days,
+            responsible, description, recurrence, status,
+            notes, company_id, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        item_id, title, compliance_type, due_date,
+        int(getattr(args, "reminder_days", None) or 30),
+        getattr(args, "responsible", None),
+        getattr(args, "description", None),
+        recurrence,
+        "upcoming",
+        getattr(args, "notes", None),
+        args.company_id, now, now,
+    ))
+    audit(conn, "compliance_calendar", item_id, "compliance-add-calendar-item", args.company_id)
+    conn.commit()
+    ok({"id": item_id, "title": title, "due_date": due_date, "calendar_status": "upcoming"})
+
+
+# ---------------------------------------------------------------------------
+# 7. update-calendar-item
+# ---------------------------------------------------------------------------
+def update_calendar_item(conn, args):
+    item_id = getattr(args, "calendar_item_id", None)
+    if not item_id:
+        err("--calendar-item-id is required")
+    if not conn.execute("SELECT id FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone():
+        err(f"Calendar item {item_id} not found")
+
+    updates, params, changed = [], [], []
+    for arg_name, col_name in {
+        "title": "title",
+        "due_date": "due_date",
+        "responsible": "responsible",
+        "description": "description",
+        "notes": "notes",
+    }.items():
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            updates.append(f"{col_name} = ?")
+            params.append(val)
+            changed.append(col_name)
+
+    compliance_type = getattr(args, "compliance_type", None)
+    if compliance_type is not None:
+        _validate_enum(compliance_type, VALID_COMPLIANCE_TYPES, "compliance-type")
+        updates.append("compliance_type = ?")
+        params.append(compliance_type)
+        changed.append("compliance_type")
+
+    recurrence = getattr(args, "recurrence", None)
+    if recurrence is not None:
+        _validate_enum(recurrence, VALID_RECURRENCES, "recurrence")
+        updates.append("recurrence = ?")
+        params.append(recurrence)
+        changed.append("recurrence")
+
+    reminder_days = getattr(args, "reminder_days", None)
+    if reminder_days is not None:
+        updates.append("reminder_days = ?")
+        params.append(int(reminder_days))
+        changed.append("reminder_days")
+
+    if not updates:
+        err("No fields to update")
+
+    updates.append("updated_at = datetime('now')")
+    params.append(item_id)
+    conn.execute(f"UPDATE compliance_calendar SET {', '.join(updates)} WHERE id = ?", params)
+    audit(conn, "compliance_calendar", item_id, "compliance-update-calendar-item", None, {"updated_fields": changed})
+    conn.commit()
+    ok({"id": item_id, "updated_fields": changed})
+
+
+# ---------------------------------------------------------------------------
+# 8. get-calendar-item
+# ---------------------------------------------------------------------------
+def get_calendar_item(conn, args):
+    item_id = getattr(args, "calendar_item_id", None)
+    if not item_id:
+        err("--calendar-item-id is required")
+    row = conn.execute("SELECT * FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone()
+    if not row:
+        err(f"Calendar item {item_id} not found")
+    ok(row_to_dict(row))
+
+
+# ---------------------------------------------------------------------------
+# 9. list-calendar-items
+# ---------------------------------------------------------------------------
+def list_calendar_items(conn, args):
+    where, params = ["1=1"], []
+    if getattr(args, "company_id", None):
+        where.append("company_id = ?")
+        params.append(args.company_id)
+    if getattr(args, "compliance_type", None):
+        where.append("compliance_type = ?")
+        params.append(args.compliance_type)
+    if getattr(args, "status", None):
+        where.append("status = ?")
+        params.append(args.status)
+    if getattr(args, "search", None):
+        where.append("(title LIKE ? OR description LIKE ?)")
+        params.extend([f"%{args.search}%", f"%{args.search}%"])
+
+    where_sql = " AND ".join(where)
+    total = conn.execute(f"SELECT COUNT(*) FROM compliance_calendar WHERE {where_sql}", params).fetchone()[0]
+    params.extend([args.limit, args.offset])
+    rows = conn.execute(
+        f"SELECT * FROM compliance_calendar WHERE {where_sql} ORDER BY due_date ASC LIMIT ? OFFSET ?",
+        params
+    ).fetchall()
+    ok({
+        "rows": [row_to_dict(r) for r in rows],
+        "total_count": total, "limit": args.limit, "offset": args.offset,
+        "has_more": (args.offset + args.limit) < total,
+    })
+
+
+# ---------------------------------------------------------------------------
+# 10. complete-calendar-item
+# ---------------------------------------------------------------------------
+def complete_calendar_item(conn, args):
+    item_id = getattr(args, "calendar_item_id", None)
+    if not item_id:
+        err("--calendar-item-id is required")
+    row = conn.execute("SELECT status FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone()
+    if not row:
+        err(f"Calendar item {item_id} not found")
+    if row[0] == "completed":
+        err("Calendar item is already completed")
+
+    now = _now_iso()
+    conn.execute(
+        "UPDATE compliance_calendar SET status = 'completed', completed_date = ?, updated_at = ? WHERE id = ?",
+        (_today_iso(), now, item_id)
+    )
+    audit(conn, "compliance_calendar", item_id, "compliance-complete-calendar-item", None)
+    conn.commit()
+    ok({"id": item_id, "calendar_status": "completed", "completed_date": _today_iso()})
+
+
+# ---------------------------------------------------------------------------
+# 11. overdue-items-report
+# ---------------------------------------------------------------------------
+def overdue_items_report(conn, args):
+    _validate_company(conn, args.company_id)
+
+    today = _today_iso()
+
+    # Find overdue calendar items
+    overdue_calendar = conn.execute("""
+        SELECT * FROM compliance_calendar
+        WHERE company_id = ? AND status NOT IN ('completed', 'waived') AND due_date < ?
+        ORDER BY due_date ASC
+    """, (args.company_id, today)).fetchall()
+
+    # Find overdue audit findings
+    overdue_findings = conn.execute("""
+        SELECT * FROM audit_finding
+        WHERE company_id = ? AND remediation_status NOT IN ('remediated', 'verified', 'accepted')
+          AND remediation_due IS NOT NULL AND remediation_due < ?
+        ORDER BY remediation_due ASC
+    """, (args.company_id, today)).fetchall()
+
+    ok({
+        "company_id": args.company_id,
+        "report_date": today,
+        "overdue_calendar_items": [row_to_dict(r) for r in overdue_calendar],
+        "overdue_calendar_count": len(overdue_calendar),
+        "overdue_findings": [row_to_dict(r) for r in overdue_findings],
+        "overdue_findings_count": len(overdue_findings),
+        "total_overdue": len(overdue_calendar) + len(overdue_findings),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 12. compliance-dashboard
+# ---------------------------------------------------------------------------
+def compliance_dashboard(conn, args):
+    _validate_company(conn, args.company_id)
+
+    today = _today_iso()
+
+    # Audit plan summary
+    audit_plans = conn.execute("""
+        SELECT status, COUNT(*) FROM audit_plan
+        WHERE company_id = ? GROUP BY status
+    """, (args.company_id,)).fetchall()
+
+    # Risk summary
+    risks = conn.execute("""
+        SELECT risk_level, COUNT(*) FROM risk_register
+        WHERE company_id = ? AND status != 'closed' GROUP BY risk_level
+    """, (args.company_id,)).fetchall()
+
+    # Control test summary
+    controls = conn.execute("""
+        SELECT test_result, COUNT(*) FROM control_test
+        WHERE company_id = ? GROUP BY test_result
+    """, (args.company_id,)).fetchall()
+
+    # Calendar summary
+    calendar = conn.execute("""
+        SELECT status, COUNT(*) FROM compliance_calendar
+        WHERE company_id = ? GROUP BY status
+    """, (args.company_id,)).fetchall()
+
+    # Overdue count
+    overdue_count = conn.execute("""
+        SELECT COUNT(*) FROM compliance_calendar
+        WHERE company_id = ? AND status NOT IN ('completed', 'waived') AND due_date < ?
+    """, (args.company_id, today)).fetchone()[0]
+
+    # Open findings count
+    open_findings = conn.execute("""
+        SELECT COUNT(*) FROM audit_finding
+        WHERE company_id = ? AND remediation_status IN ('open', 'in_progress', 'overdue')
+    """, (args.company_id,)).fetchone()[0]
+
+    # Policy summary
+    policies = conn.execute("""
+        SELECT status, COUNT(*) FROM policy
+        WHERE company_id = ? GROUP BY status
+    """, (args.company_id,)).fetchall()
+
+    ok({
+        "company_id": args.company_id,
+        "report_date": today,
+        "audit_plans": {r[0]: r[1] for r in audit_plans},
+        "risks_by_level": {r[0]: r[1] for r in risks},
+        "control_tests": {r[0]: r[1] for r in controls},
+        "calendar_items": {r[0]: r[1] for r in calendar},
+        "policies": {r[0]: r[1] for r in policies},
+        "overdue_items": overdue_count,
+        "open_findings": open_findings,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Action Router
+# ---------------------------------------------------------------------------
+ACTIONS = {
+    "compliance-add-control-test": add_control_test,
+    "compliance-update-control-test": update_control_test,
+    "compliance-get-control-test": get_control_test,
+    "compliance-list-control-tests": list_control_tests,
+    "compliance-execute-control-test": execute_control_test,
+    "compliance-add-calendar-item": add_calendar_item,
+    "compliance-update-calendar-item": update_calendar_item,
+    "compliance-get-calendar-item": get_calendar_item,
+    "compliance-list-calendar-items": list_calendar_items,
+    "compliance-complete-calendar-item": complete_calendar_item,
+    "compliance-overdue-items-report": overdue_items_report,
+    "compliance-dashboard": compliance_dashboard,
+}
