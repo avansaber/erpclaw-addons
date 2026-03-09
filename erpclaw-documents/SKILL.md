@@ -2,12 +2,12 @@
 name: erpclaw-documents
 version: 1.0.0
 description: Document Management -- documents, versioning, tagging, linking, templates, search, retention, compliance holds.
-author: avansaber
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 4
-category: documents
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, documents, dms, versioning, templates, tagging, linking, compliance, retention]
@@ -25,7 +25,7 @@ All data is stored in the shared ERPClaw database. This skill extends the ERPCla
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls in any code path
 

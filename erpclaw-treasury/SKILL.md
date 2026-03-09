@@ -2,12 +2,12 @@
 name: erpclaw-treasury
 version: 1.0.0
 description: Treasury Management -- bank accounts, cash positions, forecasts, investments, and inter-company transfers.
-author: avansaber
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 3
-category: finance
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, finance, treasury, bank, cash, investments, intercompany, liquidity, forecast]
@@ -25,7 +25,7 @@ All data is stored in the shared ERPClaw database.
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls in any code path
 

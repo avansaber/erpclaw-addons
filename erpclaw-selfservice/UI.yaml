@@ -1,0 +1,91 @@
+ocui_version: "1.0"
+skill: erpclaw-selfservice
+skill_version: "1.0.0"
+display_name: Self-Service Portal
+icon: user-circle
+color: "#6d28d9"
+default_entity: selfservice_permission_profile
+
+domains:
+  - key: profiles
+    label: Permission Profiles
+    entities: [selfservice_permission_profile]
+  - key: permissions
+    label: Permissions
+    entities: [selfservice_profile_assignment]
+  - key: portals
+    label: Portal Config
+    entities: [selfservice_portal_config]
+  - key: sessions
+    label: Sessions
+    entities: [selfservice_session]
+  - key: activity
+    label: Activity Logs
+    entities: [selfservice_activity_log]
+
+dashboard:
+  kpis:
+    - key: profiles
+      label: "Permission Profiles"
+      type: count
+      action: selfservice-list-profiles
+      icon: shield
+      drill_action: selfservice-list-profiles
+    - key: active_portals
+      label: "Active Portals"
+      type: count
+      action: selfservice-list-portal-configs
+      severity: success
+      icon: globe
+      drill_action: selfservice-list-portal-configs
+    - key: active_sessions
+      label: "Active Sessions"
+      type: count
+      action: selfservice-list-active-sessions
+      severity: info
+      icon: users
+      drill_action: selfservice-list-active-sessions
+    - key: permissions
+      label: "Assigned Permissions"
+      type: count
+      action: selfservice-list-permissions
+      icon: key
+      drill_action: selfservice-list-permissions
+  quick_actions:
+    - action: selfservice-add-profile
+      label: "New Profile"
+      icon: shield
+    - action: selfservice-add-permission
+      label: "Assign Permission"
+      icon: key
+    - action: selfservice-add-portal-config
+      label: "New Portal"
+      icon: globe
+    - action: selfservice-usage-report
+      label: "Usage Report"
+      icon: bar-chart
+    - action: selfservice-permission-audit-report
+      label: "Permission Audit"
+      icon: file-text
+
+workflows:
+  - after: selfservice-add-profile
+    suggest:
+      - action: selfservice-add-permission
+        label: "Assign to user"
+        pass: { profile-id: id }
+  - after: selfservice-add-permission
+    suggest:
+      - action: selfservice-create-session
+        label: "Create session"
+        pass: { profile-id: profile_id, user-id: user_id }
+  - after: selfservice-add-portal-config
+    suggest:
+      - action: selfservice-activate-portal
+        label: "Activate portal"
+        pass: { portal-id: id }
+  - after: selfservice-create-session
+    suggest:
+      - action: selfservice-validate-permission
+        label: "Validate permission"
+        pass: { user-id: user_id }

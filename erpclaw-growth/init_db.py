@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """erpclaw-growth schema extension -- adds advanced CRM/marketing tables to the shared database.
 
-12 tables across 5 domains: campaigns, territories, contracts, automation, analytics.
-Part of the erpclaw-growth super-package (CRM Advanced domain).
+24 tables: 12 CRM advanced (campaigns, territories, contracts, automation, analytics)
++ 12 AI engine / analytics tables (moved from core init_schema.py):
+  anomaly, scenario, correlation, categorization_rule, business_rule,
+  pending_decision, usage_event, audit_conversation, conversation_context,
+  relationship_score, elimination_rule, elimination_entry.
+Part of the erpclaw-growth super-package (CRM + Analytics + AI Engine).
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
@@ -32,8 +36,8 @@ def create_crmadv_tables(db_path=None):
     ).fetchall()]
     missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
     if missing:
-        print(f"ERROR: Foundation tables missing: {', '.join(missing)}")
-        print("Run erpclaw-setup first: clawhub install erpclaw-setup")
+        print(f"ERROR: Foundation tables missing: {', '.join(missing)}", file=sys.stderr)
+        print("Run erpclaw-setup first: clawhub install erpclaw-setup", file=sys.stderr)
         conn.close()
         sys.exit(1)
 
@@ -313,6 +317,282 @@ def create_crmadv_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ns_status ON crmadv_nurture_sequence(sequence_status)")
     indexes_created += 2
 
+    # ==================================================================
+    # AI ENGINE / ANALYTICS TABLES (moved from core init_schema.py)
+    # ==================================================================
+
+    # 13. anomaly
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS anomaly (
+            id              TEXT PRIMARY KEY,
+            detected_at     TEXT DEFAULT (datetime('now')),
+            anomaly_type    TEXT NOT NULL CHECK(anomaly_type IN (
+                                'price_spike','volume_change','duplicate_possible',
+                                'margin_erosion','unusual_vendor','pattern_break',
+                                'consumption_spike','late_pattern','round_number',
+                                'ghost_employee','vendor_concentration',
+                                'sequence_violation','benford_deviation','budget_overrun',
+                                'inventory_shrinkage','payment_pattern_shift'
+                            )),
+            severity        TEXT NOT NULL DEFAULT 'info'
+                            CHECK(severity IN ('info','warning','critical')),
+            entity_type     TEXT,
+            entity_id       TEXT,
+            description     TEXT NOT NULL,
+            evidence        TEXT,
+            baseline        TEXT,
+            actual          TEXT,
+            deviation_pct   TEXT,
+            status          TEXT NOT NULL DEFAULT 'new'
+                            CHECK(status IN ('new','acknowledged','investigated','dismissed','resolved')),
+            resolution_notes TEXT,
+            assigned_to     TEXT,
+            expires_at      TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_status ON anomaly(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_type ON anomaly(anomaly_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_severity ON anomaly(severity)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_entity ON anomaly(entity_type, entity_id)")
+    indexes_created += 4
+
+    # 14. scenario
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scenario (
+            id              TEXT PRIMARY KEY,
+            question        TEXT NOT NULL,
+            scenario_type   TEXT NOT NULL CHECK(scenario_type IN (
+                                'price_change','supplier_loss','demand_shift','cost_change',
+                                'hiring_impact','expansion','contraction'
+                            )),
+            assumptions     TEXT,
+            baseline        TEXT,
+            projected       TEXT,
+            impact_summary  TEXT,
+            confidence      TEXT,
+            created_at      TEXT DEFAULT (datetime('now')),
+            expires_at      TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scenario_type ON scenario(scenario_type)")
+    indexes_created += 1
+
+    # 15. correlation
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS correlation (
+            id              TEXT PRIMARY KEY,
+            discovered_at   TEXT DEFAULT (datetime('now')),
+            module_a        TEXT NOT NULL,
+            module_b        TEXT NOT NULL,
+            description     TEXT NOT NULL,
+            evidence        TEXT,
+            strength        TEXT NOT NULL DEFAULT 'moderate'
+                            CHECK(strength IN ('weak','moderate','strong')),
+            statistical_confidence TEXT,
+            actionable      INTEGER NOT NULL DEFAULT 0 CHECK(actionable IN (0,1)),
+            suggested_action TEXT,
+            status          TEXT NOT NULL DEFAULT 'new'
+                            CHECK(status IN ('new','validated','dismissed')),
+            expires_at      TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_correlation_status ON correlation(status)")
+    indexes_created += 1
+
+    # 16. categorization_rule
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS categorization_rule (
+            id              TEXT PRIMARY KEY,
+            pattern         TEXT NOT NULL,
+            source          TEXT NOT NULL CHECK(source IN ('bank_feed','ocr_vendor','email_subject')),
+            target_account_id TEXT,
+            target_cost_center_id TEXT,
+            confidence      TEXT NOT NULL DEFAULT '0',
+            times_applied   INTEGER NOT NULL DEFAULT 0,
+            times_overridden INTEGER NOT NULL DEFAULT 0,
+            last_applied_at TEXT,
+            created_by      TEXT NOT NULL DEFAULT 'ai'
+                            CHECK(created_by IN ('user','ai')),
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_categorization_source ON categorization_rule(source)")
+    indexes_created += 1
+
+    # 17. business_rule
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS business_rule (
+            id              TEXT PRIMARY KEY,
+            rule_text       TEXT NOT NULL,
+            parsed_condition TEXT,
+            applies_to      TEXT,
+            action          TEXT NOT NULL DEFAULT 'warn'
+                            CHECK(action IN ('block','warn','notify','auto_execute','suggest')),
+            active          INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+            times_triggered INTEGER NOT NULL DEFAULT 0,
+            last_triggered_at TEXT,
+            created_by      TEXT,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_business_rule_active ON business_rule(active)")
+    indexes_created += 1
+
+    # 18. pending_decision
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_decision (
+            id              TEXT PRIMARY KEY,
+            context_id      TEXT,
+            question        TEXT NOT NULL,
+            options         TEXT,
+            deadline        TEXT,
+            impact          TEXT,
+            status          TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','decided','expired')),
+            decision_made   TEXT,
+            decided_at      TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_decision_status ON pending_decision(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_decision_context ON pending_decision(context_id)")
+    indexes_created += 2
+
+    # 19. usage_event
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage_event (
+            id              TEXT PRIMARY KEY,
+            customer_id     TEXT,
+            meter_id        TEXT,
+            event_type      TEXT NOT NULL,
+            quantity        TEXT NOT NULL DEFAULT '0',
+            timestamp       TEXT NOT NULL,
+            metadata        TEXT,
+            idempotency_key TEXT UNIQUE,
+            billing_period_id TEXT,
+            processed       INTEGER NOT NULL DEFAULT 0 CHECK(processed IN (0,1)),
+            created_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_customer ON usage_event(customer_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_meter ON usage_event(meter_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_processed ON usage_event(processed)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_idempotency ON usage_event(idempotency_key)")
+    indexes_created += 4
+
+    # 20. audit_conversation
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_conversation (
+            id              TEXT PRIMARY KEY,
+            timestamp       TEXT DEFAULT (datetime('now')),
+            voucher_type    TEXT,
+            voucher_id      TEXT,
+            user_message    TEXT,
+            ai_interpretation TEXT,
+            actions_taken   TEXT,
+            confidence_score TEXT,
+            user_confirmed  INTEGER CHECK(user_confirmed IN (0,1)),
+            entity_changes  TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_conv_voucher ON audit_conversation(voucher_type, voucher_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_conv_timestamp ON audit_conversation(timestamp)")
+    indexes_created += 2
+
+    # 21. conversation_context
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_context (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT,
+            context_type    TEXT NOT NULL CHECK(context_type IN (
+                                'active_workflow','pending_decision','in_progress_analysis'
+                            )),
+            summary         TEXT,
+            related_entities TEXT,
+            state           TEXT,
+            last_active     TEXT DEFAULT (datetime('now')),
+            priority        INTEGER NOT NULL DEFAULT 0,
+            expires_at      TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_ctx_user ON conversation_context(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_ctx_type ON conversation_context(context_type)")
+    indexes_created += 2
+
+    # 22. relationship_score
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS relationship_score (
+            id              TEXT PRIMARY KEY,
+            party_type      TEXT NOT NULL CHECK(party_type IN ('customer','supplier')),
+            party_id        TEXT NOT NULL,
+            score_date      TEXT NOT NULL,
+            overall_score   TEXT NOT NULL DEFAULT '0',
+            payment_score   TEXT NOT NULL DEFAULT '0',
+            volume_trend    TEXT CHECK(volume_trend IN ('growing','stable','declining')),
+            profitability_score TEXT NOT NULL DEFAULT '0',
+            risk_score      TEXT NOT NULL DEFAULT '0',
+            lifetime_value  TEXT NOT NULL DEFAULT '0',
+            factors         TEXT,
+            ai_summary      TEXT,
+            expires_at      TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_score_party ON relationship_score(party_type, party_id)")
+    indexes_created += 1
+
+    # 23. elimination_rule (intercompany elimination, moved from GL)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS elimination_rule (
+            id                  TEXT PRIMARY KEY,
+            name                TEXT NOT NULL,
+            source_company_id   TEXT NOT NULL,
+            target_company_id   TEXT NOT NULL,
+            source_account_id   TEXT NOT NULL,
+            target_account_id   TEXT NOT NULL,
+            status              TEXT NOT NULL DEFAULT 'active'
+                                CHECK(status IN ('active','disabled')),
+            created_at          TEXT DEFAULT (datetime('now')),
+            updated_at          TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_rule_source ON elimination_rule(source_company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_rule_target ON elimination_rule(target_company_id)")
+    indexes_created += 2
+
+    # 24. elimination_entry (intercompany elimination, moved from GL)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS elimination_entry (
+            id                      TEXT PRIMARY KEY,
+            elimination_rule_id     TEXT NOT NULL REFERENCES elimination_rule(id) ON DELETE RESTRICT,
+            fiscal_year_id          TEXT,
+            posting_date            TEXT NOT NULL,
+            amount                  TEXT NOT NULL DEFAULT '0',
+            source_gl_entry_id      TEXT,
+            target_gl_entry_id      TEXT,
+            status                  TEXT NOT NULL DEFAULT 'posted'
+                                    CHECK(status IN ('posted','reversed')),
+            created_at              TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_entry_rule ON elimination_entry(elimination_rule_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_entry_fy ON elimination_entry(fiscal_year_id)")
+    indexes_created += 2
+
     conn.commit()
     conn.close()
 
@@ -326,6 +606,6 @@ def create_crmadv_tables(db_path=None):
 if __name__ == "__main__":
     db = sys.argv[1] if len(sys.argv) > 1 else None
     result = create_crmadv_tables(db)
-    print(f"{DISPLAY_NAME} schema created in {result['database']}")
-    print(f"  Tables: {result['tables']}")
-    print(f"  Indexes: {result['indexes']}")
+    print(f"{DISPLAY_NAME} schema created in {result['database']}", file=sys.stderr)
+    print(f"  Tables: {result['tables']}", file=sys.stderr)
+    print(f"  Indexes: {result['indexes']}", file=sys.stderr)

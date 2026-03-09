@@ -2,12 +2,12 @@
 name: erpclaw-compliance
 version: 1.0.0
 description: Compliance, audit, risk, and policy management for ERPClaw. 38 actions across 4 domains -- audit plans and findings, risk register with heat-map scoring, internal controls and compliance calendar, policy lifecycle with employee acknowledgment tracking.
-author: avansaber
-homepage: https://github.com/avansaber/erpclaw-compliance
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 5
-category: compliance
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [compliance, audit, risk, controls, policy, governance, sox, internal-audit, risk-register, compliance-calendar]
@@ -27,7 +27,7 @@ and manage policy documents with employee acknowledgment workflows.
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Immutable audit trail**: All actions write to audit_log
 
@@ -41,7 +41,7 @@ control test, compliance calendar, filing deadline, policy acknowledgment, risk 
 
 If the database does not exist or you see "no such table" errors:
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```

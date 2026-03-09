@@ -1,0 +1,66 @@
+ocui_version: "1.0"
+skill: erpclaw-alerts
+skill_version: "1.0.0"
+display_name: Alerts & Notifications
+icon: bell
+color: "#f59e0b"
+default_entity: alert_rule
+
+domains:
+  - key: rules
+    label: Alert Rules
+    entities: [alert_rule]
+  - key: channels
+    label: Notification Channels
+    entities: [notification_channel]
+  - key: logs
+    label: Alert Logs
+    entities: [alert_log]
+
+dashboard:
+  kpis:
+    - key: active_rules
+      label: "Active Rules"
+      type: count
+      action: alert-list-alert-rules
+      filter: { is-active: 1 }
+      severity: success
+      icon: zap
+      drill_action: alert-list-alert-rules
+      drill_filter: { is-active: 1 }
+    - key: unacknowledged
+      label: "Unacknowledged"
+      type: count
+      action: alert-list-alert-logs
+      filter: { alert-status: triggered }
+      severity: warning
+      icon: alert-triangle
+      drill_action: alert-list-alert-logs
+      drill_filter: { alert-status: triggered }
+    - key: channels
+      label: "Channels"
+      type: count
+      action: alert-list-notification-channels
+      icon: send
+      drill_action: alert-list-notification-channels
+  quick_actions:
+    - action: alert-add-alert-rule
+      label: "New Alert Rule"
+      icon: zap
+    - action: alert-add-notification-channel
+      label: "New Channel"
+      icon: send
+    - action: alert-summary-report
+      label: "Alert Summary"
+      icon: bar-chart
+
+workflows:
+  - after: alert-add-notification-channel
+    suggest:
+      - action: alert-add-alert-rule
+        label: "Create alert rule"
+  - after: alert-trigger-alert
+    suggest:
+      - action: alert-acknowledge-alert
+        label: "Acknowledge alert"
+        pass: { alert-log-id: id }

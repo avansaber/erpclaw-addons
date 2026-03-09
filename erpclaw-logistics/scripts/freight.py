@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.cross_skill import create_purchase_invoice, CrossSkillError
 
     ENTITY_PREFIXES.setdefault("logistics_carrier_invoice", "CINV-")
 except ImportError:
@@ -232,7 +233,114 @@ def list_carrier_invoices(conn, args):
 
 
 # ===========================================================================
-# 6. freight-cost-analysis-report
+# 6. verify-carrier-invoice
+# ===========================================================================
+def verify_carrier_invoice(conn, args):
+    """Verify a carrier invoice and create a purchase invoice via cross_skill.
+
+    Transitions invoice_status from 'pending' to 'verified' and calls
+    erpclaw-buying to create a real purchase_invoice (carriers are suppliers).
+    The carrier must have a supplier_id linked for the PI to be created.
+    """
+    invoice_id = getattr(args, "id", None)
+    if not invoice_id:
+        err("--id is required (carrier invoice ID)")
+
+    row = conn.execute(
+        "SELECT * FROM logistics_carrier_invoice WHERE id = ?", (invoice_id,)
+    ).fetchone()
+    if not row:
+        err(f"Carrier invoice {invoice_id} not found")
+
+    inv = row_to_dict(row)
+
+    if inv["invoice_status"] != "pending":
+        err(f"Cannot verify carrier invoice: status is '{inv['invoice_status']}' (must be 'pending')")
+
+    # Look up carrier to get supplier_id
+    carrier = conn.execute(
+        "SELECT * FROM logistics_carrier WHERE id = ?", (inv["carrier_id"],)
+    ).fetchone()
+    if not carrier:
+        err(f"Carrier {inv['carrier_id']} not found")
+
+    carrier_data = row_to_dict(carrier)
+    supplier_id = carrier_data.get("supplier_id")
+    if not supplier_id:
+        err(
+            f"Carrier '{carrier_data['name']}' has no supplier_id. "
+            "Link a supplier first via logistics-update-carrier --id {carrier_id} --supplier-id {supplier_id}"
+        )
+
+    # Validate supplier still exists
+    if not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+        err(f"Supplier {supplier_id} linked to carrier no longer exists")
+
+    # Build description for the PI line item
+    inv_number = inv.get("invoice_number") or inv["id"][:8]
+    total_amount = inv["total_amount"]
+    company_id = inv["company_id"]
+
+    # Get db_path from connection (for cross_skill subprocess)
+    db_path = getattr(args, "db_path", None)
+
+    # Create purchase invoice via cross_skill
+    try:
+        pi_result = create_purchase_invoice(
+            supplier_id=supplier_id,
+            items=[{
+                "description": f"Carrier Invoice {inv_number} - {carrier_data['name']}",
+                "qty": "1",
+                "rate": str(total_amount),
+            }],
+            company_id=company_id,
+            posting_date=inv.get("invoice_date"),
+            remarks=f"Auto-created from logistics carrier invoice {inv_number}",
+            db_path=db_path,
+        )
+    except CrossSkillError as e:
+        err(f"Failed to create purchase invoice: {e}")
+
+    # Extract purchase_invoice_id from the buying skill response
+    # The response structure depends on erpclaw-buying's add-purchase-invoice action
+    pi_data = pi_result.get("purchase_invoice") or pi_result.get("data") or pi_result
+    purchase_invoice_id = (
+        pi_data.get("id")
+        if isinstance(pi_data, dict)
+        else pi_result.get("id")
+    )
+
+    if not purchase_invoice_id:
+        err(f"Purchase invoice created but could not extract ID from response: {pi_result}")
+
+    # Update carrier invoice: set status to verified and store PI link
+    now = _now_iso()
+    conn.execute(
+        "UPDATE logistics_carrier_invoice "
+        "SET invoice_status = 'verified', purchase_invoice_id = ?, updated_at = ? "
+        "WHERE id = ?",
+        (purchase_invoice_id, now, invoice_id),
+    )
+    audit(conn, SKILL, "logistics-verify-carrier-invoice", "logistics_carrier_invoice", invoice_id,
+          new_values={
+              "invoice_status": "verified",
+              "purchase_invoice_id": purchase_invoice_id,
+              "supplier_id": supplier_id,
+          })
+    conn.commit()
+
+    ok({
+        "id": invoice_id,
+        "invoice_status": "verified",
+        "purchase_invoice_id": purchase_invoice_id,
+        "supplier_id": supplier_id,
+        "carrier_id": inv["carrier_id"],
+        "total_amount": total_amount,
+    })
+
+
+# ===========================================================================
+# 7. freight-cost-analysis-report
 # ===========================================================================
 def freight_cost_analysis_report(conn, args):
     company_id = getattr(args, "company_id", None)
@@ -280,5 +388,6 @@ ACTIONS = {
     "logistics-allocate-freight": allocate_freight,
     "logistics-add-carrier-invoice": add_carrier_invoice,
     "logistics-list-carrier-invoices": list_carrier_invoices,
+    "logistics-verify-carrier-invoice": verify_carrier_invoice,
     "logistics-freight-cost-analysis-report": freight_cost_analysis_report,
 }

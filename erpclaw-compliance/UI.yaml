@@ -1,0 +1,118 @@
+ocui_version: "1.0"
+skill: erpclaw-compliance
+skill_version: "1.0.0"
+display_name: Compliance & Risk
+icon: shield-check
+color: "#059669"
+default_entity: audit_plan
+
+domains:
+  - key: audit
+    label: Audit
+    entities: [audit_plan, audit_finding]
+  - key: risk
+    label: Risk
+    entities: [risk, risk_assessment]
+  - key: controls
+    label: Controls & Calendar
+    entities: [control_test, calendar_item]
+  - key: policy
+    label: Policy
+    entities: [policy, policy_acknowledgment]
+
+dashboard:
+  kpis:
+    - key: active_audits
+      label: "Active Audits"
+      type: count
+      action: compliance-list-audit-plans
+      filter: { status: in_progress }
+      severity: info
+      icon: search
+      drill_action: compliance-list-audit-plans
+      drill_filter: { status: in_progress }
+    - key: open_findings
+      label: "Open Findings"
+      type: count
+      action: compliance-list-audit-findings
+      filter: { remediation-status: open }
+      severity: warning
+      icon: alert-circle
+      drill_action: compliance-list-audit-findings
+      drill_filter: { remediation-status: open }
+    - key: high_risks
+      label: "High/Critical Risks"
+      type: count
+      action: compliance-list-risks
+      filter: { risk-level: high }
+      severity: warning
+      icon: alert-triangle
+      drill_action: compliance-list-risks
+      drill_filter: { risk-level: high }
+    - key: overdue_items
+      label: "Overdue Items"
+      type: count
+      action: compliance-overdue-items-report
+      severity: warning
+      icon: clock
+      drill_action: compliance-overdue-items-report
+    - key: published_policies
+      label: "Published Policies"
+      type: count
+      action: compliance-list-policies
+      filter: { status: published }
+      severity: success
+      icon: file-text
+      drill_action: compliance-list-policies
+      drill_filter: { status: published }
+  quick_actions:
+    - action: compliance-add-audit-plan
+      label: "New Audit"
+      icon: search
+    - action: compliance-add-risk
+      label: "Register Risk"
+      icon: alert-triangle
+    - action: compliance-add-control-test
+      label: "New Control Test"
+      icon: shield
+    - action: compliance-add-calendar-item
+      label: "New Deadline"
+      icon: calendar
+    - action: compliance-add-policy
+      label: "New Policy"
+      icon: file-text
+    - action: compliance-dashboard
+      label: "Dashboard"
+      icon: layout-dashboard
+
+workflows:
+  - after: compliance-add-audit-plan
+    suggest:
+      - action: compliance-start-audit
+        label: "Start audit"
+        pass: { audit-plan-id: id }
+  - after: compliance-complete-audit
+    suggest:
+      - action: compliance-add-audit-finding
+        label: "Record findings"
+        pass: { audit-plan-id: id }
+  - after: compliance-add-risk
+    suggest:
+      - action: compliance-add-risk-assessment
+        label: "Assess risk"
+        pass: { risk-id: id }
+  - after: compliance-add-control-test
+    suggest:
+      - action: compliance-execute-control-test
+        label: "Execute test"
+        pass: { control-test-id: id }
+  - after: compliance-add-policy
+    suggest:
+      - action: compliance-publish-policy
+        label: "Publish policy"
+        pass: { policy-id: id }
+  - after: compliance-publish-policy
+    suggest:
+      - action: compliance-add-policy-acknowledgment
+        label: "Record acknowledgment"
+        pass: { policy-id: id }

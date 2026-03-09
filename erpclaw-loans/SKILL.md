@@ -1,36 +1,19 @@
 ---
 name: erpclaw-loans
 version: 1.0.0
-description: Loan application, disbursement, repayment scheduling, and portfolio management
-author: ERPClaw
+description: Loan application, disbursement, repayment scheduling, and portfolio management. 20 actions across loan applications, disbursement, repayments, and reporting.
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
+tier: 4
+category: infrastructure
+requires: [erpclaw]
+database: ~/.openclaw/erpclaw/data.sqlite
+user-invocable: true
+tags: [erpclaw, loans, lending, repayment, disbursement, interest, amortization, portfolio]
 scripts:
   - scripts/db_query.py
-dependencies:
-  - erpclaw-setup
-  - erpclaw-gl
-  - erpclaw-payments
-actions:
-  - loan-add-loan-application
-  - loan-update-loan-application
-  - loan-list-loan-applications
-  - loan-get-loan-application
-  - loan-approve-loan
-  - loan-reject-loan
-  - loan-disburse-loan
-  - loan-list-loans
-  - loan-get-loan
-  - loan-generate-repayment-schedule
-  - loan-get-repayment-schedule
-  - loan-record-repayment
-  - loan-list-repayments
-  - loan-calculate-interest
-  - loan-write-off-loan
-  - loan-restructure-loan
-  - loan-close-loan
-  - loan-statement
-  - loan-overdue-loans
-  - loan-status
+metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action loan-status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
 ---
 
 # ERPClaw Loans

@@ -1,0 +1,64 @@
+ocui_version: "1.0"
+skill: erpclaw-approvals
+skill_version: "1.0.0"
+display_name: Approval Workflows
+icon: check-circle
+color: "#2563eb"
+default_entity: approval_rule
+
+domains:
+  - key: rules
+    label: Approval Rules
+    entities: [approval_rule, approval_step]
+  - key: requests
+    label: Approval Requests
+    entities: [approval_request]
+
+dashboard:
+  kpis:
+    - key: active_rules
+      label: "Approval Rules"
+      type: count
+      action: approval-list-approval-rules
+      icon: list-checks
+      drill_action: approval-list-approval-rules
+    - key: pending_requests
+      label: "Pending Requests"
+      type: count
+      action: approval-list-approval-requests
+      filter: { status: pending }
+      severity: warning
+      icon: clock
+      drill_action: approval-list-approval-requests
+      drill_filter: { status: pending }
+    - key: in_progress
+      label: "In Progress"
+      type: count
+      action: approval-list-approval-requests
+      filter: { status: in_progress }
+      severity: info
+      icon: loader
+      drill_action: approval-list-approval-requests
+      drill_filter: { status: in_progress }
+  quick_actions:
+    - action: approval-add-approval-rule
+      label: "New Approval Rule"
+      icon: list-checks
+    - action: approval-submit-for-approval
+      label: "Submit for Approval"
+      icon: send
+
+workflows:
+  - after: approval-add-approval-rule
+    suggest:
+      - action: approval-add-approval-step
+        label: "Add approval step"
+        pass: { rule-id: id }
+  - after: approval-submit-for-approval
+    suggest:
+      - action: approval-approve-request
+        label: "Approve"
+        pass: { id: id }
+      - action: approval-reject-request
+        label: "Reject"
+        pass: { id: id }

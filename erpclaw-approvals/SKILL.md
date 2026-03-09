@@ -2,12 +2,12 @@
 name: erpclaw-approvals
 version: 1.0.0
 description: Approval Workflows -- multi-step approval rules, sequential/parallel routing, request tracking. 12 actions for document approval automation. Built on ERPClaw foundation.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 4
-category: erp
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, approvals, workflow, approval-rule, approval-request, sequential, parallel, routing]
@@ -26,7 +26,7 @@ approvals through their lifecycle. All operations use parameterized SQL with ful
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
 - **Immutable audit trail**: All actions write to audit_log
@@ -41,7 +41,7 @@ routing, sign-off, authorization.
 
 If the database does not exist or you see "no such table" errors:
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```

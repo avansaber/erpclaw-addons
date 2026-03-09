@@ -1,0 +1,110 @@
+ocui_version: "1.0"
+skill: erpclaw-pos
+skill_version: "1.0.0"
+display_name: Point of Sale
+icon: shopping-cart
+color: "#e11d48"
+default_entity: pos_transaction
+
+domains:
+  - key: profiles
+    label: POS Profiles
+    entities: [pos_profile]
+  - key: sessions
+    label: Sessions
+    entities: [pos_session]
+  - key: transactions
+    label: Transactions
+    entities: [pos_transaction, pos_transaction_item]
+
+dashboard:
+  kpis:
+    - key: open_sessions
+      label: "Open Sessions"
+      type: count
+      action: pos-list-sessions
+      filter: { status: open }
+      severity: info
+      icon: monitor
+      drill_action: pos-list-sessions
+      drill_filter: { status: open }
+    - key: today_transactions
+      label: "Today's Sales"
+      type: count
+      action: pos-list-transactions
+      severity: success
+      icon: shopping-cart
+      drill_action: pos-list-transactions
+    - key: profiles
+      label: "POS Profiles"
+      type: count
+      action: pos-list-pos-profiles
+      icon: settings
+      drill_action: pos-list-pos-profiles
+  quick_actions:
+    - action: pos-open-session
+      label: "Open Session"
+      icon: play-circle
+    - action: pos-add-transaction
+      label: "New Transaction"
+      icon: shopping-cart
+    - action: pos-lookup-item
+      label: "Lookup Item"
+      icon: search
+    - action: pos-daily-report
+      label: "Daily Report"
+      icon: bar-chart
+    - action: pos-add-pos-profile
+      label: "New Profile"
+      icon: settings
+
+workflows:
+  - after: pos-add-pos-profile
+    suggest:
+      - action: pos-open-session
+        label: "Open register session"
+        pass: { pos-profile-id: id }
+  - after: pos-open-session
+    suggest:
+      - action: pos-add-transaction
+        label: "Start transaction"
+        pass: { pos-session-id: id }
+  - after: pos-add-transaction
+    suggest:
+      - action: pos-add-transaction-item
+        label: "Add item"
+        pass: { pos-transaction-id: id }
+      - action: pos-lookup-item
+        label: "Lookup item"
+  - after: pos-add-transaction-item
+    suggest:
+      - action: pos-add-transaction-item
+        label: "Add another item"
+        pass: { pos-transaction-id: pos_transaction_id }
+      - action: pos-apply-discount
+        label: "Apply discount"
+        pass: { pos-transaction-id: pos_transaction_id }
+      - action: pos-add-payment
+        label: "Add payment"
+        pass: { pos-transaction-id: pos_transaction_id }
+  - after: pos-add-payment
+    suggest:
+      - action: pos-submit-transaction
+        label: "Submit transaction"
+        pass: { id: pos_transaction_id }
+  - after: pos-submit-transaction
+    suggest:
+      - action: pos-generate-receipt
+        label: "Generate receipt"
+        pass: { pos-transaction-id: id }
+      - action: pos-add-transaction
+        label: "Start new transaction"
+        pass: { pos-session-id: pos_session_id }
+  - after: pos-close-session
+    suggest:
+      - action: pos-cash-reconciliation
+        label: "Cash reconciliation"
+        pass: { pos-session-id: id }
+      - action: pos-session-summary
+        label: "Session summary"
+        pass: { pos-session-id: id }

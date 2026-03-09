@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--carrier-id")
     parser.add_argument("--shipment-id")
     parser.add_argument("--route-id")
+    parser.add_argument("--supplier-id")
 
     # Shipment fields
     parser.add_argument("--origin-address")

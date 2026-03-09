@@ -2,12 +2,12 @@
 name: erpclaw-planning
 version: 1.0.0
 description: Financial planning module for ERPClaw -- budgets, scenario modeling, and forecasting with variance analysis and budget-vs-actual reporting.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 5
-category: erp
-requires: [erpclaw-setup, erpclaw-gl]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, planning, budget, scenario, forecast, variance, financial-planning, what-if]
@@ -25,7 +25,7 @@ All planning data is stored in the shared ERPClaw database. Budget-vs-actual rep
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls in any code path
 

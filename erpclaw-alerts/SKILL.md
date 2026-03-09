@@ -2,12 +2,12 @@
 name: erpclaw-alerts
 version: 1.0.0
 description: Configurable notification triggers -- low stock alerts, overdue invoice alerts, expiring contract alerts, custom rules. Channels: email, webhook, Telegram, SMS. 14 actions across alert rules, notification channels, and alert logs.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 5
-category: erp
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, alerts, notifications, triggers, low-stock, overdue, contract, webhook, telegram, email, monitoring]
@@ -26,7 +26,7 @@ with acknowledgment tracking. All data stored locally in SQLite with full audit 
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
 - **Immutable audit trail**: All actions write to audit_log
@@ -41,7 +41,7 @@ acknowledge alert, alert summary, monitoring, warning, critical alert.
 
 If the database does not exist or you see "no such table" errors:
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```

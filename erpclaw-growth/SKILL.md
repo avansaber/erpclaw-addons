@@ -6,11 +6,11 @@ description: >
   analytics, and AI-powered business analysis for ERPClaw. 113 actions across 4 domains:
   lead management, opportunity pipeline, email campaigns, territories, contracts, automation,
   KPI dashboards, anomaly detection, cash flow forecasting, and relationship scoring.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 1
-category: erp
+category: expansion
 requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true

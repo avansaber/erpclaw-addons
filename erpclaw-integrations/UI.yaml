@@ -1,0 +1,129 @@
+ocui_version: "1.0"
+skill: erpclaw-integrations
+skill_version: "2.0.0"
+display_name: Integration Connectors
+icon: plug
+color: "#7c3aed"
+default_entity: integration_connector
+
+domains:
+  - key: connectors
+    label: Connectors
+    entities: [integration_connector, integration_credential, integration_webhook]
+  - key: sync
+    label: Sync Operations
+    entities: [integration_sync, integration_sync_schedule, integration_sync_error]
+  - key: mappings
+    label: Field Mappings
+    entities: [integration_field_mapping, integration_entity_map, integration_transform_rule]
+  - key: booking
+    label: Booking Connectors
+    entities: [connv2_booking_connector, connv2_booking_sync_log]
+  - key: delivery
+    label: Delivery Connectors
+    entities: [connv2_delivery_connector, connv2_delivery_order]
+  - key: realestate
+    label: Real Estate Connectors
+    entities: [connv2_realestate_connector, connv2_realestate_lead]
+  - key: financial
+    label: Financial Connectors
+    entities: [connv2_financial_connector]
+  - key: productivity
+    label: Productivity Connectors
+    entities: [connv2_productivity_connector]
+
+dashboard:
+  kpis:
+    - key: total_connectors
+      label: "Connectors"
+      type: count
+      action: integration-list-connectors
+      icon: plug
+      drill_action: integration-list-connectors
+    - key: active_connectors
+      label: "Active"
+      type: count
+      action: integration-list-connectors
+      filter: { connector-status: active }
+      severity: success
+      icon: check-circle
+      drill_action: integration-list-connectors
+      drill_filter: { connector-status: active }
+    - key: running_syncs
+      label: "Running Syncs"
+      type: count
+      action: integration-list-syncs
+      filter: { sync-status: running }
+      severity: info
+      icon: refresh-cw
+      drill_action: integration-list-syncs
+      drill_filter: { sync-status: running }
+    - key: failed_syncs
+      label: "Failed Syncs"
+      type: count
+      action: integration-list-syncs
+      filter: { sync-status: failed }
+      severity: warning
+      icon: alert-triangle
+      drill_action: integration-list-syncs
+      drill_filter: { sync-status: failed }
+  quick_actions:
+    - action: integration-add-connector
+      label: "New Connector"
+      icon: plug
+    - action: integration-start-sync
+      label: "Start Sync"
+      icon: refresh-cw
+    - action: integration-add-field-mapping
+      label: "Add Field Mapping"
+      icon: columns
+    - action: integration-connector-health-report
+      label: "Health Report"
+      icon: activity
+    - action: integration-add-booking-connector
+      label: "Booking Connector"
+      icon: calendar
+    - action: integration-add-delivery-connector
+      label: "Delivery Connector"
+      icon: package
+
+workflows:
+  - after: integration-add-connector
+    suggest:
+      - action: integration-add-connector-credential
+        label: "Add credentials"
+        pass: { connector-id: id }
+      - action: integration-add-field-mapping
+        label: "Set up field mappings"
+        pass: { connector-id: id }
+  - after: integration-add-connector-credential
+    suggest:
+      - action: integration-test-connector
+        label: "Test connector"
+        pass: { connector-id: connector_id }
+      - action: integration-activate-connector
+        label: "Activate connector"
+        pass: { connector-id: connector_id }
+  - after: integration-activate-connector
+    suggest:
+      - action: integration-start-sync
+        label: "Start first sync"
+        pass: { connector-id: id }
+      - action: integration-add-sync-schedule
+        label: "Schedule syncs"
+        pass: { connector-id: id }
+  - after: integration-start-sync
+    suggest:
+      - action: integration-get-sync
+        label: "Check sync status"
+        pass: { sync-id: id }
+  - after: integration-add-booking-connector
+    suggest:
+      - action: integration-configure-booking-sync
+        label: "Configure sync options"
+        pass: { connector-id: id }
+  - after: integration-add-delivery-connector
+    suggest:
+      - action: integration-configure-delivery-sync
+        label: "Configure delivery sync"
+        pass: { connector-id: id }

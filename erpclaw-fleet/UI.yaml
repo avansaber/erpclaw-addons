@@ -1,0 +1,90 @@
+ocui_version: "1.0"
+skill: erpclaw-fleet
+skill_version: "1.0.0"
+display_name: Fleet Management
+icon: truck
+color: "#0891b2"
+default_entity: fleet_vehicle
+
+domains:
+  - key: vehicles
+    label: Vehicles
+    entities: [fleet_vehicle]
+  - key: assignments
+    label: Assignments
+    entities: [fleet_vehicle_assignment]
+  - key: fuel
+    label: Fuel Logs
+    entities: [fleet_fuel_log]
+  - key: maintenance
+    label: Maintenance
+    entities: [fleet_vehicle_maintenance]
+
+dashboard:
+  kpis:
+    - key: total_vehicles
+      label: "Vehicles"
+      type: count
+      action: fleet-list-vehicles
+      icon: truck
+      drill_action: fleet-list-vehicles
+    - key: active_vehicles
+      label: "Active Vehicles"
+      type: count
+      action: fleet-list-vehicles
+      filter: { vehicle-status: active }
+      severity: success
+      icon: check-circle
+      drill_action: fleet-list-vehicles
+      drill_filter: { vehicle-status: active }
+    - key: active_assignments
+      label: "Active Assignments"
+      type: count
+      action: fleet-list-vehicle-assignments
+      filter: { assignment-status: active }
+      severity: info
+      icon: user-check
+      drill_action: fleet-list-vehicle-assignments
+      drill_filter: { assignment-status: active }
+    - key: pending_maintenance
+      label: "Pending Maintenance"
+      type: count
+      action: fleet-list-vehicle-maintenance
+      filter: { maintenance-status: scheduled }
+      severity: warning
+      icon: wrench
+      drill_action: fleet-list-vehicle-maintenance
+      drill_filter: { maintenance-status: scheduled }
+  quick_actions:
+    - action: fleet-add-vehicle
+      label: "New Vehicle"
+      icon: truck
+    - action: fleet-add-vehicle-assignment
+      label: "Assign Vehicle"
+      icon: user-plus
+    - action: fleet-add-fuel-log
+      label: "Log Fuel"
+      icon: fuel
+    - action: fleet-add-vehicle-maintenance
+      label: "Schedule Maintenance"
+      icon: wrench
+    - action: fleet-vehicle-cost-report
+      label: "Cost Report"
+      icon: bar-chart
+
+workflows:
+  - after: fleet-add-vehicle
+    suggest:
+      - action: fleet-add-vehicle-assignment
+        label: "Assign to driver"
+        pass: { vehicle-id: id }
+  - after: fleet-add-vehicle-assignment
+    suggest:
+      - action: fleet-add-fuel-log
+        label: "Log fuel purchase"
+        pass: { vehicle-id: vehicle_id }
+  - after: fleet-add-vehicle-maintenance
+    suggest:
+      - action: fleet-complete-vehicle-maintenance
+        label: "Mark complete"
+        pass: { maintenance-id: id }

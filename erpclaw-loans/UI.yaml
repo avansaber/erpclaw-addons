@@ -1,0 +1,92 @@
+ocui_version: "1.0"
+skill: erpclaw-loans
+skill_version: "1.0.0"
+display_name: Loan Management
+icon: landmark
+color: "#b45309"
+default_entity: loan_application
+
+domains:
+  - key: applications
+    label: Loan Applications
+    entities: [loan_application]
+  - key: loans
+    label: Active Loans
+    entities: [loan]
+  - key: repayments
+    label: Repayments
+    entities: [loan_repayment]
+
+dashboard:
+  kpis:
+    - key: pending_applications
+      label: "Pending Applications"
+      type: count
+      action: loan-list-loan-applications
+      filter: { status: pending }
+      severity: warning
+      icon: clock
+      drill_action: loan-list-loan-applications
+      drill_filter: { status: pending }
+    - key: active_loans
+      label: "Active Loans"
+      type: count
+      action: loan-list-loans
+      filter: { status: active }
+      severity: info
+      icon: landmark
+      drill_action: loan-list-loans
+      drill_filter: { status: active }
+    - key: overdue_loans
+      label: "Overdue"
+      type: count
+      action: loan-overdue-loans
+      severity: warning
+      icon: alert-triangle
+      drill_action: loan-overdue-loans
+  quick_actions:
+    - action: loan-add-loan-application
+      label: "New Application"
+      icon: file-plus
+    - action: loan-list-loans
+      label: "View Loans"
+      icon: landmark
+    - action: loan-overdue-loans
+      label: "Overdue Report"
+      icon: alert-triangle
+    - action: loan-record-repayment
+      label: "Record Repayment"
+      icon: dollar-sign
+
+workflows:
+  - after: loan-add-loan-application
+    suggest:
+      - action: loan-approve-loan
+        label: "Approve application"
+        pass: { id: id }
+      - action: loan-reject-loan
+        label: "Reject application"
+        pass: { id: id }
+  - after: loan-approve-loan
+    suggest:
+      - action: loan-disburse-loan
+        label: "Disburse loan"
+        pass: { id: id }
+  - after: loan-disburse-loan
+    suggest:
+      - action: loan-generate-repayment-schedule
+        label: "Generate repayment schedule"
+        pass: { id: id }
+  - after: loan-generate-repayment-schedule
+    suggest:
+      - action: loan-record-repayment
+        label: "Record repayment"
+        pass: { id: loan_id }
+  - after: loan-record-repayment
+    suggest:
+      - action: loan-get-repayment-schedule
+        label: "View schedule"
+        pass: { id: loan_id }
+      - action: loan-statement
+        label: "View statement"
+        pass: { id: loan_id }

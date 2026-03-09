@@ -66,6 +66,11 @@ def add_carrier(conn, args):
     carrier_type = getattr(args, "carrier_type", None) or "parcel"
     _validate_enum(carrier_type, VALID_CARRIER_TYPES, "carrier-type")
 
+    supplier_id = getattr(args, "supplier_id", None)
+    if supplier_id:
+        if not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+            err(f"Supplier {supplier_id} not found")
+
     carrier_id = str(uuid.uuid4())
     conn.company_id = company_id
     naming = get_next_name(conn, "logistics_carrier", company_id=company_id)
@@ -73,14 +78,16 @@ def add_carrier(conn, args):
 
     conn.execute("""
         INSERT INTO logistics_carrier (
-            id, naming_series, name, carrier_code, contact_name, contact_email,
+            id, naming_series, name, carrier_code, supplier_id,
+            contact_name, contact_email,
             contact_phone, dot_number, mc_number, carrier_type,
             insurance_expiry, carrier_status, on_time_pct, total_shipments,
             company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         carrier_id, naming, name,
         getattr(args, "carrier_code", None),
+        supplier_id,
         getattr(args, "contact_name", None),
         getattr(args, "contact_email", None),
         getattr(args, "contact_phone", None),
@@ -92,11 +99,12 @@ def add_carrier(conn, args):
         company_id, now, now,
     ))
     audit(conn, SKILL, "logistics-add-carrier", "logistics_carrier", carrier_id,
-          new_values={"name": name, "carrier_type": carrier_type})
+          new_values={"name": name, "carrier_type": carrier_type, "supplier_id": supplier_id})
     conn.commit()
     ok({
         "id": carrier_id, "naming_series": naming, "name": name,
         "carrier_type": carrier_type, "carrier_status": "active",
+        "supplier_id": supplier_id,
     })
 
 
@@ -108,6 +116,16 @@ def update_carrier(conn, args):
     _get_carrier(conn, carrier_id)
 
     updates, params, changed = [], [], []
+
+    # Handle supplier_id with FK validation
+    supplier_id = getattr(args, "supplier_id", None)
+    if supplier_id is not None:
+        if supplier_id and not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+            err(f"Supplier {supplier_id} not found")
+        updates.append("supplier_id = ?")
+        params.append(supplier_id if supplier_id else None)
+        changed.append("supplier_id")
+
     for arg_name, col_name in {
         "name": "name", "carrier_code": "carrier_code",
         "contact_name": "contact_name", "contact_email": "contact_email",

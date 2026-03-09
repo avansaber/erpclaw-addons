@@ -1,0 +1,84 @@
+ocui_version: "1.0"
+skill: erpclaw-documents
+skill_version: "1.0.0"
+display_name: Document Management
+icon: file-stack
+color: "#4f46e5"
+default_entity: document
+
+domains:
+  - key: documents
+    label: Documents
+    entities: [document, document_version, document_tag, document_link]
+  - key: templates
+    label: Templates
+    entities: [document_template]
+
+dashboard:
+  kpis:
+    - key: total_documents
+      label: "Documents"
+      type: count
+      action: document-list-documents
+      icon: file
+      drill_action: document-list-documents
+    - key: draft_documents
+      label: "Drafts"
+      type: count
+      action: document-list-documents
+      filter: { status: draft }
+      severity: info
+      icon: file-edit
+      drill_action: document-list-documents
+      drill_filter: { status: draft }
+    - key: pending_review
+      label: "In Review"
+      type: count
+      action: document-list-documents
+      filter: { status: review }
+      severity: warning
+      icon: eye
+      drill_action: document-list-documents
+      drill_filter: { status: review }
+    - key: templates
+      label: "Templates"
+      type: count
+      action: document-list-templates
+      icon: layout-template
+      drill_action: document-list-templates
+  quick_actions:
+    - action: document-add-document
+      label: "New Document"
+      icon: file-plus
+    - action: document-add-template
+      label: "New Template"
+      icon: layout-template
+    - action: document-search-documents
+      label: "Search Documents"
+      icon: search
+    - action: document-generate-from-template
+      label: "Generate from Template"
+      icon: copy
+
+workflows:
+  - after: document-add-document
+    suggest:
+      - action: document-add-document-tag
+        label: "Add tags"
+        pass: { document-id: id }
+      - action: document-link-document
+        label: "Link to entity"
+        pass: { document-id: id }
+      - action: document-submit-for-review
+        label: "Submit for review"
+        pass: { document-id: id }
+  - after: document-submit-for-review
+    suggest:
+      - action: document-approve-document
+        label: "Approve document"
+        pass: { document-id: id }
+  - after: document-add-template
+    suggest:
+      - action: document-generate-from-template
+        label: "Generate document"
+        pass: { template-id: id }

@@ -2,12 +2,12 @@
 name: erpclaw-selfservice
 version: 1.0.0
 description: Generic self-service permission layer for ERPClaw. 25 actions across permission profiles, portal configuration, session management, and activity logging. Enables scoped access for employees, clients, tenants, patients, and vendors across all verticals.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 2
-category: erp
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, self-service, permissions, portal, session, access-control, rbac, employee-portal, client-portal, tenant-portal]
@@ -27,7 +27,7 @@ checks on every action, and maintain a complete activity audit trail.
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
 - **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 
 ### Skill Activation Triggers
@@ -39,7 +39,7 @@ permission check, activity log, portal config, field visibility, record scope.
 ### Setup (First Use Only)
 
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```

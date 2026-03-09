@@ -1,13 +1,13 @@
 ---
 name: erpclaw-logistics
 version: 1.0.0
-description: Transportation & Logistics Management -- shipments, carriers, routes, freight charges, and carrier invoicing. 35 actions for end-to-end logistics operations. Built on ERPClaw foundation.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+description: Transportation & Logistics Management -- shipments, carriers, routes, freight charges, and carrier invoicing with cross-skill purchase invoice integration. 36 actions for end-to-end logistics operations. Built on ERPClaw foundation.
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 4
-category: erp
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, logistics, shipments, carriers, routes, freight, tracking, transportation, delivery]
@@ -25,7 +25,7 @@ and freight charges with carrier invoicing. All operations use parameterized SQL
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
 - **Immutable audit trail**: All actions write to audit_log
@@ -40,7 +40,7 @@ parcel, courier, freight charge, carrier invoice, on-time delivery.
 
 If the database does not exist or you see "no such table" errors:
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```
@@ -81,6 +81,13 @@ python3 {baseDir}/scripts/db_query.py --action status
 ```
 --action logistics-add-freight-charge --shipment-id {id} --charge-type base --amount "45.00" --company-id {id}
 --action logistics-add-carrier-invoice --carrier-id {id} --invoice-number "INV-001" --invoice-date "2026-01-15" --total-amount "1250.00" --company-id {id}
+--action logistics-verify-carrier-invoice --id {carrier_invoice_id}
+```
+
+**Link carrier to supplier (required for invoice verification):**
+```
+--action logistics-add-carrier --company-id {id} --name "FastShip Express" --carrier-type parcel --supplier-id {supplier_id}
+--action logistics-update-carrier --id {carrier_id} --supplier-id {supplier_id}
 ```
 
 ## Advanced (Tier 3)
@@ -127,6 +134,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `logistics-allocate-freight` | Allocate freight to a shipment |
 | `logistics-add-carrier-invoice` | Create a carrier invoice |
 | `logistics-list-carrier-invoices` | List carrier invoices |
+| `logistics-verify-carrier-invoice` | Verify carrier invoice and create purchase invoice |
 | `logistics-freight-cost-analysis-report` | Freight cost breakdown report |
 | `logistics-on-time-delivery-report` | On-time delivery metrics |
 | `logistics-delivery-exception-report` | Delivery exceptions summary |

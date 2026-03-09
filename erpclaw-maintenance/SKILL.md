@@ -2,12 +2,12 @@
 name: erpclaw-maintenance
 version: 1.0.0
 description: Equipment & Maintenance Management -- preventive maintenance, work orders, checklists, downtime tracking.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 4
-category: erp
-requires: [erpclaw-setup]
+category: infrastructure
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [erpclaw, maintenance, equipment, preventive-maintenance, work-order, checklist, downtime, cmms]
@@ -25,7 +25,7 @@ All data is stored locally in the shared ERPClaw SQLite database. Financial data
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **SQL injection safe**: All queries use parameterized statements
 - **Zero network calls**: No external API calls in any code path
 

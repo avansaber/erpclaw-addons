@@ -7,11 +7,11 @@ description: >
   projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal),
   quality (inspections, NCRs), and support (issues, SLAs, warranty). 126 actions
   across 6 domains with immutable audit trail.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.erpclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
 tier: 1
-category: erp
+category: expansion
 requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true

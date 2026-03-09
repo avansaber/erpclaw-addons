@@ -1,9 +1,10 @@
 """ERPClaw Maintenance — schema initialization.
 
-Creates 9 maintenance tables and indexes in the shared ERPClaw database.
+Creates 11 maintenance tables and indexes in the shared ERPClaw database.
 Tables: equipment, equipment_reading, maintenance_plan, maintenance_plan_item,
 maintenance_work_order, maintenance_work_order_item, maintenance_checklist,
-maintenance_checklist_item, downtime_record.
+maintenance_checklist_item, downtime_record,
+maintenance_schedule, maintenance_visit (moved from core init_schema.py).
 """
 import os
 import sqlite3
@@ -269,6 +270,60 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_company ON downtime_record(company_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_reason ON downtime_record(reason)")
     indexes_created += 4
+
+    # -----------------------------------------------------------------------
+    # 10. maintenance_schedule — customer-facing service schedules
+    #     (moved from core erpclaw-support tables in init_schema.py)
+    # -----------------------------------------------------------------------
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_schedule (
+            id              TEXT PRIMARY KEY,
+            naming_series   TEXT,
+            customer_id     TEXT,
+            item_id         TEXT,
+            serial_number_id TEXT,
+            schedule_frequency TEXT NOT NULL DEFAULT 'quarterly'
+                            CHECK(schedule_frequency IN ('monthly','quarterly','semi_annual','annual')),
+            start_date      TEXT NOT NULL,
+            end_date        TEXT NOT NULL,
+            last_completed_date TEXT,
+            next_due_date   TEXT,
+            status          TEXT NOT NULL DEFAULT 'active'
+                            CHECK(status IN ('active','expired','cancelled')),
+            assigned_to     TEXT,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_sched_customer ON maintenance_schedule(customer_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_sched_status ON maintenance_schedule(status)")
+    indexes_created += 2
+
+    # -----------------------------------------------------------------------
+    # 11. maintenance_visit — on-site service visits
+    #     (moved from core erpclaw-support tables in init_schema.py)
+    # -----------------------------------------------------------------------
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_visit (
+            id              TEXT PRIMARY KEY,
+            naming_series   TEXT,
+            maintenance_schedule_id TEXT NOT NULL REFERENCES maintenance_schedule(id) ON DELETE RESTRICT,
+            customer_id     TEXT,
+            visit_date      TEXT NOT NULL,
+            completed_by    TEXT,
+            observations    TEXT,
+            work_done       TEXT,
+            status          TEXT NOT NULL DEFAULT 'scheduled'
+                            CHECK(status IN ('scheduled','completed','cancelled')),
+            created_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    tables_created += 1
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_visit_schedule ON maintenance_visit(maintenance_schedule_id)")
+    indexes_created += 1
 
     conn.commit()
     conn.close()

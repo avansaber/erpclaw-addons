@@ -1,49 +1,19 @@
 ---
 name: erpclaw-pos
-version: "1.0.0"
-description: "Point of Sale — register sessions, transactions, payments, receipts"
-author: "avansaber"
+version: 1.0.0
+description: Point of Sale -- register sessions, transactions, payments, receipts. 29 actions across POS profiles, sessions, transactions, cart operations, payments, and reporting.
+author: AvanSaber
+homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
+tier: 4
+category: infrastructure
+requires: [erpclaw]
+database: ~/.openclaw/erpclaw/data.sqlite
+user-invocable: true
+tags: [erpclaw, pos, point-of-sale, register, transactions, payments, receipts, cash-reconciliation, retail]
 scripts:
   - scripts/db_query.py
-actions:
-  # Profile management
-  - pos-add-pos-profile
-  - pos-update-pos-profile
-  - pos-list-pos-profiles
-  - pos-get-pos-profile
-  # Session management
-  - pos-open-session
-  - pos-get-session
-  - pos-list-sessions
-  - pos-close-session
-  # Transaction lifecycle
-  - pos-add-transaction
-  - pos-void-transaction
-  - pos-get-transaction
-  - pos-list-transactions
-  # Cart operations
-  - pos-add-transaction-item
-  - pos-remove-transaction-item
-  - pos-apply-discount
-  # Hold/resume
-  - pos-hold-transaction
-  - pos-resume-transaction
-  # Payment & finalization
-  - pos-add-payment
-  - pos-submit-transaction
-  - pos-return-transaction
-  # Lookup
-  - pos-lookup-item
-  # Reporting
-  - pos-cash-reconciliation
-  - pos-session-summary
-  - pos-daily-report
-  - pos-hourly-sales
-  - pos-top-items
-  - pos-cashier-performance
-  - pos-generate-receipt
-  - pos-status
+metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action pos-status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
 ---
 
 # ERPClaw POS

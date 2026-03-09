@@ -1,0 +1,106 @@
+ocui_version: "1.0"
+skill: erpclaw-logistics
+skill_version: "1.0.0"
+display_name: Transportation & Logistics
+icon: package
+color: "#0369a1"
+default_entity: shipment
+
+domains:
+  - key: shipments
+    label: Shipments
+    entities: [shipment, tracking_event]
+  - key: carriers
+    label: Carriers
+    entities: [carrier, carrier_rate]
+  - key: routes
+    label: Routes
+    entities: [route, route_stop]
+  - key: freight
+    label: Freight & Invoicing
+    entities: [freight_charge, carrier_invoice]
+
+dashboard:
+  kpis:
+    - key: active_shipments
+      label: "Active Shipments"
+      type: count
+      action: logistics-list-shipments
+      filter: { shipment-status: in_transit }
+      severity: info
+      icon: package
+      drill_action: logistics-list-shipments
+      drill_filter: { shipment-status: in_transit }
+    - key: pending_shipments
+      label: "Pending"
+      type: count
+      action: logistics-list-shipments
+      filter: { shipment-status: pending }
+      severity: warning
+      icon: clock
+      drill_action: logistics-list-shipments
+      drill_filter: { shipment-status: pending }
+    - key: carriers
+      label: "Carriers"
+      type: count
+      action: logistics-list-carriers
+      icon: truck
+      drill_action: logistics-list-carriers
+    - key: unpaid_invoices
+      label: "Unpaid Invoices"
+      type: count
+      action: logistics-list-carrier-invoices
+      filter: { status: unpaid }
+      severity: warning
+      icon: file-text
+      drill_action: logistics-list-carrier-invoices
+      drill_filter: { status: unpaid }
+  quick_actions:
+    - action: logistics-add-shipment
+      label: "New Shipment"
+      icon: package
+    - action: logistics-add-carrier
+      label: "New Carrier"
+      icon: truck
+    - action: logistics-add-route
+      label: "New Route"
+      icon: map
+    - action: logistics-shipment-summary-report
+      label: "Shipment Summary"
+      icon: bar-chart
+    - action: logistics-carrier-performance-report
+      label: "Carrier Performance"
+      icon: activity
+
+workflows:
+  - after: logistics-add-carrier
+    suggest:
+      - action: logistics-add-carrier-rate
+        label: "Add rate schedule"
+        pass: { carrier-id: id }
+  - after: logistics-add-shipment
+    suggest:
+      - action: logistics-update-shipment-status
+        label: "Update status"
+        pass: { id: id }
+      - action: logistics-add-tracking-event
+        label: "Add tracking event"
+        pass: { shipment-id: id }
+      - action: logistics-add-freight-charge
+        label: "Add freight charge"
+        pass: { shipment-id: id }
+  - after: logistics-update-shipment-status
+    suggest:
+      - action: logistics-add-proof-of-delivery
+        label: "Record proof of delivery"
+        pass: { id: id }
+  - after: logistics-add-route
+    suggest:
+      - action: logistics-add-route-stop
+        label: "Add route stop"
+        pass: { route-id: id }
+  - after: logistics-add-carrier-invoice
+    suggest:
+      - action: logistics-verify-carrier-invoice
+        label: "Verify invoice"
+        pass: { id: id }

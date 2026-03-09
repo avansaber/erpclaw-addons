@@ -1,0 +1,66 @@
+ocui_version: "1.0"
+skill: erpclaw-esign
+skill_version: "1.0.0"
+display_name: Electronic Signatures
+icon: pen-tool
+color: "#0d9488"
+default_entity: signature_request
+
+domains:
+  - key: requests
+    label: Signature Requests
+    entities: [signature_request, signature_event]
+
+dashboard:
+  kpis:
+    - key: pending_signatures
+      label: "Pending Signatures"
+      type: count
+      action: esign-list-signature-requests
+      filter: { request-status: sent }
+      severity: warning
+      icon: pen-tool
+      drill_action: esign-list-signature-requests
+      drill_filter: { request-status: sent }
+    - key: completed
+      label: "Completed"
+      type: count
+      action: esign-list-signature-requests
+      filter: { request-status: completed }
+      severity: success
+      icon: check-circle
+      drill_action: esign-list-signature-requests
+      drill_filter: { request-status: completed }
+    - key: draft_requests
+      label: "Drafts"
+      type: count
+      action: esign-list-signature-requests
+      filter: { request-status: draft }
+      severity: info
+      icon: file-edit
+      drill_action: esign-list-signature-requests
+      drill_filter: { request-status: draft }
+  quick_actions:
+    - action: esign-add-signature-request
+      label: "New Signature Request"
+      icon: pen-tool
+    - action: esign-signature-summary-report
+      label: "Signature Summary"
+      icon: bar-chart
+
+workflows:
+  - after: esign-add-signature-request
+    suggest:
+      - action: esign-send-signature-request
+        label: "Send for signing"
+        pass: { request-id: id }
+  - after: esign-send-signature-request
+    suggest:
+      - action: esign-add-reminder
+        label: "Send reminder"
+        pass: { request-id: id }
+  - after: esign-sign-document
+    suggest:
+      - action: esign-get-signature-audit-trail
+        label: "View audit trail"
+        pass: { request-id: request_id }

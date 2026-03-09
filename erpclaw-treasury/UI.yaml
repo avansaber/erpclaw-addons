@@ -1,0 +1,106 @@
+ocui_version: "1.0"
+skill: erpclaw-treasury
+skill_version: "1.0.0"
+display_name: Treasury Management
+icon: vault
+color: "#065f46"
+default_entity: bank_account_extended
+
+domains:
+  - key: bank_accounts
+    label: Bank Accounts
+    entities: [bank_account_extended]
+  - key: cash
+    label: Cash Positions & Forecasts
+    entities: [cash_position, cash_forecast]
+  - key: investments
+    label: Investments
+    entities: [investment, investment_transaction]
+  - key: intercompany
+    label: Inter-Company Transfers
+    entities: [inter_company_transfer]
+
+dashboard:
+  kpis:
+    - key: bank_accounts
+      label: "Bank Accounts"
+      type: count
+      action: treasury-list-bank-accounts
+      icon: landmark
+      drill_action: treasury-list-bank-accounts
+    - key: active_accounts
+      label: "Active Accounts"
+      type: count
+      action: treasury-list-bank-accounts
+      filter: { is-active: 1 }
+      severity: success
+      icon: check-circle
+      drill_action: treasury-list-bank-accounts
+      drill_filter: { is-active: 1 }
+    - key: active_investments
+      label: "Investments"
+      type: count
+      action: treasury-list-investments
+      filter: { investment-status: active }
+      severity: info
+      icon: trending-up
+      drill_action: treasury-list-investments
+      drill_filter: { investment-status: active }
+    - key: pending_transfers
+      label: "Pending Transfers"
+      type: count
+      action: treasury-list-inter-company-transfers
+      filter: { transfer-status: draft }
+      severity: warning
+      icon: arrow-right-left
+      drill_action: treasury-list-inter-company-transfers
+      drill_filter: { transfer-status: draft }
+  quick_actions:
+    - action: treasury-add-bank-account
+      label: "New Bank Account"
+      icon: landmark
+    - action: treasury-add-cash-position
+      label: "Record Cash Position"
+      icon: dollar-sign
+    - action: treasury-add-cash-forecast
+      label: "New Forecast"
+      icon: trending-up
+    - action: treasury-add-investment
+      label: "New Investment"
+      icon: bar-chart-2
+    - action: treasury-add-inter-company-transfer
+      label: "New Transfer"
+      icon: arrow-right-left
+    - action: treasury-cash-dashboard
+      label: "Cash Dashboard"
+      icon: layout-dashboard
+
+workflows:
+  - after: treasury-add-bank-account
+    suggest:
+      - action: treasury-record-bank-balance
+        label: "Record balance"
+        pass: { account-id: id }
+  - after: treasury-add-cash-forecast
+    suggest:
+      - action: treasury-generate-cash-forecast
+        label: "Auto-generate forecast"
+  - after: treasury-add-investment
+    suggest:
+      - action: treasury-add-investment-transaction
+        label: "Record transaction"
+        pass: { investment-id: id }
+  - after: treasury-add-inter-company-transfer
+    suggest:
+      - action: treasury-approve-transfer
+        label: "Approve transfer"
+        pass: { transfer-id: id }
+  - after: treasury-approve-transfer
+    suggest:
+      - action: treasury-complete-transfer
+        label: "Complete transfer"
+        pass: { transfer-id: id }
+  - after: treasury-add-investment-transaction
+    suggest:
+      - action: treasury-investment-portfolio-report
+        label: "View portfolio"

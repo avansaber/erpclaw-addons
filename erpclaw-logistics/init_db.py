@@ -16,7 +16,7 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 DISPLAY_NAME = "ERPClaw Logistics"
 
 REQUIRED_FOUNDATION = [
-    "company", "naming_series", "audit_log",
+    "company", "naming_series", "audit_log", "supplier",
 ]
 
 
@@ -50,6 +50,7 @@ def create_logistics_tables(db_path=None):
             naming_series   TEXT,
             name            TEXT NOT NULL,
             carrier_code    TEXT,
+            supplier_id     TEXT REFERENCES supplier(id),
             contact_name    TEXT,
             contact_email   TEXT,
             contact_phone   TEXT,
@@ -71,7 +72,8 @@ def create_logistics_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_company ON logistics_carrier(company_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_status ON logistics_carrier(carrier_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_type ON logistics_carrier(carrier_type)")
-    indexes_created += 3
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_supplier ON logistics_carrier(supplier_id)")
+    indexes_created += 4
 
     # ==================================================================
     # 2. logistics_carrier_rate
@@ -247,6 +249,7 @@ def create_logistics_tables(db_path=None):
             total_amount    TEXT NOT NULL DEFAULT '0',
             invoice_status  TEXT NOT NULL DEFAULT 'pending'
                             CHECK(invoice_status IN ('pending','verified','paid','disputed')),
+            purchase_invoice_id TEXT,
             shipment_count  INTEGER NOT NULL DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),

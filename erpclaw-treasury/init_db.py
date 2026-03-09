@@ -1,7 +1,8 @@
 """ERPClaw Treasury -- schema initialization.
 
-Creates 6 tables for bank accounts, cash management, investments,
-and inter-company transfers in the shared ERPClaw database.
+Creates 7 tables for bank accounts, cash management, investments,
+inter-company transfers, and cash flow forecasting in the shared ERPClaw database.
+Includes cash_flow_forecast (moved from core init_schema.py).
 Requires company table to exist (erpclaw-setup).
 """
 import os
@@ -186,6 +187,32 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ict_to ON inter_company_transfer(to_company_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ict_status ON inter_company_transfer(status)")
     indexes_created += 4
+
+    # -------------------------------------------------------------------
+    # 7. cash_flow_forecast -- AI-generated cash flow projections
+    #    (moved from core erpclaw-ai-engine tables in init_schema.py)
+    # -------------------------------------------------------------------
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cash_flow_forecast (
+            id              TEXT PRIMARY KEY,
+            forecast_date   TEXT NOT NULL,
+            generated_at    TEXT DEFAULT (datetime('now')),
+            horizon_days    INTEGER NOT NULL DEFAULT 30,
+            starting_balance TEXT NOT NULL DEFAULT '0',
+            projected_inflows TEXT,
+            projected_outflows TEXT,
+            projected_balance TEXT NOT NULL DEFAULT '0',
+            confidence_interval TEXT,
+            assumptions     TEXT,
+            scenario        TEXT NOT NULL DEFAULT 'expected'
+                            CHECK(scenario IN ('pessimistic','expected','optimistic')),
+            expires_at      TEXT
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_forecast_date ON cash_flow_forecast(forecast_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_forecast_scenario ON cash_flow_forecast(scenario)")
+    indexes_created += 2
 
     conn.commit()
     conn.close()

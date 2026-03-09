@@ -1,0 +1,115 @@
+ocui_version: "1.0"
+skill: erpclaw-planning
+skill_version: "1.0.0"
+display_name: Financial Planning
+icon: target
+color: "#4338ca"
+default_entity: scenario
+
+domains:
+  - key: budgets
+    label: Budgets
+    entities: [scenario]
+  - key: scenarios
+    label: Scenarios
+    entities: [scenario, scenario_line]
+  - key: forecasts
+    label: Forecasts
+    entities: [forecast, forecast_line]
+
+dashboard:
+  kpis:
+    - key: budget_versions
+      label: "Budget Versions"
+      type: count
+      action: planning-list-budget-versions
+      icon: file-text
+      drill_action: planning-list-budget-versions
+    - key: approved_budgets
+      label: "Approved"
+      type: count
+      action: planning-list-budget-versions
+      filter: { status: approved }
+      severity: success
+      icon: check-circle
+      drill_action: planning-list-budget-versions
+      drill_filter: { status: approved }
+    - key: scenarios
+      label: "Scenarios"
+      type: count
+      action: planning-list-scenarios
+      icon: git-branch
+      drill_action: planning-list-scenarios
+    - key: forecasts
+      label: "Forecasts"
+      type: count
+      action: planning-list-forecasts
+      icon: trending-up
+      drill_action: planning-list-forecasts
+  quick_actions:
+    - action: planning-add-budget-version
+      label: "New Budget"
+      icon: file-plus
+    - action: planning-add-scenario
+      label: "New Scenario"
+      icon: git-branch
+    - action: planning-add-forecast
+      label: "New Forecast"
+      icon: trending-up
+    - action: planning-budget-vs-actual
+      label: "Budget vs Actual"
+      icon: bar-chart
+    - action: planning-variance-dashboard
+      label: "Variance Dashboard"
+      icon: activity
+
+workflows:
+  - after: planning-add-budget-version
+    suggest:
+      - action: planning-add-scenario-line
+        label: "Add budget lines"
+        pass: { scenario-id: id }
+      - action: planning-approve-budget
+        label: "Approve budget"
+        pass: { budget-id: id }
+  - after: planning-approve-budget
+    suggest:
+      - action: planning-lock-budget
+        label: "Lock budget"
+        pass: { budget-id: id }
+      - action: planning-budget-vs-actual
+        label: "View budget vs actual"
+        pass: { budget-id: id }
+  - after: planning-add-scenario
+    suggest:
+      - action: planning-add-scenario-line
+        label: "Add scenario lines"
+        pass: { scenario-id: id }
+      - action: planning-clone-scenario
+        label: "Clone scenario"
+        pass: { scenario-id: id }
+  - after: planning-add-scenario-line
+    suggest:
+      - action: planning-scenario-summary
+        label: "View summary"
+        pass: { scenario-id: scenario_id }
+  - after: planning-approve-scenario
+    suggest:
+      - action: planning-compare-scenarios
+        label: "Compare scenarios"
+        pass: { scenario-id-1: id }
+  - after: planning-add-forecast
+    suggest:
+      - action: planning-add-forecast-line
+        label: "Add forecast lines"
+        pass: { forecast-id: id }
+  - after: planning-add-forecast-line
+    suggest:
+      - action: planning-calculate-variance
+        label: "Calculate variance"
+        pass: { forecast-id: forecast_id }
+  - after: planning-lock-forecast
+    suggest:
+      - action: planning-forecast-accuracy-report
+        label: "Accuracy report"
+        pass: { forecast-id: id }

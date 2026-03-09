@@ -1,0 +1,131 @@
+ocui_version: "1.0"
+skill: erpclaw-maintenance
+skill_version: "1.0.0"
+display_name: Equipment & Maintenance
+icon: wrench
+color: "#ea580c"
+default_entity: equipment
+
+domains:
+  - key: equipment
+    label: Equipment
+    entities: [equipment, equipment_reading]
+  - key: plans
+    label: Maintenance Plans
+    entities: [maintenance_plan, maintenance_plan_item]
+  - key: work_orders
+    label: Work Orders
+    entities: [maintenance_work_order, maintenance_work_order_item]
+  - key: checklists
+    label: Checklists
+    entities: [maintenance_checklist, maintenance_checklist_item]
+  - key: downtime
+    label: Downtime Records
+    entities: [downtime_record]
+
+dashboard:
+  kpis:
+    - key: total_equipment
+      label: "Equipment"
+      type: count
+      action: maintenance-list-equipment
+      icon: cpu
+      drill_action: maintenance-list-equipment
+    - key: operational
+      label: "Operational"
+      type: count
+      action: maintenance-list-equipment
+      filter: { equipment-status: operational }
+      severity: success
+      icon: check-circle
+      drill_action: maintenance-list-equipment
+      drill_filter: { equipment-status: operational }
+    - key: open_work_orders
+      label: "Open Work Orders"
+      type: count
+      action: maintenance-list-maintenance-work-orders
+      filter: { wo-status: scheduled }
+      severity: warning
+      icon: clipboard-list
+      drill_action: maintenance-list-maintenance-work-orders
+      drill_filter: { wo-status: scheduled }
+    - key: in_progress_wo
+      label: "In Progress"
+      type: count
+      action: maintenance-list-maintenance-work-orders
+      filter: { wo-status: in_progress }
+      severity: info
+      icon: loader
+      drill_action: maintenance-list-maintenance-work-orders
+      drill_filter: { wo-status: in_progress }
+    - key: active_plans
+      label: "Active Plans"
+      type: count
+      action: maintenance-list-maintenance-plans
+      filter: { is-active: 1 }
+      severity: success
+      icon: calendar
+      drill_action: maintenance-list-maintenance-plans
+      drill_filter: { is-active: 1 }
+  quick_actions:
+    - action: maintenance-add-equipment
+      label: "New Equipment"
+      icon: cpu
+    - action: maintenance-add-maintenance-plan
+      label: "New Plan"
+      icon: calendar
+    - action: maintenance-add-maintenance-work-order
+      label: "New Work Order"
+      icon: clipboard-list
+    - action: maintenance-generate-preventive-work-orders
+      label: "Generate PM Orders"
+      icon: zap
+    - action: maintenance-equipment-status-report
+      label: "Status Report"
+      icon: bar-chart
+    - action: maintenance-cost-report
+      label: "Cost Report"
+      icon: dollar-sign
+
+workflows:
+  - after: maintenance-add-equipment
+    suggest:
+      - action: maintenance-add-maintenance-plan
+        label: "Create maintenance plan"
+        pass: { equipment-id: id }
+      - action: maintenance-add-equipment-child
+        label: "Add sub-equipment"
+        pass: { parent-equipment-id: id }
+  - after: maintenance-add-maintenance-plan
+    suggest:
+      - action: maintenance-add-plan-item
+        label: "Add spare parts"
+        pass: { plan-id: id }
+      - action: maintenance-generate-preventive-work-orders
+        label: "Generate work orders"
+  - after: maintenance-add-maintenance-work-order
+    suggest:
+      - action: maintenance-add-checklist
+        label: "Add checklist"
+        pass: { work-order-id: id }
+      - action: maintenance-add-wo-item
+        label: "Add spare parts"
+        pass: { work-order-id: id }
+      - action: maintenance-start-maintenance-work-order
+        label: "Start work"
+        pass: { work-order-id: id }
+  - after: maintenance-start-maintenance-work-order
+    suggest:
+      - action: maintenance-complete-maintenance-work-order
+        label: "Complete work order"
+        pass: { work-order-id: id }
+  - after: maintenance-complete-maintenance-work-order
+    suggest:
+      - action: maintenance-add-downtime-record
+        label: "Record downtime"
+        pass: { equipment-id: equipment_id, work-order-id: id }
+  - after: maintenance-add-checklist
+    suggest:
+      - action: maintenance-add-checklist-item
+        label: "Add checklist item"
+        pass: { checklist-id: id }
