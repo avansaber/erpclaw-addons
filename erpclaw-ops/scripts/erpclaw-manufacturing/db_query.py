@@ -2080,32 +2080,57 @@ def complete_work_order(conn, args):
             sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
             err(f"GL posting failed: {e}")
 
-    # Update work order
-    wo_complete_q = (Q.update(wo_t)
-                     .set(wo_t.produced_qty, P())
-                     .set(wo_t.status, ValueWrapper("completed"))
-                     .set(wo_t.actual_end_date, P())
-                     .set(wo_t.updated_at, LiteralValue("datetime('now')"))
-                     .where(wo_t.id == P()))
-    conn.execute(
-        wo_complete_q.get_sql(),
-        (str(round_currency(produced_qty)),
-         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-         args.work_order_id),
-    )
+    # Update work order — support partial completion
+    wo_qty = to_decimal(wo_dict["qty"])
+    prev_produced = to_decimal(wo_dict.get("produced_qty") or "0")
+    total_produced = prev_produced + produced_qty
+    new_status = "completed" if total_produced >= wo_qty else "in_process"
 
-    # Mark all work order items as fully consumed
-    # raw SQL — SET col = other_col not well supported by PyPika
-    conn.execute(
-        """UPDATE work_order_item
-           SET consumed_qty = transferred_qty
-           WHERE work_order_id = ?""",
-        (args.work_order_id,),
-    )
+    if new_status == "completed":
+        wo_complete_q = (Q.update(wo_t)
+                         .set(wo_t.produced_qty, P())
+                         .set(wo_t.status, ValueWrapper("completed"))
+                         .set(wo_t.actual_end_date, P())
+                         .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                         .where(wo_t.id == P()))
+        conn.execute(
+            wo_complete_q.get_sql(),
+            (str(round_currency(total_produced)),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             args.work_order_id),
+        )
+    else:
+        wo_partial_q = (Q.update(wo_t)
+                        .set(wo_t.produced_qty, P())
+                        .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                        .where(wo_t.id == P()))
+        conn.execute(
+            wo_partial_q.get_sql(),
+            (str(round_currency(total_produced)), args.work_order_id),
+        )
+
+    # Consume raw materials — scale proportionally for partial completion
+    if total_produced >= wo_qty or wo_qty <= 0:
+        # Full completion: consume all transferred material
+        conn.execute(
+            """UPDATE work_order_item
+               SET consumed_qty = transferred_qty
+               WHERE work_order_id = ?""",
+            (args.work_order_id,),
+        )
+    else:
+        # Partial completion: consume proportionally
+        ratio = float(total_produced / wo_qty)
+        conn.execute(
+            """UPDATE work_order_item
+               SET consumed_qty = CAST(ROUND(CAST(transferred_qty AS REAL) * ?, 2) AS TEXT)
+               WHERE work_order_id = ?""",
+            (ratio, args.work_order_id),
+        )
 
     audit(conn, "erpclaw-manufacturing", "complete-work-order", "work_order", args.work_order_id,
            new_values={
-               "status": "completed",
+               "status": new_status,
                "produced_qty": str(round_currency(produced_qty)),
                "rm_cost": str(rm_cost),
                "operating_cost": str(operating_cost),
@@ -2116,8 +2141,8 @@ def complete_work_order(conn, args):
 
     ok({
         "work_order_id": args.work_order_id,
-        "status": "completed",
-        "produced_qty": str(round_currency(produced_qty)),
+        "status": new_status,
+        "produced_qty": str(round_currency(total_produced)),
         "rm_cost": str(rm_cost),
         "operating_cost": str(operating_cost),
         "production_cost": str(total_production_cost),
