@@ -4,7 +4,7 @@ version: 1.0.0
 description: Configurable notification triggers -- low stock alerts, overdue invoice alerts, expiring contract alerts, custom rules. Channels: email, webhook, Telegram, SMS. 14 actions across alert rules, notification channels, and alert logs.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-alerts
+source: https://github.com/avansaber/erpclaw-addons
 tier: 5
 category: erp
 requires: [erpclaw-setup]

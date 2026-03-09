@@ -4,7 +4,7 @@ version: 1.0.0
 description: Transportation & Logistics Management -- shipments, carriers, routes, freight charges, and carrier invoicing. 35 actions for end-to-end logistics operations. Built on ERPClaw foundation.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: erp
 requires: [erpclaw-setup]

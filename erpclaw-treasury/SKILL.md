@@ -4,7 +4,7 @@ version: 1.0.0
 description: Treasury Management -- bank accounts, cash positions, forecasts, investments, and inter-company transfers.
 author: avansaber
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-treasury
+source: https://github.com/avansaber/erpclaw-addons
 tier: 3
 category: finance
 requires: [erpclaw-setup]

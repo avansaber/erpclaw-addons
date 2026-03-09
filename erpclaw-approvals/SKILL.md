@@ -4,7 +4,7 @@ version: 1.0.0
 description: Approval Workflows -- multi-step approval rules, sequential/parallel routing, request tracking. 12 actions for document approval automation. Built on ERPClaw foundation.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: erp
 requires: [erpclaw-setup]

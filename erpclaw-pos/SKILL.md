@@ -3,6 +3,7 @@ name: erpclaw-pos
 version: "1.0.0"
 description: "Point of Sale — register sessions, transactions, payments, receipts"
 author: "avansaber"
+source: https://github.com/avansaber/erpclaw-addons
 scripts:
   - scripts/db_query.py
 actions:

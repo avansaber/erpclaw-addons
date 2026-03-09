@@ -9,7 +9,7 @@ description: >
   across 6 domains with immutable audit trail.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw
+source: https://github.com/avansaber/erpclaw-addons
 tier: 1
 category: erp
 requires: [erpclaw]

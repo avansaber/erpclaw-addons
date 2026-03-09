@@ -4,7 +4,7 @@ version: 1.0.0
 description: Equipment & Maintenance Management -- preventive maintenance, work orders, checklists, downtime tracking.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-maintenance
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: erp
 requires: [erpclaw-setup]

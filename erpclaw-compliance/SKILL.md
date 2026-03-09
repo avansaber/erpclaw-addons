@@ -4,7 +4,7 @@ version: 1.0.0
 description: Compliance, audit, risk, and policy management for ERPClaw. 38 actions across 4 domains -- audit plans and findings, risk register with heat-map scoring, internal controls and compliance calendar, policy lifecycle with employee acknowledgment tracking.
 author: avansaber
 homepage: https://github.com/avansaber/erpclaw-compliance
-source: https://github.com/avansaber/erpclaw-compliance
+source: https://github.com/avansaber/erpclaw-addons
 tier: 5
 category: compliance
 requires: [erpclaw-setup]

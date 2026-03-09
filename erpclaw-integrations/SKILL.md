@@ -4,7 +4,7 @@ version: 2.0.0
 description: Integration Connectors -- manage connector configs, field mappings, sync logs, webhook registrations, and platform-specific connectors for booking, delivery, real estate, financial, and productivity platforms. 80 actions across 9 domains. Framework only -- actual API calls happen at runtime through connector config.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-integrations
+source: https://github.com/avansaber/erpclaw-addons
 tier: 5
 category: integrations
 requires: [erpclaw-setup]

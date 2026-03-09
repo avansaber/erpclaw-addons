@@ -3,6 +3,7 @@ name: erpclaw-loans
 version: 1.0.0
 description: Loan application, disbursement, repayment scheduling, and portfolio management
 author: ERPClaw
+source: https://github.com/avansaber/erpclaw-addons
 scripts:
   - scripts/db_query.py
 dependencies:

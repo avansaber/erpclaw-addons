@@ -4,7 +4,7 @@ version: 1.0.0
 description: Financial planning module for ERPClaw -- budgets, scenario modeling, and forecasting with variance analysis and budget-vs-actual reporting.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-planning
+source: https://github.com/avansaber/erpclaw-addons
 tier: 5
 category: erp
 requires: [erpclaw-setup, erpclaw-gl]

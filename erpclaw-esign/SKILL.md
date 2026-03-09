@@ -4,7 +4,7 @@ version: 1.0.0
 description: Electronic Signatures -- signature requests, signing workflows, audit trails, legally binding e-signatures.
 author: avansaber
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-esign
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: esign
 requires: [erpclaw-setup]

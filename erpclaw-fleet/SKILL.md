@@ -4,7 +4,7 @@ version: 1.0.0
 description: Fleet Management -- company vehicles, driver assignments, fuel tracking, maintenance scheduling. 15 actions across 4 tables. Built on ERPClaw foundation.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: fleet
 requires: [erpclaw-setup]

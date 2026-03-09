@@ -4,7 +4,7 @@ version: 1.0.0
 description: Generic self-service permission layer for ERPClaw. 25 actions across permission profiles, portal configuration, session management, and activity logging. Enables scoped access for employees, clients, tenants, patients, and vendors across all verticals.
 author: AvanSaber / Nikhil Jathar
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw
+source: https://github.com/avansaber/erpclaw-addons
 tier: 2
 category: erp
 requires: [erpclaw-setup]

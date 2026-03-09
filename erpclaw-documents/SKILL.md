@@ -4,7 +4,7 @@ version: 1.0.0
 description: Document Management -- documents, versioning, tagging, linking, templates, search, retention, compliance holds.
 author: avansaber
 homepage: https://www.erpclaw.ai
-source: https://github.com/avansaber/erpclaw-documents
+source: https://github.com/avansaber/erpclaw-addons
 tier: 4
 category: documents
 requires: [erpclaw-setup]
