@@ -109,7 +109,8 @@ def create_loans_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','partially_paid','paid','overdue','waived')),
             payment_date    TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_lrs_loan ON loan_repayment_schedule(loan_id);
