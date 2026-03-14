@@ -19,6 +19,7 @@ try:
     from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.dependencies import check_required_tables
+    from erpclaw_lib.args import SafeArgumentParser
 except ImportError:
     import json as _json
     print(_json.dumps({
@@ -105,7 +106,7 @@ ACTIONS["status"] = status_action
 
 
 def main():
-    parser = argparse.ArgumentParser(description="erpclaw-integrations")
+    parser = SafeArgumentParser(description="erpclaw-integrations")
     parser.add_argument("--action", required=True, choices=sorted(ACTIONS.keys()))
     parser.add_argument("--db-path", default=None)
 

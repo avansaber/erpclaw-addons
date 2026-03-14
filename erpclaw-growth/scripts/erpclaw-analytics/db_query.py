@@ -30,6 +30,7 @@ from erpclaw_lib.validation import check_input_lengths
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs
 from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
+from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 
 
 # ---------------------------------------------------------------------------
@@ -2399,7 +2400,7 @@ ACTIONS = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ERPClaw Analytics")
+    parser = SafeArgumentParser(description="ERPClaw Analytics")
     parser.add_argument("--action", required=True, help="Action to execute")
     parser.add_argument("--db-path", default=None, help="Path to SQLite database")
     # Common
@@ -2426,7 +2427,8 @@ def main():
     # HR
     parser.add_argument("--department-id", dest="department_id")
 
-    args, _unknown = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
     action_fn = ACTIONS.get(args.action)

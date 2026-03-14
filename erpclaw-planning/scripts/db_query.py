@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.response import ok, err
+from erpclaw_lib.args import SafeArgumentParser
 
 from scenarios import ACTIONS as SCENARIO_ACTIONS
 from forecasts import ACTIONS as FORECAST_ACTIONS
@@ -29,7 +30,7 @@ ACTIONS.update(BUDGET_ACTIONS)
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="ERPClaw Planning -- budgets, scenarios, and forecasts")
+    parser = SafeArgumentParser(description="ERPClaw Planning -- budgets, scenarios, and forecasts")
     parser.add_argument("--action", required=True, help="Action to execute")
 
     # Common flags

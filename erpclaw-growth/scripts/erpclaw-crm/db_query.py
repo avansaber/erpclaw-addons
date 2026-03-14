@@ -681,6 +681,7 @@ def convert_opportunity_to_quotation(conn, args):
 
     # Pre-flight: check erpclaw base package (contains selling domain) is installed
     from erpclaw_lib.dependencies import check_subprocess_target, resolve_skill_script
+    from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
     dep_err = check_subprocess_target(conn, "erpclaw", "quotation")
     if dep_err:
         err(dep_err["error"])
@@ -1209,7 +1210,7 @@ ACTIONS = {
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="ERPClaw CRM Skill")
+    parser = SafeArgumentParser(description="ERPClaw CRM Skill")
     parser.add_argument("--action", required=True, choices=sorted(ACTIONS.keys()))
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--company-id")
@@ -1269,7 +1270,8 @@ def main():
     parser.add_argument("--offset", default="0")
     parser.add_argument("--search")
 
-    args, _unknown = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
     db_path = args.db_path or DEFAULT_DB_PATH

@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.response import ok, err
+from erpclaw_lib.args import SafeArgumentParser
 
 from equipment import ACTIONS as EQUIPMENT_ACTIONS
 from plans import ACTIONS as PLANS_ACTIONS
@@ -35,7 +36,7 @@ ACTIONS.update(REPORTS_ACTIONS)
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="ERPClaw Maintenance — equipment & maintenance management")
+    parser = SafeArgumentParser(description="ERPClaw Maintenance — equipment & maintenance management")
     parser.add_argument("--action", required=True, help="Action to execute")
 
     # Common flags

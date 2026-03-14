@@ -20,6 +20,7 @@ try:
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.naming import register_prefix
+    from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
     import json as _json
     print(_json.dumps({
@@ -51,7 +52,7 @@ ACTIONS.update(TPL_ACTIONS)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="erpclaw-documents")
+    parser = SafeArgumentParser(description="erpclaw-documents")
     parser.add_argument("--action", required=True, choices=sorted(ACTIONS.keys()))
     parser.add_argument("--db-path", default=None)
 
@@ -97,7 +98,8 @@ def main():
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--offset", type=int, default=0)
 
-    args, _unknown = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
     db_path = args.db_path or DEFAULT_DB_PATH
