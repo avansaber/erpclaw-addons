@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-documents"
 
@@ -31,9 +32,7 @@ def add_document(conn, args):
     if not getattr(args, "title", None):
         err("--title is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     doc_type = getattr(args, "document_type", None) or "general"
@@ -74,11 +73,8 @@ def add_document(conn, args):
 
     # Create initial version record
     version_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO document_version
-           (id, document_id, version_number, file_name, file_path, content,
-            change_notes, created_by)
-           VALUES (?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("document_version", {"id": P(), "document_id": P(), "version_number": P(), "file_name": P(), "file_path": P(), "content": P(), "change_notes": P(), "created_by": P()})
+    conn.execute(sql,
         (
             version_id, doc_id, "1",
             getattr(args, "file_name", None),
@@ -94,8 +90,8 @@ def add_document(conn, args):
     if tags_str:
         for tag in [t.strip() for t in tags_str.split(",") if t.strip()]:
             tag_id = str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO document_tag (id, document_id, tag) VALUES (?,?,?)",
+            sql, _ = insert_row("document_tag", {"id": P(), "document_id": P(), "tag": P()})
+            conn.execute(sql,
                 (tag_id, doc_id, tag),
             )
 
@@ -112,9 +108,7 @@ def update_document(conn, args):
     doc_id = getattr(args, "document_id", None)
     if not doc_id:
         err("--document-id is required")
-    row = conn.execute(
-        "SELECT * FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Table("document").star).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
 
@@ -170,9 +164,7 @@ def get_document(conn, args):
     doc_id = getattr(args, "document_id", None)
     if not doc_id:
         err("--document-id is required")
-    row = conn.execute(
-        "SELECT * FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Table("document").star).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
 
@@ -187,9 +179,7 @@ def get_document(conn, args):
     data["version_count"] = ver_count["cnt"] if ver_count else 0
 
     # Get tags
-    tag_rows = conn.execute(
-        "SELECT tag FROM document_tag WHERE document_id = ?", (doc_id,)
-    ).fetchall()
+    tag_rows = conn.execute(Q.from_(Table("document_tag")).select(Field('tag')).where(Field("document_id") == P()).get_sql(), (doc_id,)).fetchall()
     data["tag_list"] = [r["tag"] for r in tag_rows]
 
     # Get links
@@ -258,9 +248,7 @@ def add_document_version(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Table("document").star).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
 
@@ -274,11 +262,8 @@ def add_document_version(conn, args):
     version_number = getattr(args, "version_number", None) or next_ver
 
     version_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO document_version
-           (id, document_id, version_number, file_name, file_path, content,
-            change_notes, created_by)
-           VALUES (?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("document_version", {"id": P(), "document_id": P(), "version_number": P(), "file_name": P(), "file_path": P(), "content": P(), "change_notes": P(), "created_by": P()})
+    conn.execute(sql,
         (
             version_id, doc_id, version_number,
             getattr(args, "file_name", None),
@@ -309,15 +294,10 @@ def list_document_versions(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone():
         err(f"Document {doc_id} not found")
 
-    rows = conn.execute(
-        "SELECT * FROM document_version WHERE document_id = ? ORDER BY created_at DESC",
-        (doc_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("document_version")).select(Table("document_version").star).where(Field("document_id") == P()).orderby(Field("created_at"), order=Order.desc).get_sql(), (doc_id,)).fetchall()
 
     versions = [row_to_dict(r) for r in rows]
     ok({"versions": versions, "count": len(versions), "document_id": doc_id})
@@ -334,9 +314,7 @@ def add_document_tag(conn, args):
     if not tag:
         err("--tag is required")
 
-    if not conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone():
         err(f"Document {doc_id} not found")
 
     # Check for duplicate tag
@@ -348,8 +326,8 @@ def add_document_tag(conn, args):
         err(f"Tag '{tag}' already exists on document {doc_id}")
 
     tag_id = str(uuid.uuid4())
-    conn.execute(
-        "INSERT INTO document_tag (id, document_id, tag) VALUES (?,?,?)",
+    sql, _ = insert_row("document_tag", {"id": P(), "document_id": P(), "tag": P()})
+    conn.execute(sql,
         (tag_id, doc_id, tag),
     )
     audit(conn, SKILL, "document-add-document-tag", "document_tag", tag_id,
@@ -394,15 +372,10 @@ def list_document_tags(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone():
         err(f"Document {doc_id} not found")
 
-    rows = conn.execute(
-        "SELECT * FROM document_tag WHERE document_id = ? ORDER BY tag",
-        (doc_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("document_tag")).select(Table("document_tag").star).where(Field("document_id") == P()).orderby(Field("tag")).get_sql(), (doc_id,)).fetchall()
 
     tags = [row_to_dict(r) for r in rows]
     ok({"tags": tags, "count": len(tags), "document_id": doc_id})
@@ -422,14 +395,10 @@ def link_document(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone():
         err(f"Document {doc_id} not found")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     link_type = getattr(args, "link_type", None) or "attachment"
@@ -437,11 +406,8 @@ def link_document(conn, args):
         err(f"Invalid link-type: {link_type}")
 
     link_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO document_link
-           (id, document_id, linked_entity_type, linked_entity_id,
-            link_type, notes, company_id)
-           VALUES (?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("document_link", {"id": P(), "document_id": P(), "linked_entity_type": P(), "linked_entity_id": P(), "link_type": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             link_id, doc_id,
             args.linked_entity_type,
@@ -471,13 +437,11 @@ def unlink_document(conn, args):
     if not link_id:
         err("--link-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM document_link WHERE id = ?", (link_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document_link")).select(Table("document_link").star).where(Field("id") == P()).get_sql(), (link_id,)).fetchone()
     if not row:
         err(f"Document link {link_id} not found")
 
-    conn.execute("DELETE FROM document_link WHERE id = ?", (link_id,))
+    conn.execute(Q.from_(Table("document_link")).delete().where(Field("id") == P()).get_sql(), (link_id,))
     audit(conn, SKILL, "document-unlink-document", "document_link", link_id,
           new_values={"removed": True})
     conn.commit()
@@ -492,15 +456,10 @@ def list_document_links(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone():
         err(f"Document {doc_id} not found")
 
-    rows = conn.execute(
-        "SELECT * FROM document_link WHERE document_id = ? ORDER BY created_at DESC",
-        (doc_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("document_link")).select(Table("document_link").star).where(Field("document_id") == P()).orderby(Field("created_at"), order=Order.desc).get_sql(), (doc_id,)).fetchall()
 
     links = [row_to_dict(r) for r in rows]
     ok({"links": links, "count": len(links), "document_id": doc_id})
@@ -540,9 +499,7 @@ def submit_for_review(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    row = conn.execute(
-        "SELECT status FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Field('status')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     if row["status"] != "draft":
@@ -566,9 +523,7 @@ def approve_document(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    row = conn.execute(
-        "SELECT status FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Field('status')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     if row["status"] != "review":
@@ -592,9 +547,7 @@ def archive_document(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    row = conn.execute(
-        "SELECT status FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Field('status')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     if row["status"] == "archived":
@@ -674,9 +627,7 @@ def set_retention(conn, args):
     if not retention_date:
         err("--retention-date is required")
 
-    row = conn.execute(
-        "SELECT id FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Field('id')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
 
@@ -698,9 +649,7 @@ def hold_document(conn, args):
     if not doc_id:
         err("--document-id is required")
 
-    row = conn.execute(
-        "SELECT status FROM document WHERE id = ?", (doc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document")).select(Field('status')).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     if row["status"] in ("archived", "on_hold"):

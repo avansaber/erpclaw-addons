@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -31,9 +32,7 @@ def add_shop_floor_entry(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     entry_type = getattr(args, "entry_type", None) or "production"
@@ -48,12 +47,8 @@ def add_shop_floor_entry(conn, args):
     ns = get_next_name(conn, "shop_floor_entry", company_id=args.company_id)
     start_time = getattr(args, "start_time", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    conn.execute(
-        """INSERT INTO shop_floor_entry
-           (id, equipment_id, work_order_id, operator, entry_type,
-            start_time, machine_status, batch_number, serial_number,
-            notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("shop_floor_entry", {"id": P(), "equipment_id": P(), "work_order_id": P(), "operator": P(), "entry_type": P(), "start_time": P(), "machine_status": P(), "batch_number": P(), "serial_number": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             entry_id,
             getattr(args, "equipment_id", None),
@@ -82,9 +77,7 @@ def update_shop_floor_entry(conn, args):
     entry_id = getattr(args, "entry_id", None)
     if not entry_id:
         err("--entry-id is required")
-    row = conn.execute(
-        "SELECT * FROM shop_floor_entry WHERE id = ?", (entry_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("shop_floor_entry")).select(Table("shop_floor_entry").star).where(Field("id") == P()).get_sql(), (entry_id,)).fetchone()
     if not row:
         err(f"Shop floor entry {entry_id} not found")
 
@@ -152,9 +145,7 @@ def get_shop_floor_entry(conn, args):
     entry_id = getattr(args, "entry_id", None)
     if not entry_id:
         err("--entry-id is required")
-    row = conn.execute(
-        "SELECT * FROM shop_floor_entry WHERE id = ?", (entry_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("shop_floor_entry")).select(Table("shop_floor_entry").star).where(Field("id") == P()).get_sql(), (entry_id,)).fetchone()
     if not row:
         err(f"Shop floor entry {entry_id} not found")
 
@@ -215,9 +206,7 @@ def complete_shop_floor_entry(conn, args):
     if not entry_id:
         err("--entry-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM shop_floor_entry WHERE id = ?", (entry_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("shop_floor_entry")).select(Table("shop_floor_entry").star).where(Field("id") == P()).get_sql(), (entry_id,)).fetchone()
     if not row:
         err(f"Shop floor entry {entry_id} not found")
     if row["end_time"] is not None:

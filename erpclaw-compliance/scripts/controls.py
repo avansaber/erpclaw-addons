@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -36,7 +37,7 @@ VALID_CALENDAR_STATUSES = ("upcoming", "in_progress", "completed", "overdue", "w
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -105,7 +106,7 @@ def update_control_test(conn, args):
     test_id = getattr(args, "control_test_id", None)
     if not test_id:
         err("--control-test-id is required")
-    if not conn.execute("SELECT id FROM control_test WHERE id = ?", (test_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("control_test")).select(Field('id')).where(Field("id") == P()).get_sql(), (test_id,)).fetchone():
         err(f"Control test {test_id} not found")
 
     updates, params, changed = [], [], []
@@ -156,7 +157,7 @@ def get_control_test(conn, args):
     test_id = getattr(args, "control_test_id", None)
     if not test_id:
         err("--control-test-id is required")
-    row = conn.execute("SELECT * FROM control_test WHERE id = ?", (test_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("control_test")).select(Table("control_test").star).where(Field("id") == P()).get_sql(), (test_id,)).fetchone()
     if not row:
         err(f"Control test {test_id} not found")
     ok(row_to_dict(row))
@@ -204,7 +205,7 @@ def execute_control_test(conn, args):
     test_id = getattr(args, "control_test_id", None)
     if not test_id:
         err("--control-test-id is required")
-    if not conn.execute("SELECT id FROM control_test WHERE id = ?", (test_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("control_test")).select(Field('id')).where(Field("id") == P()).get_sql(), (test_id,)).fetchone():
         err(f"Control test {test_id} not found")
 
     test_result = getattr(args, "test_result", None)
@@ -303,7 +304,7 @@ def update_calendar_item(conn, args):
     item_id = getattr(args, "calendar_item_id", None)
     if not item_id:
         err("--calendar-item-id is required")
-    if not conn.execute("SELECT id FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("compliance_calendar")).select(Field('id')).where(Field("id") == P()).get_sql(), (item_id,)).fetchone():
         err(f"Calendar item {item_id} not found")
 
     updates, params, changed = [], [], []
@@ -358,7 +359,7 @@ def get_calendar_item(conn, args):
     item_id = getattr(args, "calendar_item_id", None)
     if not item_id:
         err("--calendar-item-id is required")
-    row = conn.execute("SELECT * FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("compliance_calendar")).select(Table("compliance_calendar").star).where(Field("id") == P()).get_sql(), (item_id,)).fetchone()
     if not row:
         err(f"Calendar item {item_id} not found")
     ok(row_to_dict(row))
@@ -403,7 +404,7 @@ def complete_calendar_item(conn, args):
     item_id = getattr(args, "calendar_item_id", None)
     if not item_id:
         err("--calendar-item-id is required")
-    row = conn.execute("SELECT status FROM compliance_calendar WHERE id = ?", (item_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("compliance_calendar")).select(Field('status')).where(Field("id") == P()).get_sql(), (item_id,)).fetchone()
     if not row:
         err(f"Calendar item {item_id} not found")
     if row[0] == "completed":

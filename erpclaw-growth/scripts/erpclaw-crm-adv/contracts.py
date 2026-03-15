@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("crmadv_contract", "CTR-")
 except ImportError:
@@ -33,7 +34,7 @@ VALID_OBLIGATION_STATUSES = ("pending", "completed", "overdue", "waived")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -85,7 +86,7 @@ def update_contract(conn, args):
     ctr_id = getattr(args, "contract_id", None)
     if not ctr_id:
         err("--contract-id is required")
-    row = conn.execute("SELECT * FROM crmadv_contract WHERE id = ?", (ctr_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_contract")).select(Table("crmadv_contract").star).where(Field("id") == P()).get_sql(), (ctr_id,)).fetchone()
     if not row:
         err(f"Contract {ctr_id} not found")
 
@@ -126,7 +127,7 @@ def get_contract(conn, args):
     ctr_id = getattr(args, "contract_id", None)
     if not ctr_id:
         err("--contract-id is required")
-    row = conn.execute("SELECT * FROM crmadv_contract WHERE id = ?", (ctr_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_contract")).select(Table("crmadv_contract").star).where(Field("id") == P()).get_sql(), (ctr_id,)).fetchone()
     if not row:
         err(f"Contract {ctr_id} not found")
     ok(row_to_dict(row))
@@ -173,7 +174,7 @@ def add_contract_obligation(conn, args):
     contract_id = getattr(args, "contract_id", None)
     if not contract_id:
         err("--contract-id is required")
-    if not conn.execute("SELECT id FROM crmadv_contract WHERE id = ?", (contract_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_contract")).select(Field('id')).where(Field("id") == P()).get_sql(), (contract_id,)).fetchone():
         err(f"Contract {contract_id} not found")
 
     company_id = getattr(args, "company_id", None)
@@ -246,7 +247,7 @@ def renew_contract(conn, args):
     ctr_id = getattr(args, "contract_id", None)
     if not ctr_id:
         err("--contract-id is required")
-    row = conn.execute("SELECT * FROM crmadv_contract WHERE id = ?", (ctr_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_contract")).select(Table("crmadv_contract").star).where(Field("id") == P()).get_sql(), (ctr_id,)).fetchone()
     if not row:
         err(f"Contract {ctr_id} not found")
 
@@ -275,7 +276,7 @@ def terminate_contract(conn, args):
     ctr_id = getattr(args, "contract_id", None)
     if not ctr_id:
         err("--contract-id is required")
-    row = conn.execute("SELECT * FROM crmadv_contract WHERE id = ?", (ctr_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_contract")).select(Table("crmadv_contract").star).where(Field("id") == P()).get_sql(), (ctr_id,)).fetchone()
     if not row:
         err(f"Contract {ctr_id} not found")
 

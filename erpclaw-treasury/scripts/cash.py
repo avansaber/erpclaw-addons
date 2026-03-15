@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 register_prefix("bank_account_extended", "BACC-")
 register_prefix("cash_forecast", "CFST-")
@@ -36,9 +37,7 @@ def add_bank_account(conn, args):
     if not getattr(args, "account_name", None):
         err("--account-name is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     account_type = getattr(args, "account_type", None) or "checking"
@@ -86,9 +85,7 @@ def update_bank_account(conn, args):
     acct_id = getattr(args, "account_id", None)
     if not acct_id:
         err("--account-id is required")
-    row = conn.execute(
-        "SELECT * FROM bank_account_extended WHERE id = ?", (acct_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("bank_account_extended")).select(Table("bank_account_extended").star).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone()
     if not row:
         err(f"Bank account {acct_id} not found")
 
@@ -147,9 +144,7 @@ def get_bank_account(conn, args):
     acct_id = getattr(args, "account_id", None)
     if not acct_id:
         err("--account-id is required")
-    row = conn.execute(
-        "SELECT * FROM bank_account_extended WHERE id = ?", (acct_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("bank_account_extended")).select(Table("bank_account_extended").star).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone()
     if not row:
         err(f"Bank account {acct_id} not found")
     data = row_to_dict(row)
@@ -212,9 +207,7 @@ def record_bank_balance(conn, args):
     except Exception:
         err(f"Invalid current-balance: {balance}")
 
-    row = conn.execute(
-        "SELECT * FROM bank_account_extended WHERE id = ?", (acct_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("bank_account_extended")).select(Table("bank_account_extended").star).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone()
     if not row:
         err(f"Bank account {acct_id} not found")
 
@@ -257,9 +250,7 @@ def record_bank_balance(conn, args):
 def add_cash_position(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     total_cash = getattr(args, "total_cash", None) or "0"
@@ -280,11 +271,8 @@ def add_cash_position(conn, args):
 
     position_date = getattr(args, "position_date", None) or date.today().isoformat()
 
-    conn.execute(
-        """INSERT INTO cash_position
-           (id, naming_series, position_date, total_cash, total_receivables,
-            total_payables, net_position, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("cash_position", {"id": P(), "naming_series": P(), "position_date": P(), "total_cash": P(), "total_receivables": P(), "total_payables": P(), "net_position": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             pos_id, ns, position_date, total_cash, total_recv, total_pay,
             str(net), getattr(args, "notes", None), args.company_id,
@@ -327,9 +315,7 @@ def get_cash_position(conn, args):
     pos_id = getattr(args, "position_id", None)
     if not pos_id:
         err("--position-id is required")
-    row = conn.execute(
-        "SELECT * FROM cash_position WHERE id = ?", (pos_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("cash_position")).select(Table("cash_position").star).where(Field("id") == P()).get_sql(), (pos_id,)).fetchone()
     if not row:
         err(f"Cash position {pos_id} not found")
     ok(row_to_dict(row))
@@ -348,9 +334,7 @@ def add_cash_forecast(conn, args):
     if not getattr(args, "period_end", None):
         err("--period-end is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     forecast_type = getattr(args, "forecast_type", None) or "short_term"
@@ -396,9 +380,7 @@ def update_cash_forecast(conn, args):
     fc_id = getattr(args, "forecast_id", None)
     if not fc_id:
         err("--forecast-id is required")
-    row = conn.execute(
-        "SELECT * FROM cash_forecast WHERE id = ?", (fc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("cash_forecast")).select(Table("cash_forecast").star).where(Field("id") == P()).get_sql(), (fc_id,)).fetchone()
     if not row:
         err(f"Cash forecast {fc_id} not found")
 
@@ -512,9 +494,7 @@ def get_cash_forecast(conn, args):
     fc_id = getattr(args, "forecast_id", None)
     if not fc_id:
         err("--forecast-id is required")
-    row = conn.execute(
-        "SELECT * FROM cash_forecast WHERE id = ?", (fc_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("cash_forecast")).select(Table("cash_forecast").star).where(Field("id") == P()).get_sql(), (fc_id,)).fetchone()
     if not row:
         err(f"Cash forecast {fc_id} not found")
     ok(row_to_dict(row))
@@ -527,9 +507,7 @@ def generate_cash_forecast(conn, args):
     """Auto-generate a forecast based on recent cash positions."""
     if not getattr(args, "company_id", None):
         err("--company-id is required")
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     forecast_type = getattr(args, "forecast_type", None) or "short_term"

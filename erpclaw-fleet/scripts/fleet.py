@@ -17,6 +17,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
 
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
     ENTITY_PREFIXES.setdefault("fleet_vehicle", "VEH-")
     ENTITY_PREFIXES.setdefault("fleet_vehicle_maintenance", "FMNT-")
 except ImportError:
@@ -44,7 +45,9 @@ VALID_MAINTENANCE_STATUSES = ("scheduled", "in_progress", "completed", "cancelle
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t = Table("company")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -56,7 +59,9 @@ def _validate_enum(value, valid_values, field_name):
 def _validate_vehicle(conn, vehicle_id):
     if not vehicle_id:
         err("--vehicle-id is required")
-    if not conn.execute("SELECT id FROM fleet_vehicle WHERE id = ?", (vehicle_id,)).fetchone():
+    t = Table("fleet_vehicle")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (vehicle_id,)).fetchone():
         err(f"Vehicle {vehicle_id} not found")
 
 
@@ -86,15 +91,15 @@ def add_vehicle(conn, args):
     if year_val is not None:
         year_val = int(year_val)
 
-    conn.execute("""
-        INSERT INTO fleet_vehicle (
-            id, naming_series, make, model, year, vin, license_plate,
-            vehicle_type, color, purchase_date, purchase_cost,
-            current_odometer, fuel_type, insurance_provider, insurance_policy,
-            insurance_expiry, vehicle_status, notes, company_id,
-            created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("fleet_vehicle", {
+        "id": P(), "naming_series": P(), "make": P(), "model": P(), "year": P(),
+        "vin": P(), "license_plate": P(), "vehicle_type": P(), "color": P(),
+        "purchase_date": P(), "purchase_cost": P(), "current_odometer": P(),
+        "fuel_type": P(), "insurance_provider": P(), "insurance_policy": P(),
+        "insurance_expiry": P(), "vehicle_status": P(), "notes": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         veh_id, naming, make, model, year_val,
         getattr(args, "vin", None),
         getattr(args, "license_plate", None),
@@ -196,28 +201,29 @@ def get_vehicle(conn, args):
     veh_id = getattr(args, "vehicle_id", None)
     if not veh_id:
         err("--vehicle-id is required")
-    row = conn.execute("SELECT * FROM fleet_vehicle WHERE id = ?", (veh_id,)).fetchone()
+    t = Table("fleet_vehicle")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (veh_id,)).fetchone()
     if not row:
         err(f"Vehicle {veh_id} not found")
     data = row_to_dict(row)
 
     # Active assignments
-    assignments = conn.execute(
-        "SELECT * FROM fleet_vehicle_assignment WHERE vehicle_id = ? AND assignment_status = 'active'",
-        (veh_id,)
-    ).fetchall()
+    t_assign = Table("fleet_vehicle_assignment")
+    q_assign = Q.from_(t_assign).select(t_assign.star).where(t_assign.vehicle_id == P()).where(t_assign.assignment_status == "active")
+    assignments = conn.execute(q_assign.get_sql(), (veh_id,)).fetchall()
     data["active_assignments"] = [row_to_dict(a) for a in assignments]
 
     # Fuel log count
-    fuel_count = conn.execute(
-        "SELECT COUNT(*) FROM fleet_fuel_log WHERE vehicle_id = ?", (veh_id,)
-    ).fetchone()[0]
+    t_fuel = Table("fleet_fuel_log")
+    q_fuel = Q.from_(t_fuel).select(fn.Count("*")).where(t_fuel.vehicle_id == P())
+    fuel_count = conn.execute(q_fuel.get_sql(), (veh_id,)).fetchone()[0]
     data["fuel_log_count"] = fuel_count
 
     # Maintenance count
-    maint_count = conn.execute(
-        "SELECT COUNT(*) FROM fleet_vehicle_maintenance WHERE vehicle_id = ?", (veh_id,)
-    ).fetchone()[0]
+    t_maint = Table("fleet_vehicle_maintenance")
+    q_maint = Q.from_(t_maint).select(fn.Count("*")).where(t_maint.vehicle_id == P())
+    maint_count = conn.execute(q_maint.get_sql(), (veh_id,)).fetchone()[0]
     data["maintenance_count"] = maint_count
     ok(data)
 
@@ -277,12 +283,12 @@ def add_vehicle_assignment(conn, args):
     assign_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO fleet_vehicle_assignment (
-            id, vehicle_id, driver_name, driver_id, start_date, end_date,
-            assignment_status, notes, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("fleet_vehicle_assignment", {
+        "id": P(), "vehicle_id": P(), "driver_name": P(), "driver_id": P(),
+        "start_date": P(), "end_date": P(), "assignment_status": P(),
+        "notes": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         assign_id, vehicle_id, driver_name,
         getattr(args, "driver_id", None),
         start_date,
@@ -294,8 +300,8 @@ def add_vehicle_assignment(conn, args):
 
     # Update vehicle status to assigned
     conn.execute(
-        "UPDATE fleet_vehicle SET vehicle_status = 'assigned', updated_at = datetime('now') WHERE id = ?",
-        (vehicle_id,)
+        "UPDATE \"fleet_vehicle\" SET \"vehicle_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+        ("assigned", vehicle_id),
     )
 
     audit(conn, SKILL, "fleet-add-vehicle-assignment", "fleet_vehicle_assignment", assign_id,
@@ -314,9 +320,9 @@ def end_vehicle_assignment(conn, args):
     assign_id = getattr(args, "assignment_id", None)
     if not assign_id:
         err("--assignment-id is required")
-    row = conn.execute(
-        "SELECT * FROM fleet_vehicle_assignment WHERE id = ?", (assign_id,)
-    ).fetchone()
+    t_assign = Table("fleet_vehicle_assignment")
+    q = Q.from_(t_assign).select(t_assign.star).where(t_assign.id == P())
+    row = conn.execute(q.get_sql(), (assign_id,)).fetchone()
     if not row:
         err(f"Assignment {assign_id} not found")
 
@@ -325,21 +331,23 @@ def end_vehicle_assignment(conn, args):
         err(f"Cannot end assignment in status '{data['assignment_status']}'. Must be active.")
 
     end_date = getattr(args, "end_date", None) or _now_iso()[:10]
-    conn.execute(
-        "UPDATE fleet_vehicle_assignment SET assignment_status = 'ended', end_date = ? WHERE id = ?",
-        (end_date, assign_id)
-    )
+    sql = update_row("fleet_vehicle_assignment",
+                     data={"assignment_status": P(), "end_date": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("ended", end_date, assign_id))
 
     # Check if vehicle has other active assignments
     vehicle_id = data["vehicle_id"]
-    active_count = conn.execute(
-        "SELECT COUNT(*) FROM fleet_vehicle_assignment WHERE vehicle_id = ? AND assignment_status = 'active' AND id != ?",
-        (vehicle_id, assign_id)
-    ).fetchone()[0]
+    t_va = Table("fleet_vehicle_assignment")
+    q_active = (Q.from_(t_va).select(fn.Count("*"))
+                .where(t_va.vehicle_id == P())
+                .where(t_va.assignment_status == "active")
+                .where(t_va.id != P()))
+    active_count = conn.execute(q_active.get_sql(), (vehicle_id, assign_id)).fetchone()[0]
     if active_count == 0:
         conn.execute(
-            "UPDATE fleet_vehicle SET vehicle_status = 'available', updated_at = datetime('now') WHERE id = ?",
-            (vehicle_id,)
+            "UPDATE \"fleet_vehicle\" SET \"vehicle_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+            ("available", vehicle_id),
         )
 
     audit(conn, SKILL, "fleet-end-vehicle-assignment", "fleet_vehicle_assignment", assign_id,
@@ -414,13 +422,12 @@ def add_fuel_log(conn, args):
     log_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO fleet_fuel_log (
-            id, vehicle_id, log_date, gallons, cost,
-            odometer_reading, fuel_type, station, notes,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("fleet_fuel_log", {
+        "id": P(), "vehicle_id": P(), "log_date": P(), "gallons": P(),
+        "cost": P(), "odometer_reading": P(), "fuel_type": P(),
+        "station": P(), "notes": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         log_id, vehicle_id, log_date,
         str(to_decimal(gallons)),
         str(round_currency(to_decimal(cost))),
@@ -434,8 +441,8 @@ def add_fuel_log(conn, args):
     # Update vehicle odometer if provided
     if odometer_reading:
         conn.execute(
-            "UPDATE fleet_vehicle SET current_odometer = ?, updated_at = datetime('now') WHERE id = ?",
-            (str(to_decimal(odometer_reading)), vehicle_id)
+            "UPDATE \"fleet_vehicle\" SET \"current_odometer\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+            (str(to_decimal(odometer_reading)), vehicle_id),
         )
 
     audit(conn, SKILL, "fleet-add-fuel-log", "fleet_fuel_log", log_id,
@@ -504,13 +511,13 @@ def add_vehicle_maintenance(conn, args):
     naming = get_next_name(conn, "fleet_vehicle_maintenance", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO fleet_vehicle_maintenance (
-            id, naming_series, vehicle_id, maintenance_type, scheduled_date,
-            completed_date, cost, vendor, odometer_at_service,
-            maintenance_status, notes, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("fleet_vehicle_maintenance", {
+        "id": P(), "naming_series": P(), "vehicle_id": P(), "maintenance_type": P(),
+        "scheduled_date": P(), "completed_date": P(), "cost": P(), "vendor": P(),
+        "odometer_at_service": P(), "maintenance_status": P(), "notes": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         maint_id, naming, vehicle_id, maintenance_type,
         getattr(args, "scheduled_date", None),
         getattr(args, "completed_date", None),
@@ -538,9 +545,9 @@ def complete_vehicle_maintenance(conn, args):
     maint_id = getattr(args, "maintenance_id", None)
     if not maint_id:
         err("--maintenance-id is required")
-    row = conn.execute(
-        "SELECT * FROM fleet_vehicle_maintenance WHERE id = ?", (maint_id,)
-    ).fetchone()
+    t_m = Table("fleet_vehicle_maintenance")
+    q = Q.from_(t_m).select(t_m.star).where(t_m.id == P())
+    row = conn.execute(q.get_sql(), (maint_id,)).fetchone()
     if not row:
         err(f"Maintenance record {maint_id} not found")
 
@@ -719,7 +726,9 @@ def vehicle_utilization_report(conn, args):
 def status_action(conn, args):
     counts = {}
     for tbl in ("fleet_vehicle", "fleet_vehicle_assignment", "fleet_fuel_log", "fleet_vehicle_maintenance"):
-        counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        t = Table(tbl)
+        q = Q.from_(t).select(fn.Count("*"))
+        counts[tbl] = conn.execute(q.get_sql()).fetchone()[0]
     ok({
         "skill": "erpclaw-fleet",
         "version": "1.0.0",

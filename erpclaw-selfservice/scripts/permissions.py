@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -31,7 +32,9 @@ VALID_RECORD_SCOPES = ("own", "department", "company")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t_co = Table("company")
+    q_co = Q.from_(t_co).select(t_co.id).where(t_co.id == P())
+    if not conn.execute(q_co.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -149,7 +152,9 @@ def get_profile(conn, args):
     profile_id = getattr(args, "profile_id", None)
     if not profile_id:
         err("--profile-id is required")
-    row = conn.execute("SELECT * FROM selfservice_permission_profile WHERE id = ?", (profile_id,)).fetchone()
+    t = Table("selfservice_permission_profile")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (profile_id,)).fetchone()
     if not row:
         err(f"Profile {profile_id} not found")
     d = row_to_dict(row)
@@ -164,7 +169,9 @@ def update_profile(conn, args):
     profile_id = getattr(args, "profile_id", None)
     if not profile_id:
         err("--profile-id is required")
-    if not conn.execute("SELECT id FROM selfservice_permission_profile WHERE id = ?", (profile_id,)).fetchone():
+    t_prof = Table("selfservice_permission_profile")
+    q_prof = Q.from_(t_prof).select(t_prof.id).where(t_prof.id == P())
+    if not conn.execute(q_prof.get_sql(), (profile_id,)).fetchone():
         err(f"Profile {profile_id} not found")
 
     updates, params, changed = [], [], []
@@ -206,7 +213,9 @@ def add_permission(conn, args):
     profile_id = getattr(args, "profile_id", None)
     if not profile_id:
         err("--profile-id is required")
-    if not conn.execute("SELECT id FROM selfservice_permission_profile WHERE id = ?", (profile_id,)).fetchone():
+    t_prof = Table("selfservice_permission_profile")
+    q_prof = Q.from_(t_prof).select(t_prof.id).where(t_prof.id == P())
+    if not conn.execute(q_prof.get_sql(), (profile_id,)).fetchone():
         err(f"Profile {profile_id} not found")
 
     user_id = getattr(args, "user_id", None)
@@ -214,10 +223,12 @@ def add_permission(conn, args):
         err("--user-id is required")
 
     # Check for duplicate active assignment
-    existing = conn.execute(
-        "SELECT id FROM selfservice_profile_assignment WHERE profile_id = ? AND user_id = ? AND assignment_status = 'active'",
-        (profile_id, user_id)
-    ).fetchone()
+    t_pa = Table("selfservice_profile_assignment")
+    q_dup = (Q.from_(t_pa).select(t_pa.id)
+             .where(t_pa.profile_id == P())
+             .where(t_pa.user_id == P())
+             .where(t_pa.assignment_status == "active"))
+    existing = conn.execute(q_dup.get_sql(), (profile_id, user_id)).fetchone()
     if existing:
         err(f"User {user_id} already has an active permission for profile {profile_id}")
 
@@ -280,15 +291,18 @@ def remove_permission(conn, args):
     permission_id = getattr(args, "permission_id", None)
     if not permission_id:
         err("--permission-id is required")
-    row = conn.execute("SELECT id, assignment_status FROM selfservice_profile_assignment WHERE id = ?",
-                       (permission_id,)).fetchone()
+    t = Table("selfservice_profile_assignment")
+    q = Q.from_(t).select(t.id, t.assignment_status).where(t.id == P())
+    row = conn.execute(q.get_sql(), (permission_id,)).fetchone()
     if not row:
         err(f"Permission {permission_id} not found")
     if row["assignment_status"] == "revoked":
         err(f"Permission {permission_id} is already revoked")
 
-    conn.execute("UPDATE selfservice_profile_assignment SET assignment_status = 'revoked' WHERE id = ?",
-                 (permission_id,))
+    sql = update_row("selfservice_profile_assignment",
+                     data={"assignment_status": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("revoked", permission_id))
     audit(conn, SKILL, "selfservice-remove-permission", "selfservice_profile_assignment", permission_id,
           new_values={"assignment_status": "revoked"})
     conn.commit()

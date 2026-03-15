@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("logistics_carrier", "CAR-")
 except ImportError:
@@ -34,7 +35,7 @@ VALID_SERVICE_LEVELS = ("ground", "express", "overnight", "freight", "ltl")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -46,7 +47,7 @@ def _validate_enum(value, valid_values, field_name):
 def _get_carrier(conn, carrier_id):
     if not carrier_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM logistics_carrier WHERE id = ?", (carrier_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("logistics_carrier")).select(Table("logistics_carrier").star).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone()
     if not row:
         err(f"Carrier {carrier_id} not found")
     return row
@@ -68,7 +69,7 @@ def add_carrier(conn, args):
 
     supplier_id = getattr(args, "supplier_id", None)
     if supplier_id:
-        if not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("supplier")).select(Field('id')).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone():
             err(f"Supplier {supplier_id} not found")
 
     carrier_id = str(uuid.uuid4())
@@ -120,7 +121,7 @@ def update_carrier(conn, args):
     # Handle supplier_id with FK validation
     supplier_id = getattr(args, "supplier_id", None)
     if supplier_id is not None:
-        if supplier_id and not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+        if supplier_id and not conn.execute(Q.from_(Table("supplier")).select(Field('id')).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone():
             err(f"Supplier {supplier_id} not found")
         updates.append("supplier_id = ?")
         params.append(supplier_id if supplier_id else None)
@@ -174,10 +175,7 @@ def get_carrier(conn, args):
     data = row_to_dict(row)
 
     # Include rates
-    rates = conn.execute(
-        "SELECT * FROM logistics_carrier_rate WHERE carrier_id = ? ORDER BY service_level, created_at",
-        (carrier_id,)
-    ).fetchall()
+    rates = conn.execute(Q.from_(Table("logistics_carrier_rate")).select(Table("logistics_carrier_rate").star).where(Field("carrier_id") == P()).orderby(Field("service_level")).orderby(Field("created_at")).get_sql(), (carrier_id,)).fetchall()
     data["rates"] = [row_to_dict(r) for r in rates]
     data["rate_count"] = len(rates)
 
@@ -232,7 +230,7 @@ def add_carrier_rate(conn, args):
     carrier_id = getattr(args, "carrier_id", None)
     if not carrier_id:
         err("--carrier-id is required")
-    if not conn.execute("SELECT id FROM logistics_carrier WHERE id = ?", (carrier_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
         err(f"Carrier {carrier_id} not found")
 
     company_id = getattr(args, "company_id", None)

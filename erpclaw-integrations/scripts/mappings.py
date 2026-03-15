@@ -14,6 +14,7 @@ try:
     sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -28,7 +29,7 @@ SKILL = "erpclaw-integrations"
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute("SELECT * FROM integration_connector WHERE id = ?", (connector_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_connector")).select(Table("integration_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Connector {connector_id} not found")
     return row
@@ -65,12 +66,8 @@ def add_field_mapping(conn, args):
     is_required = getattr(args, "is_required", None)
     is_required_val = int(is_required) if is_required is not None else 0
 
-    conn.execute("""
-        INSERT INTO integration_field_mapping (
-            id, connector_id, entity_type, source_field, target_field,
-            transform_rule, is_required, default_value, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_field_mapping", {"id": P(), "connector_id": P(), "entity_type": P(), "source_field": P(), "target_field": P(), "transform_rule": P(), "is_required": P(), "default_value": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         fm_id, cid, entity_type, source_field, target_field,
         transform_rule, is_required_val,
         getattr(args, "default_value", None),
@@ -90,7 +87,7 @@ def update_field_mapping(conn, args):
     fm_id = getattr(args, "field_mapping_id", None)
     if not fm_id:
         err("--field-mapping-id is required")
-    row = conn.execute("SELECT * FROM integration_field_mapping WHERE id = ?", (fm_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_field_mapping")).select(Table("integration_field_mapping").star).where(Field("id") == P()).get_sql(), (fm_id,)).fetchone()
     if not row:
         err(f"Field mapping {fm_id} not found")
 
@@ -140,7 +137,7 @@ def get_field_mapping(conn, args):
     fm_id = getattr(args, "field_mapping_id", None)
     if not fm_id:
         err("--field-mapping-id is required")
-    row = conn.execute("SELECT * FROM integration_field_mapping WHERE id = ?", (fm_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_field_mapping")).select(Table("integration_field_mapping").star).where(Field("id") == P()).get_sql(), (fm_id,)).fetchone()
     if not row:
         err(f"Field mapping {fm_id} not found")
     ok(row_to_dict(row))
@@ -177,7 +174,7 @@ def delete_field_mapping(conn, args):
     fm_id = getattr(args, "field_mapping_id", None)
     if not fm_id:
         err("--field-mapping-id is required")
-    row = conn.execute("SELECT * FROM integration_field_mapping WHERE id = ?", (fm_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_field_mapping")).select(Table("integration_field_mapping").star).where(Field("id") == P()).get_sql(), (fm_id,)).fetchone()
     if not row:
         err(f"Field mapping {fm_id} not found")
 
@@ -216,12 +213,8 @@ def add_entity_map(conn, args):
     em_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_entity_map (
-            id, connector_id, entity_type, local_id, remote_id,
-            last_synced_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_entity_map", {"id": P(), "connector_id": P(), "entity_type": P(), "local_id": P(), "remote_id": P(), "last_synced_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         em_id, cid, entity_type, local_id, remote_id,
         now, company_id, now,
     ))
@@ -239,7 +232,7 @@ def get_entity_map(conn, args):
     em_id = getattr(args, "entity_map_id", None)
     if not em_id:
         err("--entity-map-id is required")
-    row = conn.execute("SELECT * FROM integration_entity_map WHERE id = ?", (em_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_entity_map")).select(Table("integration_entity_map").star).where(Field("id") == P()).get_sql(), (em_id,)).fetchone()
     if not row:
         err(f"Entity map {em_id} not found")
     ok(row_to_dict(row))
@@ -284,7 +277,7 @@ def delete_entity_map(conn, args):
     em_id = getattr(args, "entity_map_id", None)
     if not em_id:
         err("--entity-map-id is required")
-    row = conn.execute("SELECT * FROM integration_entity_map WHERE id = ?", (em_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_entity_map")).select(Table("integration_entity_map").star).where(Field("id") == P()).get_sql(), (em_id,)).fetchone()
     if not row:
         err(f"Entity map {em_id} not found")
 
@@ -319,11 +312,8 @@ def add_transform_rule(conn, args):
     tr_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_transform_rule (
-            id, connector_id, entity_type, rule_name, rule_json, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_transform_rule", {"id": P(), "connector_id": P(), "entity_type": P(), "rule_name": P(), "rule_json": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         tr_id, cid, entity_type, rule_name, rule_json, company_id, now,
     ))
     audit(conn, SKILL, "integration-add-transform-rule", "integration_transform_rule", tr_id,
@@ -364,7 +354,7 @@ def delete_transform_rule(conn, args):
     tr_id = getattr(args, "transform_rule_id", None)
     if not tr_id:
         err("--transform-rule-id is required")
-    row = conn.execute("SELECT * FROM integration_transform_rule WHERE id = ?", (tr_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_transform_rule")).select(Table("integration_transform_rule").star).where(Field("id") == P()).get_sql(), (tr_id,)).fetchone()
     if not row:
         err(f"Transform rule {tr_id} not found")
 

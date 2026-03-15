@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -31,7 +32,7 @@ VALID_POLICY_STATUSES = ("draft", "review", "approved", "published", "retired")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -90,7 +91,7 @@ def update_policy(conn, args):
     policy_id = getattr(args, "policy_id", None)
     if not policy_id:
         err("--policy-id is required")
-    if not conn.execute("SELECT id FROM policy WHERE id = ?", (policy_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("policy")).select(Field('id')).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone():
         err(f"Policy {policy_id} not found")
 
     updates, params, changed = [], [], []
@@ -140,7 +141,7 @@ def get_policy(conn, args):
     policy_id = getattr(args, "policy_id", None)
     if not policy_id:
         err("--policy-id is required")
-    row = conn.execute("SELECT * FROM policy WHERE id = ?", (policy_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("policy")).select(Table("policy").star).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone()
     if not row:
         err(f"Policy {policy_id} not found")
     data = row_to_dict(row)
@@ -192,7 +193,7 @@ def publish_policy(conn, args):
     policy_id = getattr(args, "policy_id", None)
     if not policy_id:
         err("--policy-id is required")
-    row = conn.execute("SELECT status FROM policy WHERE id = ?", (policy_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("policy")).select(Field('status')).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone()
     if not row:
         err(f"Policy {policy_id} not found")
     if row[0] == "published":
@@ -218,7 +219,7 @@ def retire_policy(conn, args):
     policy_id = getattr(args, "policy_id", None)
     if not policy_id:
         err("--policy-id is required")
-    row = conn.execute("SELECT status FROM policy WHERE id = ?", (policy_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("policy")).select(Field('status')).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone()
     if not row:
         err(f"Policy {policy_id} not found")
     if row[0] == "retired":
@@ -241,7 +242,7 @@ def add_policy_acknowledgment(conn, args):
     policy_id = getattr(args, "policy_id", None)
     if not policy_id:
         err("--policy-id is required")
-    if not conn.execute("SELECT id FROM policy WHERE id = ?", (policy_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("policy")).select(Field('id')).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone():
         err(f"Policy {policy_id} not found")
 
     _validate_company(conn, args.company_id)

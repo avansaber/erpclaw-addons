@@ -11,6 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -265,7 +266,7 @@ def equipment_history(conn, args):
         err("--equipment-id is required")
 
     conn.row_factory = sqlite3.Row
-    eq = conn.execute("SELECT * FROM equipment WHERE id = ?", (equipment_id,)).fetchone()
+    eq = conn.execute(Q.from_(Table("equipment")).select(Table("equipment").star).where(Field("id") == P()).get_sql(), (equipment_id,)).fetchone()
     if not eq:
         err(f"Equipment {equipment_id} not found")
 

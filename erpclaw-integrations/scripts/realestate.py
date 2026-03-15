@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("connv2_realestate_connector", "REC-")
 except ImportError:
@@ -31,16 +32,14 @@ VALID_CONNECTOR_STATUSES = ("active", "inactive", "error")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute(
-        "SELECT * FROM connv2_realestate_connector WHERE id = ?", (connector_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("connv2_realestate_connector")).select(Table("connv2_realestate_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Real estate connector {connector_id} not found")
     return row
@@ -62,13 +61,8 @@ def add_realestate_connector(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "connv2_realestate_connector")
 
-    conn.execute("""
-        INSERT INTO connv2_realestate_connector (
-            id, naming_series, platform, agent_id, api_credentials_ref,
-            sync_listings, capture_leads, connector_status,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_realestate_connector", {"id": P(), "naming_series": P(), "platform": P(), "agent_id": P(), "api_credentials_ref": P(), "sync_listings": P(), "capture_leads": P(), "connector_status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         conn_id, naming, platform,
         getattr(args, "agent_id", None),
         getattr(args, "api_credentials_ref", None),
@@ -117,13 +111,8 @@ def capture_leads(conn, args):
     if not contact_name:
         err("--contact-name is required")
 
-    conn.execute("""
-        INSERT INTO connv2_realestate_lead (
-            id, connector_id, lead_source, contact_name, contact_email,
-            contact_phone, property_ref, inquiry, lead_status,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_realestate_lead", {"id": P(), "connector_id": P(), "lead_source": P(), "contact_name": P(), "contact_email": P(), "contact_phone": P(), "property_ref": P(), "inquiry": P(), "lead_status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         lead_id, connector_id,
         getattr(args, "lead_source", None),
         contact_name,

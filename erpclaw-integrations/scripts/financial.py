@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("connv2_financial_connector", "FNC-")
 except ImportError:
@@ -30,16 +31,14 @@ VALID_CONNECTOR_STATUSES = ("active", "inactive", "error")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute(
-        "SELECT * FROM connv2_financial_connector WHERE id = ?", (connector_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("connv2_financial_connector")).select(Table("connv2_financial_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Financial connector {connector_id} not found")
     return row
@@ -61,13 +60,8 @@ def add_financial_connector(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "connv2_financial_connector")
 
-    conn.execute("""
-        INSERT INTO connv2_financial_connector (
-            id, naming_series, platform, account_ref, api_credentials_ref,
-            sync_enabled, connector_status,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_financial_connector", {"id": P(), "naming_series": P(), "platform": P(), "account_ref": P(), "api_credentials_ref": P(), "sync_enabled": P(), "connector_status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         conn_id, naming, platform,
         getattr(args, "account_ref", None),
         getattr(args, "api_credentials_ref", None),

@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-pos"
 
@@ -46,9 +47,7 @@ def open_session(conn, args):
         err("--cashier-name is required")
 
     # Validate profile exists and is active
-    profile = conn.execute(
-        "SELECT id, company_id, is_active FROM pos_profile WHERE id = ?",
-        (profile_id,)).fetchone()
+    profile = conn.execute(Q.from_(Table("pos_profile")).select(Field('id'), Field('company_id'), Field('is_active')).where(Field("id") == P()).get_sql(), (profile_id,)).fetchone()
     if not profile:
         err(f"POS profile {profile_id} not found")
     if not profile["is_active"]:
@@ -68,11 +67,8 @@ def open_session(conn, args):
     naming = get_next_name(conn, "pos_session", company_id=company_id)
 
     try:
-        conn.execute(
-            """INSERT INTO pos_session
-               (id, naming_series, pos_profile_id, cashier_name, opening_amount,
-                total_sales, total_returns, transaction_count, status, company_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("pos_session", {"id": P(), "naming_series": P(), "pos_profile_id": P(), "cashier_name": P(), "opening_amount": P(), "total_sales": P(), "total_returns": P(), "transaction_count": P(), "status": P(), "company_id": P()})
+        conn.execute(sql,
             (session_id, naming, profile_id, cashier_name, opening,
              "0", "0", 0, "open", company_id))
     except sqlite3.IntegrityError as e:
@@ -96,7 +92,7 @@ def get_session(conn, args):
     if not sid:
         err("--id is required")
 
-    row = conn.execute("SELECT * FROM pos_session WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("pos_session")).select(Table("pos_session").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Session {sid} not found")
 
@@ -179,7 +175,7 @@ def close_session(conn, args):
     if closing_amount is None:
         err("--closing-amount is required")
 
-    row = conn.execute("SELECT * FROM pos_session WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("pos_session")).select(Table("pos_session").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Session {sid} not found")
     if row["status"] != "open":

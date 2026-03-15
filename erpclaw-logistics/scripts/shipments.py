@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("logistics_shipment", "SHIP-")
 except ImportError:
@@ -36,7 +37,7 @@ VALID_EVENT_TYPES = ("created", "picked_up", "departed", "arrived",
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -48,7 +49,7 @@ def _validate_enum(value, valid_values, field_name):
 def _get_shipment(conn, shipment_id):
     if not shipment_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM logistics_shipment WHERE id = ?", (shipment_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("logistics_shipment")).select(Table("logistics_shipment").star).where(Field("id") == P()).get_sql(), (shipment_id,)).fetchone()
     if not row:
         err(f"Shipment {shipment_id} not found")
     return row
@@ -67,7 +68,7 @@ def add_shipment(conn, args):
     # Validate carrier if provided
     carrier_id = getattr(args, "carrier_id", None)
     if carrier_id:
-        if not conn.execute("SELECT id FROM logistics_carrier WHERE id = ?", (carrier_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
             err(f"Carrier {carrier_id} not found")
 
     shipment_id = str(uuid.uuid4())
@@ -149,7 +150,7 @@ def update_shipment(conn, args):
 
     carrier_id = getattr(args, "carrier_id", None)
     if carrier_id:
-        if not conn.execute("SELECT id FROM logistics_carrier WHERE id = ?", (carrier_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
             err(f"Carrier {carrier_id} not found")
         updates.append("carrier_id = ?")
         params.append(carrier_id)
@@ -182,27 +183,19 @@ def get_shipment(conn, args):
     data = row_to_dict(row)
 
     # Include tracking events
-    events = conn.execute(
-        "SELECT * FROM logistics_tracking_event WHERE shipment_id = ? ORDER BY event_timestamp DESC",
-        (shipment_id,)
-    ).fetchall()
+    events = conn.execute(Q.from_(Table("logistics_tracking_event")).select(Table("logistics_tracking_event").star).where(Field("shipment_id") == P()).orderby(Field("event_timestamp"), order=Order.desc).get_sql(), (shipment_id,)).fetchall()
     data["tracking_events"] = [row_to_dict(e) for e in events]
     data["event_count"] = len(events)
 
     # Include freight charges
-    charges = conn.execute(
-        "SELECT * FROM logistics_freight_charge WHERE shipment_id = ? ORDER BY created_at",
-        (shipment_id,)
-    ).fetchall()
+    charges = conn.execute(Q.from_(Table("logistics_freight_charge")).select(Table("logistics_freight_charge").star).where(Field("shipment_id") == P()).orderby(Field("created_at")).get_sql(), (shipment_id,)).fetchall()
     data["freight_charges"] = [row_to_dict(c) for c in charges]
     total_freight = sum(Decimal(c["amount"] or "0") for c in data["freight_charges"])
     data["total_freight"] = str(total_freight)
 
     # Carrier name if available
     if data.get("carrier_id"):
-        carrier = conn.execute(
-            "SELECT name FROM logistics_carrier WHERE id = ?", (data["carrier_id"],)
-        ).fetchone()
+        carrier = conn.execute(Q.from_(Table("logistics_carrier")).select(Field('name')).where(Field("id") == P()).get_sql(), (data["carrier_id"],)).fetchone()
         if carrier:
             data["carrier_name"] = carrier[0]
 
@@ -296,7 +289,7 @@ def add_tracking_event(conn, args):
     shipment_id = getattr(args, "shipment_id", None)
     if not shipment_id:
         err("--shipment-id is required")
-    if not conn.execute("SELECT id FROM logistics_shipment WHERE id = ?", (shipment_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("logistics_shipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (shipment_id,)).fetchone():
         err(f"Shipment {shipment_id} not found")
 
     event_type = getattr(args, "event_type", None)
@@ -410,10 +403,7 @@ def generate_bill_of_lading(conn, args):
 
     carrier_name = None
     if data.get("carrier_id"):
-        carrier = conn.execute(
-            "SELECT name, carrier_code, dot_number, mc_number FROM logistics_carrier WHERE id = ?",
-            (data["carrier_id"],)
-        ).fetchone()
+        carrier = conn.execute(Q.from_(Table("logistics_carrier")).select(Field('name'), Field('carrier_code'), Field('dot_number'), Field('mc_number')).where(Field("id") == P()).get_sql(), (data["carrier_id"],)).fetchone()
         if carrier:
             carrier_name = carrier[0]
             data["carrier_name"] = carrier[0]
@@ -422,10 +412,7 @@ def generate_bill_of_lading(conn, args):
             data["carrier_mc"] = carrier[3]
 
     # Include freight charges
-    charges = conn.execute(
-        "SELECT charge_type, description, amount FROM logistics_freight_charge WHERE shipment_id = ?",
-        (shipment_id,)
-    ).fetchall()
+    charges = conn.execute(Q.from_(Table("logistics_freight_charge")).select(Field('charge_type'), Field('description'), Field('amount')).where(Field("shipment_id") == P()).get_sql(), (shipment_id,)).fetchall()
     data["freight_charges"] = [row_to_dict(c) for c in charges]
     total_charges = sum(Decimal(c["amount"] or "0") for c in data["freight_charges"])
     data["total_charges"] = str(total_charges)

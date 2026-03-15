@@ -22,6 +22,7 @@ try:
     from erpclaw_lib.gl_posting import insert_gl_entries
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -48,7 +49,7 @@ VALID_SCHEDULE_STATUSES = ("pending", "partially_paid", "paid", "overdue", "waiv
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    row = conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone()
     if not row:
         err(f"Company {company_id} not found")
 
@@ -61,7 +62,7 @@ def _validate_enum(value, valid_values, field_name):
 def _validate_loan_application(conn, app_id):
     if not app_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM loan_application WHERE id = ?", (app_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("loan_application")).select(Table("loan_application").star).where(Field("id") == P()).get_sql(), (app_id,)).fetchone()
     if not row:
         err(f"Loan application {app_id} not found")
     return row
@@ -70,7 +71,7 @@ def _validate_loan_application(conn, app_id):
 def _validate_loan(conn, loan_id):
     if not loan_id:
         err("--loan-id is required")
-    row = conn.execute("SELECT * FROM loan WHERE id = ?", (loan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
     if not row:
         err(f"Loan {loan_id} not found")
     return row
@@ -79,7 +80,7 @@ def _validate_loan(conn, loan_id):
 def _validate_account(conn, account_id, label):
     if not account_id:
         err(f"--{label} is required")
-    row = conn.execute("SELECT id FROM account WHERE id = ?", (account_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("account")).select(Field('id')).where(Field("id") == P()).get_sql(), (account_id,)).fetchone()
     if not row:
         err(f"Account {account_id} not found (--{label})")
 
@@ -557,9 +558,7 @@ def handle_disburse_loan(conn, args):
     if not loan_app_id:
         err("--loan-application-id is required")
 
-    app_row = conn.execute(
-        "SELECT * FROM loan_application WHERE id = ?", (loan_app_id,)
-    ).fetchone()
+    app_row = conn.execute(Q.from_(Table("loan_application")).select(Table("loan_application").star).where(Field("id") == P()).get_sql(), (loan_app_id,)).fetchone()
     if not app_row:
         err(f"Loan application {loan_app_id} not found")
     app = dict(app_row)
@@ -571,9 +570,7 @@ def handle_disburse_loan(conn, args):
         )
 
     # Check not already disbursed
-    existing = conn.execute(
-        "SELECT id FROM loan WHERE loan_application_id = ?", (loan_app_id,)
-    ).fetchone()
+    existing = conn.execute(Q.from_(Table("loan")).select(Field('id')).where(Field("loan_application_id") == P()).get_sql(), (loan_app_id,)).fetchone()
     if existing:
         err(
             f"Loan already disbursed for application {loan_app_id} "
@@ -753,7 +750,7 @@ def handle_get_loan(conn, args):
     loan_id = getattr(args, "loan_id", None) or getattr(args, "id", None)
     if not loan_id:
         err("--loan-id is required")
-    loan_row = conn.execute("SELECT * FROM loan WHERE id = ?", (loan_id,)).fetchone()
+    loan_row = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
     if not loan_row:
         err(f"Loan {loan_id} not found")
     loan = dict(loan_row)

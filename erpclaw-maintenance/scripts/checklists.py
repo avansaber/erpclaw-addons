@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -24,16 +25,15 @@ def add_checklist(conn, args):
     if not work_order_id or not name or not company_id:
         err("--work-order-id, --checklist-name, and --company-id are required")
 
-    wo = conn.execute("SELECT id FROM maintenance_work_order WHERE id = ?", (work_order_id,)).fetchone()
+    wo = conn.execute(Q.from_(Table("maintenance_work_order")).select(Field('id')).where(Field("id") == P()).get_sql(), (work_order_id,)).fetchone()
     if not wo:
         err(f"Work order {work_order_id} not found")
 
     cl_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO maintenance_checklist (id, work_order_id, name, company_id, created_at)
-           VALUES (?,?,?,?,?)""",
+    sql, _ = insert_row("maintenance_checklist", {"id": P(), "work_order_id": P(), "name": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (cl_id, work_order_id, name, company_id, now),
     )
     conn.commit()
@@ -52,16 +52,13 @@ def get_checklist(conn, args):
         err("--checklist-id is required")
 
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM maintenance_checklist WHERE id = ?", (checklist_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_checklist")).select(Table("maintenance_checklist").star).where(Field("id") == P()).get_sql(), (checklist_id,)).fetchone()
     if not row:
         err(f"Checklist {checklist_id} not found")
 
     data = dict(row)
 
-    items = conn.execute(
-        "SELECT * FROM maintenance_checklist_item WHERE checklist_id = ? ORDER BY sort_order, created_at",
-        (checklist_id,),
-    ).fetchall()
+    items = conn.execute(Q.from_(Table("maintenance_checklist_item")).select(Table("maintenance_checklist_item").star).where(Field("checklist_id") == P()).orderby(Field("sort_order")).orderby(Field("created_at")).get_sql(), (checklist_id,)).fetchall()
     data["items"] = [dict(i) for i in items]
     data["item_count"] = len(items)
     data["completed_count"] = sum(1 for i in items if i["is_completed"])
@@ -77,7 +74,7 @@ def add_checklist_item(conn, args):
     if not checklist_id or not description:
         err("--checklist-id and --description are required")
 
-    cl = conn.execute("SELECT id FROM maintenance_checklist WHERE id = ?", (checklist_id,)).fetchone()
+    cl = conn.execute(Q.from_(Table("maintenance_checklist")).select(Field('id')).where(Field("id") == P()).get_sql(), (checklist_id,)).fetchone()
     if not cl:
         err(f"Checklist {checklist_id} not found")
 

@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -29,7 +30,7 @@ VALID_RISK_STATUSES = ("identified", "assessed", "mitigating", "monitoring", "cl
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -113,7 +114,7 @@ def update_risk(conn, args):
     risk_id = getattr(args, "risk_id", None)
     if not risk_id:
         err("--risk-id is required")
-    row = conn.execute("SELECT likelihood, impact FROM risk_register WHERE id = ?", (risk_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("risk_register")).select(Field('likelihood'), Field('impact')).where(Field("id") == P()).get_sql(), (risk_id,)).fetchone()
     if not row:
         err(f"Risk {risk_id} not found")
 
@@ -198,10 +199,7 @@ def update_risk(conn, args):
 
     if res_likelihood is not None or res_impact is not None:
         # Need current residual values for the one that wasn't updated
-        cur = conn.execute(
-            "SELECT residual_likelihood, residual_impact FROM risk_register WHERE id = ?",
-            (risk_id,)
-        ).fetchone()
+        cur = conn.execute(Q.from_(Table("risk_register")).select(Field('residual_likelihood'), Field('residual_impact')).where(Field("id") == P()).get_sql(), (risk_id,)).fetchone()
         rl = res_likelihood if res_likelihood is not None else (cur[0] if cur[0] is not None else current_likelihood)
         ri = res_impact if res_impact is not None else (cur[1] if cur[1] is not None else current_impact)
         residual_score = rl * ri
@@ -227,7 +225,7 @@ def get_risk(conn, args):
     risk_id = getattr(args, "risk_id", None)
     if not risk_id:
         err("--risk-id is required")
-    row = conn.execute("SELECT * FROM risk_register WHERE id = ?", (risk_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("risk_register")).select(Table("risk_register").star).where(Field("id") == P()).get_sql(), (risk_id,)).fetchone()
     if not row:
         err(f"Risk {risk_id} not found")
     data = row_to_dict(row)
@@ -282,7 +280,7 @@ def add_risk_assessment(conn, args):
     risk_id = getattr(args, "risk_id", None)
     if not risk_id:
         err("--risk-id is required")
-    if not conn.execute("SELECT id FROM risk_register WHERE id = ?", (risk_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("risk_register")).select(Field('id')).where(Field("id") == P()).get_sql(), (risk_id,)).fetchone():
         err(f"Risk {risk_id} not found")
 
     _validate_company(conn, args.company_id)
@@ -392,7 +390,7 @@ def close_risk(conn, args):
     risk_id = getattr(args, "risk_id", None)
     if not risk_id:
         err("--risk-id is required")
-    row = conn.execute("SELECT status FROM risk_register WHERE id = ?", (risk_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("risk_register")).select(Field('status')).where(Field("id") == P()).get_sql(), (risk_id,)).fetchone()
     if not row:
         err(f"Risk {risk_id} not found")
     if row[0] == "closed":

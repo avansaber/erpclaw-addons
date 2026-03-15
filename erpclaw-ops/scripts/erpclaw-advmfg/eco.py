@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -32,9 +33,7 @@ def add_eco(conn, args):
     if not getattr(args, "title", None):
         err("--title is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     eco_type = getattr(args, "eco_type", None) or "design"
@@ -48,12 +47,8 @@ def add_eco(conn, args):
     eco_id = str(uuid.uuid4())
     ns = get_next_name(conn, "engineering_change_order", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO engineering_change_order
-           (id, naming_series, title, eco_type, description, reason,
-            affected_items, affected_boms, impact_analysis,
-            requested_by, priority, status, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("engineering_change_order", {"id": P(), "naming_series": P(), "title": P(), "eco_type": P(), "description": P(), "reason": P(), "affected_items": P(), "affected_boms": P(), "impact_analysis": P(), "requested_by": P(), "priority": P(), "status": P(), "company_id": P()})
+    conn.execute(sql,
         (
             eco_id, ns, args.title, eco_type,
             getattr(args, "description", None),
@@ -78,9 +73,7 @@ def update_eco(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT * FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Table("engineering_change_order").star).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
     if row["status"] in ("implemented", "rejected", "cancelled"):
@@ -141,9 +134,7 @@ def get_eco(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT * FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Table("engineering_change_order").star).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
 
@@ -207,9 +198,7 @@ def submit_eco_for_review(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT status FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Field('status')).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
     if row["status"] != "draft":
@@ -232,9 +221,7 @@ def approve_eco(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT status FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Field('status')).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
     if row["status"] != "review":
@@ -263,9 +250,7 @@ def implement_eco(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT status FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Field('status')).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
     if row["status"] not in ("approved", "in_progress"):
@@ -288,9 +273,7 @@ def reject_eco(conn, args):
     eco_id = getattr(args, "eco_id", None)
     if not eco_id:
         err("--eco-id is required")
-    row = conn.execute(
-        "SELECT status FROM engineering_change_order WHERE id = ?", (eco_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("engineering_change_order")).select(Field('status')).where(Field("id") == P()).get_sql(), (eco_id,)).fetchone()
     if not row:
         err(f"ECO {eco_id} not found")
     if row["status"] not in ("draft", "review"):

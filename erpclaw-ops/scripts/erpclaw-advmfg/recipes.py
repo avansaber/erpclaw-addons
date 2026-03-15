@@ -13,6 +13,7 @@ from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -30,9 +31,7 @@ def add_recipe(conn, args):
     if not getattr(args, "product_name", None):
         err("--product-name is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     recipe_type = getattr(args, "recipe_type", None) or "standard"
@@ -72,9 +71,7 @@ def update_recipe(conn, args):
     recipe_id = getattr(args, "recipe_id", None)
     if not recipe_id:
         err("--recipe-id is required")
-    row = conn.execute(
-        "SELECT * FROM process_recipe WHERE id = ?", (recipe_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("process_recipe")).select(Table("process_recipe").star).where(Field("id") == P()).get_sql(), (recipe_id,)).fetchone()
     if not row:
         err(f"Recipe {recipe_id} not found")
 
@@ -131,9 +128,7 @@ def get_recipe(conn, args):
     recipe_id = getattr(args, "recipe_id", None)
     if not recipe_id:
         err("--recipe-id is required")
-    row = conn.execute(
-        "SELECT * FROM process_recipe WHERE id = ?", (recipe_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("process_recipe")).select(Table("process_recipe").star).where(Field("id") == P()).get_sql(), (recipe_id,)).fetchone()
     if not row:
         err(f"Recipe {recipe_id} not found")
 
@@ -141,10 +136,7 @@ def get_recipe(conn, args):
     data["recipe_status"] = "active" if data.get("is_active") else "inactive"
 
     # Get ingredients
-    ingredients = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE recipe_id = ? ORDER BY sequence, created_at",
-        (recipe_id,),
-    ).fetchall()
+    ingredients = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("recipe_id") == P()).orderby(Field("sequence")).orderby(Field("created_at")).get_sql(), (recipe_id,)).fetchall()
     data["ingredients"] = [row_to_dict(i) for i in ingredients]
     data["ingredient_count"] = len(ingredients)
 
@@ -206,23 +198,16 @@ def add_recipe_ingredient(conn, args):
     if not getattr(args, "ingredient_name", None):
         err("--ingredient-name is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
-    if not conn.execute(
-        "SELECT id FROM process_recipe WHERE id = ?", (args.recipe_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("process_recipe")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.recipe_id,)).fetchone():
         err(f"Recipe {args.recipe_id} not found")
 
     ingredient_id = str(uuid.uuid4())
 
-    conn.execute(
-        """INSERT INTO recipe_ingredient
-           (id, recipe_id, ingredient_name, item_id, quantity, unit,
-            sequence, is_optional, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("recipe_ingredient", {"id": P(), "recipe_id": P(), "ingredient_name": P(), "item_id": P(), "quantity": P(), "unit": P(), "sequence": P(), "is_optional": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             ingredient_id, args.recipe_id, args.ingredient_name,
             getattr(args, "item_id", None),
@@ -248,9 +233,7 @@ def update_recipe_ingredient(conn, args):
     ingredient_id = getattr(args, "ingredient_id", None)
     if not ingredient_id:
         err("--ingredient-id is required")
-    row = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE id = ?", (ingredient_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("id") == P()).get_sql(), (ingredient_id,)).fetchone()
     if not row:
         err(f"Ingredient {ingredient_id} not found")
 
@@ -302,15 +285,10 @@ def list_recipe_ingredients(conn, args):
     if not recipe_id:
         err("--recipe-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM process_recipe WHERE id = ?", (recipe_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("process_recipe")).select(Field('id')).where(Field("id") == P()).get_sql(), (recipe_id,)).fetchone():
         err(f"Recipe {recipe_id} not found")
 
-    rows = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE recipe_id = ? ORDER BY sequence, created_at",
-        (recipe_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("recipe_id") == P()).orderby(Field("sequence")).orderby(Field("created_at")).get_sql(), (recipe_id,)).fetchall()
 
     ingredients = [row_to_dict(r) for r in rows]
     ok({"ingredients": ingredients, "total_count": len(ingredients), "recipe_id": recipe_id})
@@ -324,14 +302,12 @@ def remove_recipe_ingredient(conn, args):
     if not ingredient_id:
         err("--ingredient-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE id = ?", (ingredient_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("id") == P()).get_sql(), (ingredient_id,)).fetchone()
     if not row:
         err(f"Ingredient {ingredient_id} not found")
 
     recipe_id = row["recipe_id"]
-    conn.execute("DELETE FROM recipe_ingredient WHERE id = ?", (ingredient_id,))
+    conn.execute(Q.from_(Table("recipe_ingredient")).delete().where(Field("id") == P()).get_sql(), (ingredient_id,))
     audit(conn, SKILL, "remove-recipe-ingredient", "recipe_ingredient", ingredient_id,
           new_values={"removed": True, "recipe_id": recipe_id})
     conn.commit()
@@ -346,9 +322,7 @@ def clone_recipe(conn, args):
     if not recipe_id:
         err("--recipe-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM process_recipe WHERE id = ?", (recipe_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("process_recipe")).select(Table("process_recipe").star).where(Field("id") == P()).get_sql(), (recipe_id,)).fetchone()
     if not row:
         err(f"Recipe {recipe_id} not found")
 
@@ -381,18 +355,13 @@ def clone_recipe(conn, args):
     )
 
     # Clone ingredients
-    ingredients = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE recipe_id = ?", (recipe_id,)
-    ).fetchall()
+    ingredients = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("recipe_id") == P()).get_sql(), (recipe_id,)).fetchall()
     cloned_count = 0
     for ing in ingredients:
         ing_data = row_to_dict(ing)
         new_ing_id = str(uuid.uuid4())
-        conn.execute(
-            """INSERT INTO recipe_ingredient
-               (id, recipe_id, ingredient_name, item_id, quantity, unit,
-                sequence, is_optional, notes, company_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("recipe_ingredient", {"id": P(), "recipe_id": P(), "ingredient_name": P(), "item_id": P(), "quantity": P(), "unit": P(), "sequence": P(), "is_optional": P(), "notes": P(), "company_id": P()})
+        conn.execute(sql,
             (
                 new_ing_id, new_id,
                 ing_data["ingredient_name"],
@@ -428,16 +397,11 @@ def calculate_recipe_cost(conn, args):
     if not recipe_id:
         err("--recipe-id is required")
 
-    recipe = conn.execute(
-        "SELECT * FROM process_recipe WHERE id = ?", (recipe_id,)
-    ).fetchone()
+    recipe = conn.execute(Q.from_(Table("process_recipe")).select(Table("process_recipe").star).where(Field("id") == P()).get_sql(), (recipe_id,)).fetchone()
     if not recipe:
         err(f"Recipe {recipe_id} not found")
 
-    ingredients = conn.execute(
-        "SELECT * FROM recipe_ingredient WHERE recipe_id = ? ORDER BY sequence",
-        (recipe_id,),
-    ).fetchall()
+    ingredients = conn.execute(Q.from_(Table("recipe_ingredient")).select(Table("recipe_ingredient").star).where(Field("recipe_id") == P()).orderby(Field("sequence")).get_sql(), (recipe_id,)).fetchall()
 
     total_cost = Decimal("0")
     ingredient_costs = []

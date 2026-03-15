@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("crmadv_automation_workflow", "AWFL-")
     ENTITY_PREFIXES.setdefault("crmadv_nurture_sequence", "ANUR-")
@@ -31,7 +32,7 @@ VALID_SEQUENCE_STATUSES = ("draft", "active", "paused", "completed")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -98,7 +99,7 @@ def update_automation_workflow(conn, args):
     wf_id = getattr(args, "workflow_id", None)
     if not wf_id:
         err("--workflow-id is required")
-    if not conn.execute("SELECT id FROM crmadv_automation_workflow WHERE id = ?", (wf_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_automation_workflow")).select(Field('id')).where(Field("id") == P()).get_sql(), (wf_id,)).fetchone():
         err(f"Automation workflow {wf_id} not found")
 
     updates, params, changed = [], [], []
@@ -171,7 +172,7 @@ def activate_workflow(conn, args):
     wf_id = getattr(args, "workflow_id", None)
     if not wf_id:
         err("--workflow-id is required")
-    row = conn.execute("SELECT * FROM crmadv_automation_workflow WHERE id = ?", (wf_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_automation_workflow")).select(Table("crmadv_automation_workflow").star).where(Field("id") == P()).get_sql(), (wf_id,)).fetchone()
     if not row:
         err(f"Automation workflow {wf_id} not found")
 
@@ -198,7 +199,7 @@ def deactivate_workflow(conn, args):
     wf_id = getattr(args, "workflow_id", None)
     if not wf_id:
         err("--workflow-id is required")
-    row = conn.execute("SELECT * FROM crmadv_automation_workflow WHERE id = ?", (wf_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_automation_workflow")).select(Table("crmadv_automation_workflow").star).where(Field("id") == P()).get_sql(), (wf_id,)).fetchone()
     if not row:
         err(f"Automation workflow {wf_id} not found")
 

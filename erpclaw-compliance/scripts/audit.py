@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -31,7 +32,7 @@ VALID_REMEDIATION_STATUSES = ("open", "in_progress", "remediated", "verified", "
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -84,7 +85,7 @@ def update_audit_plan(conn, args):
     plan_id = getattr(args, "audit_plan_id", None)
     if not plan_id:
         err("--audit-plan-id is required")
-    if not conn.execute("SELECT id FROM audit_plan WHERE id = ?", (plan_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("audit_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone():
         err(f"Audit plan {plan_id} not found")
 
     updates, params, changed = [], [], []
@@ -127,7 +128,7 @@ def get_audit_plan(conn, args):
     plan_id = getattr(args, "audit_plan_id", None)
     if not plan_id:
         err("--audit-plan-id is required")
-    row = conn.execute("SELECT * FROM audit_plan WHERE id = ?", (plan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("audit_plan")).select(Table("audit_plan").star).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not row:
         err(f"Audit plan {plan_id} not found")
     data = row_to_dict(row)
@@ -182,7 +183,7 @@ def start_audit(conn, args):
     plan_id = getattr(args, "audit_plan_id", None)
     if not plan_id:
         err("--audit-plan-id is required")
-    row = conn.execute("SELECT status FROM audit_plan WHERE id = ?", (plan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("audit_plan")).select(Field('status')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not row:
         err(f"Audit plan {plan_id} not found")
     current_status = row[0]
@@ -206,7 +207,7 @@ def complete_audit(conn, args):
     plan_id = getattr(args, "audit_plan_id", None)
     if not plan_id:
         err("--audit-plan-id is required")
-    row = conn.execute("SELECT status FROM audit_plan WHERE id = ?", (plan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("audit_plan")).select(Field('status')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not row:
         err(f"Audit plan {plan_id} not found")
     current_status = row[0]
@@ -230,7 +231,7 @@ def add_audit_finding(conn, args):
     audit_plan_id = getattr(args, "audit_plan_id", None)
     if not audit_plan_id:
         err("--audit-plan-id is required")
-    if not conn.execute("SELECT id FROM audit_plan WHERE id = ?", (audit_plan_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("audit_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (audit_plan_id,)).fetchone():
         err(f"Audit plan {audit_plan_id} not found")
 
     _validate_company(conn, args.company_id)

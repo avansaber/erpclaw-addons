@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("crmadv_territory", "TERR-")
 except ImportError:
@@ -33,7 +34,7 @@ VALID_ASSIGNMENT_STATUSES = ("active", "ended")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -52,7 +53,7 @@ def add_territory(conn, args):
 
     parent_id = getattr(args, "parent_territory_id", None)
     if parent_id:
-        if not conn.execute("SELECT id FROM crmadv_territory WHERE id = ?", (parent_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("crmadv_territory")).select(Field('id')).where(Field("id") == P()).get_sql(), (parent_id,)).fetchone():
             err(f"Parent territory {parent_id} not found")
 
     ter_id = str(uuid.uuid4())
@@ -85,7 +86,7 @@ def update_territory(conn, args):
     ter_id = getattr(args, "territory_id", None)
     if not ter_id:
         err("--territory-id is required")
-    if not conn.execute("SELECT id FROM crmadv_territory WHERE id = ?", (ter_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_territory")).select(Field('id')).where(Field("id") == P()).get_sql(), (ter_id,)).fetchone():
         err(f"Territory {ter_id} not found")
 
     updates, params, changed = [], [], []
@@ -120,7 +121,7 @@ def get_territory(conn, args):
     ter_id = getattr(args, "territory_id", None)
     if not ter_id:
         err("--territory-id is required")
-    row = conn.execute("SELECT * FROM crmadv_territory WHERE id = ?", (ter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_territory")).select(Table("crmadv_territory").star).where(Field("id") == P()).get_sql(), (ter_id,)).fetchone()
     if not row:
         err(f"Territory {ter_id} not found")
     ok(row_to_dict(row))
@@ -164,7 +165,7 @@ def add_territory_assignment(conn, args):
     territory_id = getattr(args, "territory_id", None)
     if not territory_id:
         err("--territory-id is required")
-    if not conn.execute("SELECT id FROM crmadv_territory WHERE id = ?", (territory_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_territory")).select(Field('id')).where(Field("id") == P()).get_sql(), (territory_id,)).fetchone():
         err(f"Territory {territory_id} not found")
 
     company_id = getattr(args, "company_id", None)
@@ -230,7 +231,7 @@ def set_territory_quota(conn, args):
     territory_id = getattr(args, "territory_id", None)
     if not territory_id:
         err("--territory-id is required")
-    if not conn.execute("SELECT id FROM crmadv_territory WHERE id = ?", (territory_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_territory")).select(Field('id')).where(Field("id") == P()).get_sql(), (territory_id,)).fetchone():
         err(f"Territory {territory_id} not found")
 
     company_id = getattr(args, "company_id", None)

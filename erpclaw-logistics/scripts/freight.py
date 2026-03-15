@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import create_purchase_invoice, CrossSkillError
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("logistics_carrier_invoice", "CINV-")
 except ImportError:
@@ -34,7 +35,7 @@ VALID_INVOICE_STATUSES = ("pending", "verified", "paid", "disputed")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -50,7 +51,7 @@ def add_freight_charge(conn, args):
     shipment_id = getattr(args, "shipment_id", None)
     if not shipment_id:
         err("--shipment-id is required")
-    if not conn.execute("SELECT id FROM logistics_shipment WHERE id = ?", (shipment_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("logistics_shipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (shipment_id,)).fetchone():
         err(f"Shipment {shipment_id} not found")
 
     company_id = getattr(args, "company_id", None)
@@ -126,15 +127,12 @@ def allocate_freight(conn, args):
     shipment_id = getattr(args, "shipment_id", None)
     if not shipment_id:
         err("--shipment-id is required")
-    ship = conn.execute("SELECT * FROM logistics_shipment WHERE id = ?", (shipment_id,)).fetchone()
+    ship = conn.execute(Q.from_(Table("logistics_shipment")).select(Table("logistics_shipment").star).where(Field("id") == P()).get_sql(), (shipment_id,)).fetchone()
     if not ship:
         err(f"Shipment {shipment_id} not found")
 
     # Sum all freight charges for this shipment
-    charges = conn.execute(
-        "SELECT charge_type, amount FROM logistics_freight_charge WHERE shipment_id = ?",
-        (shipment_id,)
-    ).fetchall()
+    charges = conn.execute(Q.from_(Table("logistics_freight_charge")).select(Field('charge_type'), Field('amount')).where(Field("shipment_id") == P()).get_sql(), (shipment_id,)).fetchall()
     total = sum(Decimal(c[1] or "0") for c in charges)
 
     # Update shipment shipping_cost with total freight
@@ -160,7 +158,7 @@ def add_carrier_invoice(conn, args):
     carrier_id = getattr(args, "carrier_id", None)
     if not carrier_id:
         err("--carrier-id is required")
-    if not conn.execute("SELECT id FROM logistics_carrier WHERE id = ?", (carrier_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
         err(f"Carrier {carrier_id} not found")
 
     company_id = getattr(args, "company_id", None)
@@ -246,9 +244,7 @@ def verify_carrier_invoice(conn, args):
     if not invoice_id:
         err("--id is required (carrier invoice ID)")
 
-    row = conn.execute(
-        "SELECT * FROM logistics_carrier_invoice WHERE id = ?", (invoice_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("logistics_carrier_invoice")).select(Table("logistics_carrier_invoice").star).where(Field("id") == P()).get_sql(), (invoice_id,)).fetchone()
     if not row:
         err(f"Carrier invoice {invoice_id} not found")
 
@@ -258,9 +254,7 @@ def verify_carrier_invoice(conn, args):
         err(f"Cannot verify carrier invoice: status is '{inv['invoice_status']}' (must be 'pending')")
 
     # Look up carrier to get supplier_id
-    carrier = conn.execute(
-        "SELECT * FROM logistics_carrier WHERE id = ?", (inv["carrier_id"],)
-    ).fetchone()
+    carrier = conn.execute(Q.from_(Table("logistics_carrier")).select(Table("logistics_carrier").star).where(Field("id") == P()).get_sql(), (inv["carrier_id"],)).fetchone()
     if not carrier:
         err(f"Carrier {inv['carrier_id']} not found")
 
@@ -273,7 +267,7 @@ def verify_carrier_invoice(conn, args):
         )
 
     # Validate supplier still exists
-    if not conn.execute("SELECT id FROM supplier WHERE id = ?", (supplier_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("supplier")).select(Field('id')).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone():
         err(f"Supplier {supplier_id} linked to carrier no longer exists")
 
     # Build description for the PI line item

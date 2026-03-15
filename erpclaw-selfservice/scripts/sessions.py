@@ -13,6 +13,7 @@ try:
     sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -24,7 +25,9 @@ _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t_co = Table("company")
+    q_co = Q.from_(t_co).select(t_co.id).where(t_co.id == P())
+    if not conn.execute(q_co.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -51,7 +54,9 @@ def create_session(conn, args):
     profile_id = getattr(args, "profile_id", None)
     if not profile_id:
         err("--profile-id is required")
-    if not conn.execute("SELECT id FROM selfservice_permission_profile WHERE id = ?", (profile_id,)).fetchone():
+    t_prof = Table("selfservice_permission_profile")
+    q_prof = Q.from_(t_prof).select(t_prof.id).where(t_prof.id == P())
+    if not conn.execute(q_prof.get_sql(), (profile_id,)).fetchone():
         err(f"Profile {profile_id} not found")
 
     token = getattr(args, "token", None)
@@ -64,7 +69,9 @@ def create_session(conn, args):
 
     portal_id = getattr(args, "portal_id", None)
     if portal_id:
-        if not conn.execute("SELECT id FROM selfservice_portal_config WHERE id = ?", (portal_id,)).fetchone():
+        t_pc = Table("selfservice_portal_config")
+        q_pc = Q.from_(t_pc).select(t_pc.id).where(t_pc.id == P())
+        if not conn.execute(q_pc.get_sql(), (portal_id,)).fetchone():
             err(f"Portal config {portal_id} not found")
 
     session_id = str(uuid.uuid4())
@@ -129,7 +136,9 @@ def get_session(conn, args):
         err("--session-id or --token is required")
 
     if session_id:
-        row = conn.execute("SELECT * FROM selfservice_session WHERE id = ?", (session_id,)).fetchone()
+        t = Table("selfservice_session")
+        q = Q.from_(t).select(t.star).where(t.id == P())
+        row = conn.execute(q.get_sql(), (session_id,)).fetchone()
     else:
         row = conn.execute("""
             SELECT s.*, p.allowed_actions, p.denied_actions, p.record_scope,
@@ -151,12 +160,14 @@ def get_session(conn, args):
 
         now = _now_iso()
         if d["expires_at"] and d["expires_at"] < now:
-            conn.execute("UPDATE selfservice_session SET session_status = 'expired' WHERE id = ?", (d["id"],))
+            sql = update_row("selfservice_session", data={"session_status": P()}, where={"id": P()})
+            conn.execute(sql, ("expired", d["id"]))
             conn.commit()
             err("Session has expired")
 
         # Update last activity
-        conn.execute("UPDATE selfservice_session SET last_activity_at = ? WHERE id = ?", (now, d["id"]))
+        sql = update_row("selfservice_session", data={"last_activity_at": P()}, where={"id": P()})
+        conn.execute(sql, (now, d["id"]))
         conn.commit()
 
         _parse_json_fields(d, ["allowed_actions", "denied_actions", "field_visibility"])
@@ -183,8 +194,9 @@ def expire_session(conn, args):
     session_id = getattr(args, "session_id", None)
     if not session_id:
         err("--session-id is required")
-    row = conn.execute("SELECT id, session_status FROM selfservice_session WHERE id = ?",
-                       (session_id,)).fetchone()
+    t = Table("selfservice_session")
+    q = Q.from_(t).select(t.id, t.session_status).where(t.id == P())
+    row = conn.execute(q.get_sql(), (session_id,)).fetchone()
     if not row:
         err(f"Session {session_id} not found")
     if row["session_status"] == "ended":
@@ -192,7 +204,8 @@ def expire_session(conn, args):
     if row["session_status"] == "expired":
         err(f"Session {session_id} is already expired")
 
-    conn.execute("UPDATE selfservice_session SET session_status = 'expired' WHERE id = ?", (session_id,))
+    sql = update_row("selfservice_session", data={"session_status": P()}, where={"id": P()})
+    conn.execute(sql, ("expired", session_id))
     audit(conn, SKILL, "selfservice-expire-session", "selfservice_session", session_id,
           new_values={"session_status": "expired"})
     conn.commit()

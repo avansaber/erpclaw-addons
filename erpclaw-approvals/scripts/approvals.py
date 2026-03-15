@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("approval_rule", "ARULE-")
     ENTITY_PREFIXES.setdefault("approval_request", "APR-")
@@ -37,7 +38,9 @@ VALID_REQUEST_STATUSES = ("pending", "in_progress", "approved", "rejected", "can
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t = Table("company")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -61,12 +64,12 @@ def add_approval_rule(conn, args):
     entity_type = getattr(args, "entity_type", None)
     conditions = getattr(args, "conditions", None)
 
-    conn.execute("""
-        INSERT INTO approval_rule (
-            id, name, entity_type, conditions, is_active, company_id,
-            created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("approval_rule", {
+        "id": P(), "name": P(), "entity_type": P(), "conditions": P(),
+        "is_active": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         rule_id, name, entity_type, conditions,
         1, args.company_id, now, now,
     ))
@@ -83,7 +86,9 @@ def update_approval_rule(conn, args):
     rule_id = getattr(args, "id", None)
     if not rule_id:
         err("--id is required")
-    if not conn.execute("SELECT id FROM approval_rule WHERE id = ?", (rule_id,)).fetchone():
+    t = Table("approval_rule")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (rule_id,)).fetchone():
         err(f"Approval rule {rule_id} not found")
 
     updates, params, changed = [], [], []
@@ -122,16 +127,17 @@ def get_approval_rule(conn, args):
     rule_id = getattr(args, "id", None)
     if not rule_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM approval_rule WHERE id = ?", (rule_id,)).fetchone()
+    t = Table("approval_rule")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (rule_id,)).fetchone()
     if not row:
         err(f"Approval rule {rule_id} not found")
     data = row_to_dict(row)
 
     # Include steps
-    steps = conn.execute(
-        "SELECT * FROM approval_step WHERE rule_id = ? ORDER BY step_order",
-        (rule_id,)
-    ).fetchall()
+    t_step = Table("approval_step")
+    q_steps = Q.from_(t_step).select(t_step.star).where(t_step.rule_id == P()).orderby(t_step.step_order)
+    steps = conn.execute(q_steps.get_sql(), (rule_id,)).fetchall()
     data["steps"] = [row_to_dict(s) for s in steps]
     data["step_count"] = len(steps)
     ok(data)
@@ -141,31 +147,33 @@ def get_approval_rule(conn, args):
 # 4. list-approval-rules
 # ===========================================================================
 def list_approval_rules(conn, args):
-    where, params = ["1=1"], []
+    t = Table("approval_rule")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "entity_type", None):
-        where.append("entity_type = ?")
+        q_count = q_count.where(t.entity_type == P())
+        q_rows = q_rows.where(t.entity_type == P())
         params.append(args.entity_type)
     if getattr(args, "search", None):
-        where.append("(name LIKE ?)")
+        q_count = q_count.where(t.name.like(P()))
+        q_rows = q_rows.where(t.name.like(P()))
         params.append(f"%{args.search}%")
 
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        where.append("is_active = ?")
+        q_count = q_count.where(t.is_active == P())
+        q_rows = q_rows.where(t.is_active == P())
         params.append(int(is_active))
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM approval_rule WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM approval_rule WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -180,7 +188,9 @@ def add_approval_step(conn, args):
     rule_id = getattr(args, "rule_id", None)
     if not rule_id:
         err("--rule-id is required")
-    if not conn.execute("SELECT id FROM approval_rule WHERE id = ?", (rule_id,)).fetchone():
+    t = Table("approval_rule")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (rule_id,)).fetchone():
         err(f"Approval rule {rule_id} not found")
 
     approver = getattr(args, "approver", None)
@@ -201,12 +211,12 @@ def add_approval_step(conn, args):
     step_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO approval_step (
-            id, rule_id, step_order, approver, approval_type, is_required,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("approval_step", {
+        "id": P(), "rule_id": P(), "step_order": P(), "approver": P(),
+        "approval_type": P(), "is_required": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         step_id, rule_id, step_order, approver, approval_type, is_required,
         company_id, now, now,
     ))
@@ -223,24 +233,24 @@ def add_approval_step(conn, args):
 # 6. list-approval-steps
 # ===========================================================================
 def list_approval_steps(conn, args):
+    t = Table("approval_step")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     rule_id = getattr(args, "rule_id", None)
-    where, params = ["1=1"], []
     if rule_id:
-        where.append("rule_id = ?")
+        q_count = q_count.where(t.rule_id == P())
+        q_rows = q_rows.where(t.rule_id == P())
         params.append(rule_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM approval_step WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM approval_step WHERE {where_sql} ORDER BY step_order ASC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    q_rows = q_rows.orderby(t.step_order, order=Order.asc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -255,7 +265,9 @@ def submit_for_approval(conn, args):
     rule_id = getattr(args, "rule_id", None)
     if not rule_id:
         err("--rule-id is required")
-    rule = conn.execute("SELECT * FROM approval_rule WHERE id = ?", (rule_id,)).fetchone()
+    t = Table("approval_rule")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    rule = conn.execute(q.get_sql(), (rule_id,)).fetchone()
     if not rule:
         err(f"Approval rule {rule_id} not found")
 
@@ -270,9 +282,9 @@ def submit_for_approval(conn, args):
         err("Approval rule is not active")
 
     # Check at least one step exists
-    step_count = conn.execute(
-        "SELECT COUNT(*) FROM approval_step WHERE rule_id = ?", (rule_id,)
-    ).fetchone()[0]
+    t_step = Table("approval_step")
+    q_cnt = Q.from_(t_step).select(fn.Count("*")).where(t_step.rule_id == P())
+    step_count = conn.execute(q_cnt.get_sql(), (rule_id,)).fetchone()[0]
     if step_count == 0:
         err("Approval rule has no steps defined")
 
@@ -285,13 +297,13 @@ def submit_for_approval(conn, args):
     naming = get_next_name(conn, "approval_request", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO approval_request (
-            id, naming_series, rule_id, entity_type, entity_id,
-            requested_by, current_step, request_status, notes, company_id,
-            created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("approval_request", {
+        "id": P(), "naming_series": P(), "rule_id": P(), "entity_type": P(),
+        "entity_id": P(), "requested_by": P(), "current_step": P(),
+        "request_status": P(), "notes": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         req_id, naming, rule_id, entity_type, entity_id,
         requested_by, 1, "pending",
         getattr(args, "notes", None),
@@ -313,7 +325,9 @@ def approve_request(conn, args):
     req_id = getattr(args, "id", None)
     if not req_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM approval_request WHERE id = ?", (req_id,)).fetchone()
+    t = Table("approval_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Approval request {req_id} not found")
 
@@ -325,10 +339,9 @@ def approve_request(conn, args):
     rule_id = data["rule_id"]
 
     # Get total steps for this rule
-    max_step = conn.execute(
-        "SELECT MAX(step_order) FROM approval_step WHERE rule_id = ?",
-        (rule_id,)
-    ).fetchone()[0] or 1
+    t_step = Table("approval_step")
+    q_max = Q.from_(t_step).select(fn.Max(t_step.step_order)).where(t_step.rule_id == P())
+    max_step = conn.execute(q_max.get_sql(), (rule_id,)).fetchone()[0] or 1
 
     notes = getattr(args, "notes", None)
 
@@ -364,7 +377,9 @@ def reject_request(conn, args):
     req_id = getattr(args, "id", None)
     if not req_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM approval_request WHERE id = ?", (req_id,)).fetchone()
+    t = Table("approval_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Approval request {req_id} not found")
 
@@ -374,9 +389,8 @@ def reject_request(conn, args):
 
     notes = getattr(args, "notes", None)
     conn.execute(
-        "UPDATE approval_request SET request_status = 'rejected', notes = ?, "
-        "updated_at = datetime('now') WHERE id = ?",
-        (notes, req_id)
+        "UPDATE \"approval_request\" SET \"request_status\"=?,\"notes\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+        ("rejected", notes, req_id)
     )
     audit(conn, SKILL, "approval-reject-request", "approval_request", req_id,
           new_values={"request_status": "rejected", "notes": notes})
@@ -391,7 +405,9 @@ def cancel_request(conn, args):
     req_id = getattr(args, "id", None)
     if not req_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM approval_request WHERE id = ?", (req_id,)).fetchone()
+    t = Table("approval_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Approval request {req_id} not found")
 
@@ -400,8 +416,8 @@ def cancel_request(conn, args):
         err(f"Cannot cancel request in status '{data['request_status']}'.")
 
     conn.execute(
-        "UPDATE approval_request SET request_status = 'cancelled', updated_at = datetime('now') WHERE id = ?",
-        (req_id,)
+        "UPDATE \"approval_request\" SET \"request_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+        ("cancelled", req_id)
     )
     audit(conn, SKILL, "approval-cancel-request", "approval_request", req_id,
           new_values={"request_status": "cancelled"})
@@ -413,32 +429,37 @@ def cancel_request(conn, args):
 # 11. list-approval-requests
 # ===========================================================================
 def list_approval_requests(conn, args):
-    where, params = ["1=1"], []
+    t = Table("approval_request")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "status", None):
-        where.append("request_status = ?")
+        q_count = q_count.where(t.request_status == P())
+        q_rows = q_rows.where(t.request_status == P())
         params.append(args.status)
     if getattr(args, "entity_type", None):
-        where.append("entity_type = ?")
+        q_count = q_count.where(t.entity_type == P())
+        q_rows = q_rows.where(t.entity_type == P())
         params.append(args.entity_type)
     if getattr(args, "rule_id", None):
-        where.append("rule_id = ?")
+        q_count = q_count.where(t.rule_id == P())
+        q_rows = q_rows.where(t.rule_id == P())
         params.append(args.rule_id)
     if getattr(args, "search", None):
-        where.append("(notes LIKE ? OR requested_by LIKE ?)")
-        params.extend([f"%{args.search}%", f"%{args.search}%"])
+        s = f"%{args.search}%"
+        search_crit = (t.notes.like(P())) | (t.requested_by.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
+        params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM approval_request WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM approval_request WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -453,24 +474,24 @@ def get_approval_request(conn, args):
     req_id = getattr(args, "id", None)
     if not req_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM approval_request WHERE id = ?", (req_id,)).fetchone()
+    t = Table("approval_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Approval request {req_id} not found")
     data = row_to_dict(row)
 
     # Include rule info
-    rule = conn.execute(
-        "SELECT name, entity_type FROM approval_rule WHERE id = ?",
-        (data["rule_id"],)
-    ).fetchone()
+    t_rule = Table("approval_rule")
+    q_rule = Q.from_(t_rule).select(t_rule.name, t_rule.entity_type).where(t_rule.id == P())
+    rule = conn.execute(q_rule.get_sql(), (data["rule_id"],)).fetchone()
     if rule:
         data["rule_name"] = rule[0]
 
     # Include steps
-    steps = conn.execute(
-        "SELECT * FROM approval_step WHERE rule_id = ? ORDER BY step_order",
-        (data["rule_id"],)
-    ).fetchall()
+    t_step = Table("approval_step")
+    q_steps = Q.from_(t_step).select(t_step.star).where(t_step.rule_id == P()).orderby(t_step.step_order)
+    steps = conn.execute(q_steps.get_sql(), (data["rule_id"],)).fetchall()
     data["steps"] = [row_to_dict(s) for s in steps]
     data["total_steps"] = len(steps)
     ok(data)
@@ -482,7 +503,9 @@ def get_approval_request(conn, args):
 def status_action(conn, args):
     counts = {}
     for tbl in ("approval_rule", "approval_step", "approval_request"):
-        counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        t = Table(tbl)
+        q = Q.from_(t).select(fn.Count("*"))
+        counts[tbl] = conn.execute(q.get_sql()).fetchone()[0]
     ok({
         "skill": "erpclaw-approvals",
         "version": "1.0.0",

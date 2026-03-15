@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("logistics_route", "RTE-")
 except ImportError:
@@ -33,7 +34,7 @@ VALID_STOP_TYPES = ("pickup", "delivery", "transfer")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -45,7 +46,7 @@ def _validate_enum(value, valid_values, field_name):
 def _get_route(conn, route_id):
     if not route_id:
         err("--id is required")
-    row = conn.execute("SELECT * FROM logistics_route WHERE id = ?", (route_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("logistics_route")).select(Table("logistics_route").star).where(Field("id") == P()).get_sql(), (route_id,)).fetchone()
     if not row:
         err(f"Route {route_id} not found")
     return row
@@ -165,7 +166,7 @@ def add_route_stop(conn, args):
     route_id = getattr(args, "route_id", None)
     if not route_id:
         err("--route-id is required")
-    if not conn.execute("SELECT id FROM logistics_route WHERE id = ?", (route_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("logistics_route")).select(Field('id')).where(Field("id") == P()).get_sql(), (route_id,)).fetchone():
         err(f"Route {route_id} not found")
 
     company_id = getattr(args, "company_id", None)
@@ -245,10 +246,7 @@ def optimize_route_report(conn, args):
     report = []
     for r in routes:
         r_data = row_to_dict(r)
-        stops = conn.execute(
-            "SELECT * FROM logistics_route_stop WHERE route_id = ? ORDER BY stop_order",
-            (r["id"],)
-        ).fetchall()
+        stops = conn.execute(Q.from_(Table("logistics_route_stop")).select(Table("logistics_route_stop").star).where(Field("route_id") == P()).orderby(Field("stop_order")).get_sql(), (r["id"],)).fetchall()
         r_data["stops"] = [row_to_dict(s) for s in stops]
         r_data["stop_count"] = len(stops)
 

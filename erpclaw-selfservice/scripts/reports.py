@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 try:
     sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
     from erpclaw_lib.response import ok, err, row_to_dict
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -26,7 +27,9 @@ VALID_ACTIVITY_RESULTS = ("allowed", "denied", "error")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t_co = Table("company")
+    q_co = Q.from_(t_co).select(t_co.id).where(t_co.id == P())
+    if not conn.execute(q_co.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -48,7 +51,9 @@ def log_activity(conn, args):
 
     session_id = getattr(args, "session_id", None)
     if session_id:
-        if not conn.execute("SELECT id FROM selfservice_session WHERE id = ?", (session_id,)).fetchone():
+        t_ss = Table("selfservice_session")
+        q_ss = Q.from_(t_ss).select(t_ss.id).where(t_ss.id == P())
+        if not conn.execute(q_ss.get_sql(), (session_id,)).fetchone():
             err(f"Session {session_id} not found")
 
     log_id = str(uuid.uuid4())

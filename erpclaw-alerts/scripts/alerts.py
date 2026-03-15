@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("alert_rule", "ALRT-")
     ENTITY_PREFIXES.setdefault("notification_channel", "NCHP-")
@@ -38,7 +39,9 @@ VALID_ALERT_STATUSES = ("triggered", "acknowledged", "resolved", "expired")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t = Table("company")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -71,7 +74,9 @@ def _get_rule(conn, rule_id):
     """Fetch an alert rule by ID, or err() if not found."""
     if not rule_id:
         err("--rule-id is required")
-    row = conn.execute("SELECT * FROM alert_rule WHERE id = ?", (rule_id,)).fetchone()
+    t = Table("alert_rule")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (rule_id,)).fetchone()
     if not row:
         err(f"Alert rule {rule_id} not found")
     return row
@@ -113,17 +118,18 @@ def add_alert_rule(conn, args):
     naming = get_next_name(conn, "alert_rule", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO alert_rule (
-            id, naming_series, name, description, entity_type, condition_json,
-            severity, channel_ids, cooldown_minutes, is_active, trigger_count,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)
-    """, (
+    sql, _ = insert_row("alert_rule", {
+        "id": P(), "naming_series": P(), "name": P(), "description": P(),
+        "entity_type": P(), "condition_json": P(),
+        "severity": P(), "channel_ids": P(), "cooldown_minutes": P(),
+        "is_active": P(), "trigger_count": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         rule_id, naming, name,
         getattr(args, "description", None),
         entity_type, condition_json, severity, channel_ids,
-        cooldown_minutes, is_active,
+        cooldown_minutes, is_active, 0,
         company_id, now, now,
     ))
     audit(conn, "alert_rule", rule_id, "alert-add-alert-rule", company_id)
@@ -217,9 +223,9 @@ def get_alert_rule(conn, args):
     d["channel_ids"] = _parse_json_field(d.get("channel_ids"))
 
     # Count associated logs
-    log_count = conn.execute(
-        "SELECT COUNT(*) FROM alert_log WHERE rule_id = ?", (rule_id,)
-    ).fetchone()[0]
+    t = Table("alert_log")
+    q = Q.from_(t).select(fn.Count("*")).where(t.rule_id == P())
+    log_count = conn.execute(q.get_sql(), (rule_id,)).fetchone()[0]
     d["log_count"] = log_count
 
     ok(d)
@@ -229,37 +235,41 @@ def get_alert_rule(conn, args):
 # 4. list-alert-rules
 # ===========================================================================
 def list_alert_rules(conn, args):
-    where, params = ["1=1"], []
+    t = Table("alert_rule")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
 
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "entity_type", None):
-        where.append("entity_type = ?")
+        q_count = q_count.where(t.entity_type == P())
+        q_rows = q_rows.where(t.entity_type == P())
         params.append(args.entity_type)
     if getattr(args, "severity", None):
-        where.append("severity = ?")
+        q_count = q_count.where(t.severity == P())
+        q_rows = q_rows.where(t.severity == P())
         params.append(args.severity)
 
     is_active_raw = getattr(args, "is_active", None)
     if is_active_raw is not None:
-        where.append("is_active = ?")
+        q_count = q_count.where(t.is_active == P())
+        q_rows = q_rows.where(t.is_active == P())
         params.append(int(is_active_raw))
 
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
-        params.extend([f"%{args.search}%", f"%{args.search}%"])
+        s = f"%{args.search}%"
+        search_crit = (t.name.like(P())) | (t.description.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
+        params.extend([s, s])
 
-    where_sql = " AND ".join(where)
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
 
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM alert_rule WHERE {where_sql}", params
-    ).fetchone()[0]
-
-    rows = conn.execute(
-        f"SELECT * FROM alert_rule WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [args.limit, args.offset],
-    ).fetchall()
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
 
     results = []
     for row in rows:
@@ -279,10 +289,10 @@ def activate_alert_rule(conn, args):
     row = _get_rule(conn, rule_id)
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE alert_rule SET is_active = 1, updated_at = ? WHERE id = ?",
-        (now, rule_id),
-    )
+    sql = update_row("alert_rule",
+                     data={"is_active": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, (1, now, rule_id))
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
     audit(conn, "alert_rule", rule_id, "alert-activate-alert-rule", company_id)
     conn.commit()
@@ -298,10 +308,10 @@ def deactivate_alert_rule(conn, args):
     row = _get_rule(conn, rule_id)
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE alert_rule SET is_active = 0, updated_at = ? WHERE id = ?",
-        (now, rule_id),
-    )
+    sql = update_row("alert_rule",
+                     data={"is_active": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, (0, now, rule_id))
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
     audit(conn, "alert_rule", rule_id, "alert-deactivate-alert-rule", company_id)
     conn.commit()
@@ -335,12 +345,12 @@ def add_notification_channel(conn, args):
     naming = get_next_name(conn, "notification_channel", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO notification_channel (
-            id, naming_series, name, channel_type, config_json,
-            is_active, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("notification_channel", {
+        "id": P(), "naming_series": P(), "name": P(), "channel_type": P(),
+        "config_json": P(), "is_active": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         ch_id, naming, name, channel_type, config_json,
         is_active, company_id, now, now,
     ))
@@ -360,34 +370,35 @@ def add_notification_channel(conn, args):
 # 8. list-notification-channels
 # ===========================================================================
 def list_notification_channels(conn, args):
-    where, params = ["1=1"], []
+    t = Table("notification_channel")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
 
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "channel_type", None):
-        where.append("channel_type = ?")
+        q_count = q_count.where(t.channel_type == P())
+        q_rows = q_rows.where(t.channel_type == P())
         params.append(args.channel_type)
 
     is_active_raw = getattr(args, "is_active", None)
     if is_active_raw is not None:
-        where.append("is_active = ?")
+        q_count = q_count.where(t.is_active == P())
+        q_rows = q_rows.where(t.is_active == P())
         params.append(int(is_active_raw))
 
     if getattr(args, "search", None):
-        where.append("name LIKE ?")
+        q_count = q_count.where(t.name.like(P()))
+        q_rows = q_rows.where(t.name.like(P()))
         params.append(f"%{args.search}%")
 
-    where_sql = " AND ".join(where)
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
 
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM notification_channel WHERE {where_sql}", params
-    ).fetchone()[0]
-
-    rows = conn.execute(
-        f"SELECT * FROM notification_channel WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [args.limit, args.offset],
-    ).fetchall()
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
 
     results = []
     for row in rows:
@@ -406,15 +417,16 @@ def delete_notification_channel(conn, args):
     if not channel_id:
         err("--channel-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM notification_channel WHERE id = ?", (channel_id,)
-    ).fetchone()
+    t = Table("notification_channel")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (channel_id,)).fetchone()
     if not row:
         err(f"Notification channel {channel_id} not found")
 
     company_id = row["company_id"] if hasattr(row, "keys") else row[6]
 
-    conn.execute("DELETE FROM notification_channel WHERE id = ?", (channel_id,))
+    q_del = Q.from_(t).delete().where(t.id == P())
+    conn.execute(q_del.get_sql(), (channel_id,))
     audit(conn, "notification_channel", channel_id, "alert-delete-notification-channel", company_id)
     conn.commit()
 
@@ -453,24 +465,22 @@ def trigger_alert(conn, args):
     now = _now_iso()
 
     # Insert alert log entry
-    conn.execute("""
-        INSERT INTO alert_log (
-            id, rule_id, rule_name, entity_type, entity_id, severity,
-            message, alert_status, channel_results, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("alert_log", {
+        "id": P(), "rule_id": P(), "rule_name": P(), "entity_type": P(),
+        "entity_id": P(), "severity": P(),
+        "message": P(), "alert_status": P(), "channel_results": P(),
+        "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         log_id, rule_id, rule_name, entity_type, entity_id, severity,
         message, "triggered", channel_results, company_id, now,
     ))
 
     # Update rule: last_triggered_at and trigger_count
-    conn.execute("""
-        UPDATE alert_rule SET
-            last_triggered_at = ?,
-            trigger_count = trigger_count + 1,
-            updated_at = ?
-        WHERE id = ?
-    """, (now, now, rule_id))
+    conn.execute(
+        "UPDATE \"alert_rule\" SET \"last_triggered_at\"=?,\"trigger_count\"=\"trigger_count\"+1,\"updated_at\"=? WHERE \"id\"=?",
+        (now, now, rule_id),
+    )
 
     audit(conn, "alert_log", log_id, "alert-trigger-alert", company_id)
     conn.commit()
@@ -491,37 +501,42 @@ def trigger_alert(conn, args):
 # 11. list-alert-logs
 # ===========================================================================
 def list_alert_logs(conn, args):
-    where, params = ["1=1"], []
+    t = Table("alert_log")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
 
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "rule_id", None):
-        where.append("rule_id = ?")
+        q_count = q_count.where(t.rule_id == P())
+        q_rows = q_rows.where(t.rule_id == P())
         params.append(args.rule_id)
     if getattr(args, "severity", None):
-        where.append("severity = ?")
+        q_count = q_count.where(t.severity == P())
+        q_rows = q_rows.where(t.severity == P())
         params.append(args.severity)
     if getattr(args, "alert_status", None):
-        where.append("alert_status = ?")
+        q_count = q_count.where(t.alert_status == P())
+        q_rows = q_rows.where(t.alert_status == P())
         params.append(args.alert_status)
     if getattr(args, "entity_type", None):
-        where.append("entity_type = ?")
+        q_count = q_count.where(t.entity_type == P())
+        q_rows = q_rows.where(t.entity_type == P())
         params.append(args.entity_type)
     if getattr(args, "search", None):
-        where.append("(message LIKE ? OR rule_name LIKE ?)")
-        params.extend([f"%{args.search}%", f"%{args.search}%"])
+        s = f"%{args.search}%"
+        search_crit = (t.message.like(P())) | (t.rule_name.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
+        params.extend([s, s])
 
-    where_sql = " AND ".join(where)
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
 
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM alert_log WHERE {where_sql}", params
-    ).fetchone()[0]
-
-    rows = conn.execute(
-        f"SELECT * FROM alert_log WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [args.limit, args.offset],
-    ).fetchall()
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
 
     results = []
     for row in rows:
@@ -540,9 +555,9 @@ def acknowledge_alert(conn, args):
     if not alert_log_id:
         err("--alert-log-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM alert_log WHERE id = ?", (alert_log_id,)
-    ).fetchone()
+    t = Table("alert_log")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (alert_log_id,)).fetchone()
     if not row:
         err(f"Alert log {alert_log_id} not found")
 
@@ -557,13 +572,10 @@ def acknowledge_alert(conn, args):
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
     now = _now_iso()
 
-    conn.execute("""
-        UPDATE alert_log SET
-            alert_status = 'acknowledged',
-            acknowledged_by = ?,
-            acknowledged_at = ?
-        WHERE id = ?
-    """, (acknowledged_by, now, alert_log_id))
+    sql = update_row("alert_log",
+                     data={"alert_status": P(), "acknowledged_by": P(), "acknowledged_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("acknowledged", acknowledged_by, now, alert_log_id))
 
     audit(conn, "alert_log", alert_log_id, "alert-acknowledge-alert", company_id)
     conn.commit()
@@ -580,62 +592,65 @@ def acknowledge_alert(conn, args):
 # 13. alert-summary-report
 # ===========================================================================
 def alert_summary_report(conn, args):
-    where, params = ["1=1"], []
+    t = Table("alert_log")
+    params = []
+    base_crit = None
 
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        crit = t.company_id == P()
+        base_crit = crit if base_crit is None else base_crit & crit
         params.append(args.company_id)
     if getattr(args, "start_date", None):
-        where.append("created_at >= ?")
+        crit = t.created_at >= P()
+        base_crit = crit if base_crit is None else base_crit & crit
         params.append(args.start_date)
     if getattr(args, "end_date", None):
-        where.append("created_at <= ?")
+        crit = t.created_at <= P()
+        base_crit = crit if base_crit is None else base_crit & crit
         params.append(args.end_date)
 
-    where_sql = " AND ".join(where)
-
     # Total alerts
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM alert_log WHERE {where_sql}", params
-    ).fetchone()[0]
+    q_total = Q.from_(t).select(fn.Count("*"))
+    if base_crit is not None:
+        q_total = q_total.where(base_crit)
+    total = conn.execute(q_total.get_sql(), params).fetchone()[0]
 
     # By severity
-    severity_rows = conn.execute(f"""
-        SELECT severity, COUNT(*) AS cnt
-        FROM alert_log WHERE {where_sql}
-        GROUP BY severity ORDER BY cnt DESC
-    """, params).fetchall()
+    q_sev = Q.from_(t).select(t.severity, fn.Count("*").as_("cnt")).groupby(t.severity).orderby(Field("cnt"), order=Order.desc)
+    if base_crit is not None:
+        q_sev = q_sev.where(base_crit)
+    severity_rows = conn.execute(q_sev.get_sql(), params).fetchall()
     by_severity = {}
     for r in severity_rows:
         by_severity[r[0] or "unknown"] = r[1]
 
     # By status
-    status_rows = conn.execute(f"""
-        SELECT alert_status, COUNT(*) AS cnt
-        FROM alert_log WHERE {where_sql}
-        GROUP BY alert_status ORDER BY cnt DESC
-    """, params).fetchall()
+    q_st = Q.from_(t).select(t.alert_status, fn.Count("*").as_("cnt")).groupby(t.alert_status).orderby(Field("cnt"), order=Order.desc)
+    if base_crit is not None:
+        q_st = q_st.where(base_crit)
+    status_rows = conn.execute(q_st.get_sql(), params).fetchall()
     by_status = {}
     for r in status_rows:
         by_status[r[0] or "unknown"] = r[1]
 
     # By entity_type
-    entity_rows = conn.execute(f"""
-        SELECT entity_type, COUNT(*) AS cnt
-        FROM alert_log WHERE {where_sql}
-        GROUP BY entity_type ORDER BY cnt DESC
-    """, params).fetchall()
+    q_et = Q.from_(t).select(t.entity_type, fn.Count("*").as_("cnt")).groupby(t.entity_type).orderby(Field("cnt"), order=Order.desc)
+    if base_crit is not None:
+        q_et = q_et.where(base_crit)
+    entity_rows = conn.execute(q_et.get_sql(), params).fetchall()
     by_entity_type = {}
     for r in entity_rows:
         by_entity_type[r[0] or "unknown"] = r[1]
 
     # Top rules
-    top_rules = conn.execute(f"""
-        SELECT rule_name, rule_id, COUNT(*) AS cnt
-        FROM alert_log WHERE {where_sql}
-        GROUP BY rule_id, rule_name ORDER BY cnt DESC
-        LIMIT 10
-    """, params).fetchall()
+    q_top = (Q.from_(t)
+             .select(t.rule_name, t.rule_id, fn.Count("*").as_("cnt"))
+             .groupby(t.rule_id, t.rule_name)
+             .orderby(Field("cnt"), order=Order.desc)
+             .limit(10))
+    if base_crit is not None:
+        q_top = q_top.where(base_crit)
+    top_rules = conn.execute(q_top.get_sql(), params).fetchall()
     top_rules_list = []
     for r in top_rules:
         top_rules_list.append({
@@ -661,7 +676,9 @@ def status_action(conn, args):
     table_counts = {}
     for table in ["alert_rule", "alert_log", "notification_channel"]:
         try:
-            count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            t = Table(table)
+            q = Q.from_(t).select(fn.Count("*"))
+            count = conn.execute(q.get_sql()).fetchone()[0]
             table_counts[table] = count
         except Exception:
             table_counts[table] = "missing"

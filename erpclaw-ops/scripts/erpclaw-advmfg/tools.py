@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -31,9 +32,7 @@ def add_tool(conn, args):
     if not getattr(args, "name", None):
         err("--name is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     tool_type = getattr(args, "tool_type", None) or "cutting"
@@ -84,9 +83,7 @@ def update_tool(conn, args):
     tool_id = getattr(args, "tool_id", None)
     if not tool_id:
         err("--tool-id is required")
-    row = conn.execute(
-        "SELECT * FROM tool WHERE id = ?", (tool_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("tool")).select(Table("tool").star).where(Field("id") == P()).get_sql(), (tool_id,)).fetchone()
     if not row:
         err(f"Tool {tool_id} not found")
 
@@ -160,9 +157,7 @@ def get_tool(conn, args):
     tool_id = getattr(args, "tool_id", None)
     if not tool_id:
         err("--tool-id is required")
-    row = conn.execute(
-        "SELECT * FROM tool WHERE id = ?", (tool_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("tool")).select(Table("tool").star).where(Field("id") == P()).get_sql(), (tool_id,)).fetchone()
     if not row:
         err(f"Tool {tool_id} not found")
 
@@ -235,14 +230,10 @@ def add_tool_usage(conn, args):
     if not getattr(args, "tool_id", None):
         err("--tool-id is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
-    tool = conn.execute(
-        "SELECT * FROM tool WHERE id = ?", (args.tool_id,)
-    ).fetchone()
+    tool = conn.execute(Q.from_(Table("tool")).select(Table("tool").star).where(Field("id") == P()).get_sql(), (args.tool_id,)).fetchone()
     if not tool:
         err(f"Tool {args.tool_id} not found")
     if tool["status"] == "scrapped":
@@ -259,11 +250,8 @@ def add_tool_usage(conn, args):
     if condition_after is not None and condition_after not in VALID_CONDITIONS:
         err(f"Invalid condition-after: {condition_after}")
 
-    conn.execute(
-        """INSERT INTO tool_usage
-           (id, tool_id, work_order_id, operator, usage_count,
-            usage_duration_minutes, condition_after, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("tool_usage", {"id": P(), "tool_id": P(), "work_order_id": P(), "operator": P(), "usage_count": P(), "usage_duration_minutes": P(), "condition_after": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             usage_id, args.tool_id,
             getattr(args, "work_order_id", None),

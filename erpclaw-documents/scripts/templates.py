@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-documents"
 
@@ -31,9 +32,7 @@ def add_template(conn, args):
     if not getattr(args, "content", None):
         err("--content is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     template_type = getattr(args, "template_type", None) or "general"
@@ -70,9 +69,7 @@ def update_template(conn, args):
     if not tpl_id:
         err("--template-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM document_template WHERE id = ?", (tpl_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document_template")).select(Table("document_template").star).where(Field("id") == P()).get_sql(), (tpl_id,)).fetchone()
     if not row:
         err(f"Template {tpl_id} not found")
 
@@ -126,9 +123,7 @@ def get_template(conn, args):
     if not tpl_id:
         err("--template-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM document_template WHERE id = ?", (tpl_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document_template")).select(Table("document_template").star).where(Field("id") == P()).get_sql(), (tpl_id,)).fetchone()
     if not row:
         err(f"Template {tpl_id} not found")
 
@@ -187,17 +182,13 @@ def generate_from_template(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM document_template WHERE id = ?", (tpl_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("document_template")).select(Table("document_template").star).where(Field("id") == P()).get_sql(), (tpl_id,)).fetchone()
     if not row:
         err(f"Template {tpl_id} not found")
     if not row["is_active"]:
         err(f"Template {tpl_id} is inactive")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     # Perform merge field substitution
@@ -237,10 +228,8 @@ def generate_from_template(conn, args):
 
     # Create initial version
     version_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO document_version
-           (id, document_id, version_number, content, change_notes, created_by)
-           VALUES (?,?,?,?,?,?)""",
+    sql, _ = insert_row("document_version", {"id": P(), "document_id": P(), "version_number": P(), "content": P(), "change_notes": P(), "created_by": P()})
+    conn.execute(sql,
         (
             version_id, doc_id, "1", content,
             f"Generated from template {row['name']}",

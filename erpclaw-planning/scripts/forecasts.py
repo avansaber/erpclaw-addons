@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -87,7 +88,7 @@ def update_forecast(conn, args):
     if not forecast_id:
         err("--forecast-id is required")
 
-    row = conn.execute("SELECT * FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Table("forecast").star).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
 
@@ -139,7 +140,7 @@ def get_forecast(conn, args):
     if not forecast_id:
         err("--forecast-id is required")
 
-    row = conn.execute("SELECT * FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Table("forecast").star).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
 
@@ -196,7 +197,7 @@ def add_forecast_line(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    row = conn.execute("SELECT id, status FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
     if row_to_dict(row)["status"] in ("locked", "archived"):
@@ -221,12 +222,8 @@ def add_forecast_line(conn, args):
     naming = get_next_name(conn, "forecast_line", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO forecast_line
-           (id, naming_series, forecast_id, account_name, account_type, period,
-            forecast_amount, actual_amount, variance, variance_pct,
-            notes, company_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    sql, _ = insert_row("forecast_line", {"id": P(), "naming_series": P(), "forecast_id": P(), "account_name": P(), "account_type": P(), "period": P(), "forecast_amount": P(), "actual_amount": P(), "variance": P(), "variance_pct": P(), "notes": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (line_id, naming, forecast_id, args.account_name, account_type,
          args.period, forecast_amount, actual_amount,
          str(round_currency(variance)), variance_pct,
@@ -282,15 +279,14 @@ def update_forecast_line(conn, args):
     if not line_id:
         err("--forecast-line-id is required")
 
-    row = conn.execute("SELECT * FROM forecast_line WHERE id = ?", (line_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast_line")).select(Table("forecast_line").star).where(Field("id") == P()).get_sql(), (line_id,)).fetchone()
     if not row:
         err(f"Forecast line {line_id} not found")
 
     line_data = row_to_dict(row)
 
     # Check parent forecast status
-    parent = conn.execute("SELECT status FROM forecast WHERE id = ?",
-                          (line_data["forecast_id"],)).fetchone()
+    parent = conn.execute(Q.from_(Table("forecast")).select(Field('status')).where(Field("id") == P()).get_sql(), (line_data["forecast_id"],)).fetchone()
     if parent and row_to_dict(parent)["status"] in ("locked", "archived"):
         err("Cannot update lines on a forecast that is locked or archived")
 
@@ -357,7 +353,7 @@ def lock_forecast(conn, args):
     if not forecast_id:
         err("--forecast-id is required")
 
-    row = conn.execute("SELECT status FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Field('status')).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
 
@@ -384,13 +380,11 @@ def calculate_variance(conn, args):
     if not forecast_id:
         err("--forecast-id is required")
 
-    row = conn.execute("SELECT id FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Field('id')).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
 
-    lines = conn.execute(
-        "SELECT * FROM forecast_line WHERE forecast_id = ?", (forecast_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("forecast_line")).select(Table("forecast_line").star).where(Field("forecast_id") == P()).get_sql(), (forecast_id,)).fetchall()
 
     updated = 0
     for l in lines:
@@ -419,15 +413,13 @@ def forecast_accuracy_report(conn, args):
     if not forecast_id:
         err("--forecast-id is required")
 
-    row = conn.execute("SELECT * FROM forecast WHERE id = ?", (forecast_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("forecast")).select(Table("forecast").star).where(Field("id") == P()).get_sql(), (forecast_id,)).fetchone()
     if not row:
         err(f"Forecast {forecast_id} not found")
 
     forecast_data = row_to_dict(row)
 
-    lines = conn.execute(
-        "SELECT * FROM forecast_line WHERE forecast_id = ?", (forecast_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("forecast_line")).select(Table("forecast_line").star).where(Field("forecast_id") == P()).get_sql(), (forecast_id,)).fetchall()
 
     if not lines:
         ok({

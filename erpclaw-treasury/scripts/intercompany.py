@@ -13,6 +13,7 @@ from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 register_prefix("inter_company_transfer", "ICT-")
 
@@ -46,9 +47,7 @@ def add_inter_company_transfer(conn, args):
     for label, cid in [("company", args.company_id),
                        ("from-company", args.from_company_id),
                        ("to-company", args.to_company_id)]:
-        if not conn.execute(
-            "SELECT id FROM company WHERE id = ?", (cid,)
-        ).fetchone():
+        if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (cid,)).fetchone():
             err(f"{label} {cid} not found")
 
     if args.from_company_id == args.to_company_id:
@@ -84,9 +83,7 @@ def get_inter_company_transfer(conn, args):
     xfer_id = getattr(args, "transfer_id", None)
     if not xfer_id:
         err("--transfer-id is required")
-    row = conn.execute(
-        "SELECT * FROM inter_company_transfer WHERE id = ?", (xfer_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("inter_company_transfer")).select(Table("inter_company_transfer").star).where(Field("id") == P()).get_sql(), (xfer_id,)).fetchone()
     if not row:
         err(f"Transfer {xfer_id} not found")
 
@@ -152,9 +149,7 @@ def approve_transfer(conn, args):
     xfer_id = getattr(args, "transfer_id", None)
     if not xfer_id:
         err("--transfer-id is required")
-    row = conn.execute(
-        "SELECT * FROM inter_company_transfer WHERE id = ?", (xfer_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("inter_company_transfer")).select(Table("inter_company_transfer").star).where(Field("id") == P()).get_sql(), (xfer_id,)).fetchone()
     if not row:
         err(f"Transfer {xfer_id} not found")
 
@@ -180,9 +175,7 @@ def complete_transfer(conn, args):
     xfer_id = getattr(args, "transfer_id", None)
     if not xfer_id:
         err("--transfer-id is required")
-    row = conn.execute(
-        "SELECT * FROM inter_company_transfer WHERE id = ?", (xfer_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("inter_company_transfer")).select(Table("inter_company_transfer").star).where(Field("id") == P()).get_sql(), (xfer_id,)).fetchone()
     if not row:
         err(f"Transfer {xfer_id} not found")
 
@@ -237,9 +230,7 @@ def cancel_transfer(conn, args):
     xfer_id = getattr(args, "transfer_id", None)
     if not xfer_id:
         err("--transfer-id is required")
-    row = conn.execute(
-        "SELECT * FROM inter_company_transfer WHERE id = ?", (xfer_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("inter_company_transfer")).select(Table("inter_company_transfer").star).where(Field("id") == P()).get_sql(), (xfer_id,)).fetchone()
     if not row:
         err(f"Transfer {xfer_id} not found")
 
@@ -299,7 +290,7 @@ def inter_company_balance_report(conn, args):
     # Enrich with company names
     balance_list = []
     for cid, net in balances.items():
-        c = conn.execute("SELECT name FROM company WHERE id = ?", (cid,)).fetchone()
+        c = conn.execute(Q.from_(Table("company")).select(Field('name')).where(Field("id") == P()).get_sql(), (cid,)).fetchone()
         balance_list.append({
             "company_id": cid,
             "company_name": c[0] if c else None,

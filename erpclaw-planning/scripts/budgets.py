@@ -23,6 +23,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -122,10 +123,7 @@ def get_budget_version(conn, args):
     data["scenario_status"] = data.pop("status", "draft")
 
     # Include lines
-    lines = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (budget_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (budget_id,)).fetchall()
     data["lines"] = [row_to_dict(l) for l in lines]
     data["line_count"] = len(lines)
     ok(data)
@@ -139,10 +137,7 @@ def approve_budget(conn, args):
     if not budget_id:
         err("--budget-id is required")
 
-    row = conn.execute(
-        "SELECT status, scenario_type FROM planning_scenario WHERE id = ?",
-        (budget_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Field('status'), Field('scenario_type')).where(Field("id") == P()).get_sql(), (budget_id,)).fetchone()
     if not row:
         err(f"Budget version {budget_id} not found")
 
@@ -171,10 +166,7 @@ def lock_budget(conn, args):
     if not budget_id:
         err("--budget-id is required")
 
-    row = conn.execute(
-        "SELECT status, scenario_type FROM planning_scenario WHERE id = ?",
-        (budget_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Field('status'), Field('scenario_type')).where(Field("id") == P()).get_sql(), (budget_id,)).fetchone()
     if not row:
         err(f"Budget version {budget_id} not found")
 
@@ -205,8 +197,8 @@ def compare_budget_versions(conn, args):
     if not id_1 or not id_2:
         err("--budget-id-1 and --budget-id-2 are required")
 
-    b1 = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (id_1,)).fetchone()
-    b2 = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (id_2,)).fetchone()
+    b1 = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (id_1,)).fetchone()
+    b2 = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (id_2,)).fetchone()
     if not b1:
         err(f"Budget version {id_1} not found")
     if not b2:
@@ -214,14 +206,8 @@ def compare_budget_versions(conn, args):
 
     d1, d2 = row_to_dict(b1), row_to_dict(b2)
 
-    lines1 = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (id_1,)
-    ).fetchall()
-    lines2 = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (id_2,)
-    ).fetchall()
+    lines1 = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (id_1,)).fetchall()
+    lines2 = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (id_2,)).fetchall()
 
     map1 = {}
     for l in lines1:
@@ -273,17 +259,14 @@ def budget_vs_actual(conn, args):
     if not budget_id:
         err("--budget-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (budget_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (budget_id,)).fetchone()
     if not row:
         err(f"Budget version {budget_id} not found")
 
     budget_data = row_to_dict(row)
     company_id = budget_data["company_id"]
 
-    lines = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (budget_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (budget_id,)).fetchall()
 
     results = []
     total_budget = Decimal("0")
@@ -295,10 +278,7 @@ def budget_vs_actual(conn, args):
         total_budget += budgeted
 
         # Find account by name
-        account_row = conn.execute(
-            "SELECT id, root_type FROM account WHERE name = ? AND company_id = ?",
-            (ld["account_name"], company_id)
-        ).fetchone()
+        account_row = conn.execute(Q.from_(Table("account")).select(Field('id'), Field('root_type')).where(Field("name") == P()).where(Field("company_id") == P()).get_sql(), (ld["account_name"], company_id)).fetchone()
 
         actual = Decimal("0")
         if account_row:
@@ -368,17 +348,14 @@ def variance_dashboard(conn, args):
     if not budget_id:
         err("--budget-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (budget_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (budget_id,)).fetchone()
     if not row:
         err(f"Budget version {budget_id} not found")
 
     budget_data = row_to_dict(row)
     company_id = budget_data["company_id"]
 
-    lines = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ?",
-        (budget_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).get_sql(), (budget_id,)).fetchall()
 
     total_budget_revenue = Decimal("0")
     total_budget_expense = Decimal("0")
@@ -396,10 +373,7 @@ def variance_dashboard(conn, args):
             total_budget_expense += budgeted
 
         # Look up actual from GL
-        account_row = conn.execute(
-            "SELECT id, root_type FROM account WHERE name = ? AND company_id = ?",
-            (ld["account_name"], company_id)
-        ).fetchone()
+        account_row = conn.execute(Q.from_(Table("account")).select(Field('id'), Field('root_type')).where(Field("name") == P()).where(Field("company_id") == P()).get_sql(), (ld["account_name"], company_id)).fetchone()
 
         actual = Decimal("0")
         if account_row:

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 register_prefix("investment_transaction", "ITXN-")
 
@@ -36,9 +37,7 @@ def add_investment(conn, args):
     if not getattr(args, "name", None):
         err("--name is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (args.company_id,)
-    ).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
     inv_type = getattr(args, "investment_type", None) or "cd"
@@ -59,12 +58,8 @@ def add_investment(conn, args):
     inv_id = str(uuid.uuid4())
     ns = get_next_name(conn, "investment", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO investment
-           (id, naming_series, name, investment_type, institution, account_number,
-            principal, current_value, interest_rate, purchase_date, maturity_date,
-            gl_account_id, status, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("investment", {"id": P(), "naming_series": P(), "name": P(), "investment_type": P(), "institution": P(), "account_number": P(), "principal": P(), "current_value": P(), "interest_rate": P(), "purchase_date": P(), "maturity_date": P(), "gl_account_id": P(), "status": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             inv_id, ns, args.name, inv_type,
             getattr(args, "institution", None),
@@ -91,9 +86,7 @@ def update_investment(conn, args):
     inv_id = getattr(args, "investment_id", None)
     if not inv_id:
         err("--investment-id is required")
-    row = conn.execute(
-        "SELECT * FROM investment WHERE id = ?", (inv_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("investment")).select(Table("investment").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Investment {inv_id} not found")
 
@@ -160,9 +153,7 @@ def get_investment(conn, args):
     inv_id = getattr(args, "investment_id", None)
     if not inv_id:
         err("--investment-id is required")
-    row = conn.execute(
-        "SELECT * FROM investment WHERE id = ?", (inv_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("investment")).select(Table("investment").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Investment {inv_id} not found")
 
@@ -225,9 +216,7 @@ def add_investment_transaction(conn, args):
     if not inv_id:
         err("--investment-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM investment WHERE id = ?", (inv_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("investment")).select(Table("investment").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Investment {inv_id} not found")
 
@@ -248,11 +237,8 @@ def add_investment_transaction(conn, args):
     txn_id = str(uuid.uuid4())
     txn_date = getattr(args, "transaction_date", None) or date.today().isoformat()
 
-    conn.execute(
-        """INSERT INTO investment_transaction
-           (id, investment_id, transaction_type, transaction_date, amount,
-            reference, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("investment_transaction", {"id": P(), "investment_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "notes": P(), "company_id": P()})
+    conn.execute(sql,
         (
             txn_id, inv_id, txn_type, txn_date, amount,
             getattr(args, "reference", None),
@@ -329,9 +315,7 @@ def mature_investment(conn, args):
     inv_id = getattr(args, "investment_id", None)
     if not inv_id:
         err("--investment-id is required")
-    row = conn.execute(
-        "SELECT * FROM investment WHERE id = ?", (inv_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("investment")).select(Table("investment").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Investment {inv_id} not found")
 
@@ -357,9 +341,7 @@ def redeem_investment(conn, args):
     inv_id = getattr(args, "investment_id", None)
     if not inv_id:
         err("--investment-id is required")
-    row = conn.execute(
-        "SELECT * FROM investment WHERE id = ?", (inv_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("investment")).select(Table("investment").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Investment {inv_id} not found")
 

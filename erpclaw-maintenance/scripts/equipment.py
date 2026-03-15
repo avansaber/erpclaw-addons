@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -45,12 +46,8 @@ def add_equipment(conn, args):
     naming = get_next_name(conn, "equipment", company_id=company_id)
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO equipment (id, naming_series, name, equipment_type, model,
-           manufacturer, serial_number, location, parent_equipment_id, asset_id,
-           item_id, purchase_date, warranty_expiry, criticality, status, notes,
-           company_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("equipment", {"id": P(), "naming_series": P(), "name": P(), "equipment_type": P(), "model": P(), "manufacturer": P(), "serial_number": P(), "location": P(), "parent_equipment_id": P(), "asset_id": P(), "item_id": P(), "purchase_date": P(), "warranty_expiry": P(), "criticality": P(), "status": P(), "notes": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql,
         (eq_id, naming, name, eq_type,
          getattr(args, "model", None),
          getattr(args, "manufacturer", None),
@@ -88,7 +85,7 @@ def update_equipment(conn, args):
     if not eq_id:
         err("--equipment-id is required")
 
-    row = conn.execute("SELECT * FROM equipment WHERE id = ?", (eq_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("equipment")).select(Table("equipment").star).where(Field("id") == P()).get_sql(), (eq_id,)).fetchone()
     if not row:
         err(f"Equipment {eq_id} not found")
 
@@ -148,7 +145,7 @@ def get_equipment(conn, args):
         err("--equipment-id is required")
 
     conn.row_factory = _row_factory(conn)
-    row = conn.execute("SELECT * FROM equipment WHERE id = ?", (eq_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("equipment")).select(Table("equipment").star).where(Field("id") == P()).get_sql(), (eq_id,)).fetchone()
     if not row:
         err(f"Equipment {eq_id} not found")
 
@@ -215,7 +212,7 @@ def add_equipment_child(conn, args):
     if not parent_id or not name or not company_id:
         err("--parent-equipment-id, --name, and --company-id are required")
 
-    parent = conn.execute("SELECT id FROM equipment WHERE id = ?", (parent_id,)).fetchone()
+    parent = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (parent_id,)).fetchone()
     if not parent:
         err(f"Parent equipment {parent_id} not found")
 
@@ -226,11 +223,8 @@ def add_equipment_child(conn, args):
     naming = get_next_name(conn, "equipment", company_id=company_id)
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO equipment (id, naming_series, name, equipment_type, model,
-           manufacturer, serial_number, location, parent_equipment_id,
-           criticality, status, notes, company_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("equipment", {"id": P(), "naming_series": P(), "name": P(), "equipment_type": P(), "model": P(), "manufacturer": P(), "serial_number": P(), "location": P(), "parent_equipment_id": P(), "criticality": P(), "status": P(), "notes": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql,
         (eq_id, naming, name, eq_type,
          getattr(args, "model", None),
          getattr(args, "manufacturer", None),
@@ -267,10 +261,7 @@ def list_equipment_tree(conn, args):
     conn.row_factory = _row_factory(conn)
 
     def _get_children(parent_id):
-        rows = conn.execute(
-            "SELECT * FROM equipment WHERE parent_equipment_id = ? ORDER BY name",
-            (parent_id,),
-        ).fetchall()
+        rows = conn.execute(Q.from_(Table("equipment")).select(Table("equipment").star).where(Field("parent_equipment_id") == P()).orderby(Field("name")).get_sql(), (parent_id,)).fetchall()
         result = []
         for r in rows:
             d = dict(r)
@@ -280,7 +271,7 @@ def list_equipment_tree(conn, args):
         return result
 
     if root_id:
-        root = conn.execute("SELECT * FROM equipment WHERE id = ?", (root_id,)).fetchone()
+        root = conn.execute(Q.from_(Table("equipment")).select(Table("equipment").star).where(Field("id") == P()).get_sql(), (root_id,)).fetchone()
         if not root:
             err(f"Equipment {root_id} not found")
         root_data = dict(root)
@@ -311,7 +302,7 @@ def add_equipment_reading(conn, args):
     if not equipment_id or not reading_value or not company_id:
         err("--equipment-id, --reading-value, and --company-id are required")
 
-    eq = conn.execute("SELECT id FROM equipment WHERE id = ?", (equipment_id,)).fetchone()
+    eq = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (equipment_id,)).fetchone()
     if not eq:
         err(f"Equipment {equipment_id} not found")
 
@@ -323,10 +314,8 @@ def add_equipment_reading(conn, args):
     now = datetime.now(timezone.utc).isoformat()
     reading_date = getattr(args, "reading_date", None) or now
 
-    conn.execute(
-        """INSERT INTO equipment_reading (id, equipment_id, reading_type, reading_value,
-           reading_unit, reading_date, recorded_by, company_id, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("equipment_reading", {"id": P(), "equipment_id": P(), "reading_type": P(), "reading_value": P(), "reading_unit": P(), "reading_date": P(), "recorded_by": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (reading_id, equipment_id, reading_type, reading_value,
          getattr(args, "reading_unit", None),
          reading_date,
@@ -389,7 +378,7 @@ def link_equipment_asset(conn, args):
     if not eq_id or not asset_id:
         err("--equipment-id and --asset-id are required")
 
-    row = conn.execute("SELECT id FROM equipment WHERE id = ?", (eq_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (eq_id,)).fetchone()
     if not row:
         err(f"Equipment {eq_id} not found")
 

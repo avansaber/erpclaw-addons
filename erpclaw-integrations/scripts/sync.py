@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("integration_sync", "SYNC-")
 except ImportError:
@@ -39,7 +40,7 @@ SKILL = "erpclaw-integrations"
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute("SELECT * FROM integration_connector WHERE id = ?", (connector_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_connector")).select(Table("integration_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Connector {connector_id} not found")
     return row
@@ -74,12 +75,8 @@ def start_sync(conn, args):
     naming = get_next_name(conn, "integration_sync", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_sync (
-            id, naming_series, connector_id, sync_type, direction, entity_type,
-            sync_status, records_processed, records_failed, started_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_sync", {"id": P(), "naming_series": P(), "connector_id": P(), "sync_type": P(), "direction": P(), "entity_type": P(), "sync_status": P(), "records_processed": P(), "records_failed": P(), "started_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         sid, naming, cid, sync_type, direction, entity_type,
         "running", 0, 0, now, company_id, now,
     ))
@@ -104,15 +101,13 @@ def get_sync(conn, args):
     sid = getattr(args, "sync_id", None)
     if not sid:
         err("--sync-id is required")
-    row = conn.execute("SELECT * FROM integration_sync WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync")).select(Table("integration_sync").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Sync {sid} not found")
 
     data = row_to_dict(row)
     # Include error count
-    error_count = conn.execute(
-        "SELECT COUNT(*) FROM integration_sync_error WHERE sync_id = ?", (sid,)
-    ).fetchone()[0]
+    error_count = conn.execute(Q.from_(Table("integration_sync_error")).select(fn.Count("*")).where(Field("sync_id") == P()).get_sql(), (sid,)).fetchone()[0]
     data["error_count"] = error_count
     ok(data)
 
@@ -152,7 +147,7 @@ def cancel_sync(conn, args):
     sid = getattr(args, "sync_id", None)
     if not sid:
         err("--sync-id is required")
-    row = conn.execute("SELECT * FROM integration_sync WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync")).select(Table("integration_sync").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Sync {sid} not found")
 
@@ -193,12 +188,8 @@ def add_sync_schedule(conn, args):
     sched_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_sync_schedule (
-            id, connector_id, entity_type, frequency, sync_type, direction,
-            is_active, next_run_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_sync_schedule", {"id": P(), "connector_id": P(), "entity_type": P(), "frequency": P(), "sync_type": P(), "direction": P(), "is_active": P(), "next_run_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         sched_id, cid, entity_type, frequency, sync_type, direction,
         1, getattr(args, "next_run_at", None), company_id, now,
     ))
@@ -215,7 +206,7 @@ def update_sync_schedule(conn, args):
     sched_id = getattr(args, "schedule_id", None)
     if not sched_id:
         err("--schedule-id is required")
-    row = conn.execute("SELECT * FROM integration_sync_schedule WHERE id = ?", (sched_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync_schedule")).select(Table("integration_sync_schedule").star).where(Field("id") == P()).get_sql(), (sched_id,)).fetchone()
     if not row:
         err(f"Schedule {sched_id} not found")
 
@@ -287,7 +278,7 @@ def delete_sync_schedule(conn, args):
     sched_id = getattr(args, "schedule_id", None)
     if not sched_id:
         err("--schedule-id is required")
-    row = conn.execute("SELECT * FROM integration_sync_schedule WHERE id = ?", (sched_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync_schedule")).select(Table("integration_sync_schedule").star).where(Field("id") == P()).get_sql(), (sched_id,)).fetchone()
     if not row:
         err(f"Schedule {sched_id} not found")
 
@@ -304,7 +295,7 @@ def add_sync_error(conn, args):
     sid = getattr(args, "sync_id", None)
     if not sid:
         err("--sync-id is required")
-    row = conn.execute("SELECT * FROM integration_sync WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync")).select(Table("integration_sync").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Sync {sid} not found")
 
@@ -315,11 +306,8 @@ def add_sync_error(conn, args):
     err_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_sync_error (
-            id, sync_id, entity_type, entity_id, error_message, is_resolved, created_at
-        ) VALUES (?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_sync_error", {"id": P(), "sync_id": P(), "entity_type": P(), "entity_id": P(), "error_message": P(), "is_resolved": P(), "created_at": P()})
+    conn.execute(sql, (
         err_id, sid,
         getattr(args, "entity_type", None),
         getattr(args, "entity_id", None),
@@ -368,7 +356,7 @@ def resolve_sync_error(conn, args):
     err_id = getattr(args, "error_id", None)
     if not err_id:
         err("--error-id is required")
-    row = conn.execute("SELECT * FROM integration_sync_error WHERE id = ?", (err_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync_error")).select(Table("integration_sync_error").star).where(Field("id") == P()).get_sql(), (err_id,)).fetchone()
     if not row:
         err(f"Sync error {err_id} not found")
 
@@ -394,7 +382,7 @@ def retry_sync(conn, args):
     sid = getattr(args, "sync_id", None)
     if not sid:
         err("--sync-id is required")
-    row = conn.execute("SELECT * FROM integration_sync WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync")).select(Table("integration_sync").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Sync {sid} not found")
 
@@ -407,12 +395,8 @@ def retry_sync(conn, args):
     naming = get_next_name(conn, "integration_sync", company_id=data["company_id"])
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_sync (
-            id, naming_series, connector_id, sync_type, direction, entity_type,
-            sync_status, records_processed, records_failed, started_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_sync", {"id": P(), "naming_series": P(), "connector_id": P(), "sync_type": P(), "direction": P(), "entity_type": P(), "sync_status": P(), "records_processed": P(), "records_failed": P(), "started_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         new_sid, naming, data["connector_id"], data["sync_type"], data["direction"],
         data["entity_type"], "running", 0, 0, now, data["company_id"], now,
     ))
@@ -491,7 +475,7 @@ def get_sync_log(conn, args):
     sid = getattr(args, "sync_id", None)
     if not sid:
         err("--sync-id is required")
-    row = conn.execute("SELECT * FROM integration_sync WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_sync")).select(Table("integration_sync").star).where(Field("id") == P()).get_sql(), (sid,)).fetchone()
     if not row:
         err(f"Sync {sid} not found")
 

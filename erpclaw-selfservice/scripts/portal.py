@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -30,7 +31,9 @@ JSON_PORTAL_FIELDS = ["branding_json", "enabled_modules", "enabled_actions"]
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    t_co = Table("company")
+    q_co = Q.from_(t_co).select(t_co.id).where(t_co.id == P())
+    if not conn.execute(q_co.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -84,13 +87,13 @@ def add_portal_config(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "selfservice_portal_config")
 
-    conn.execute("""
-        INSERT INTO selfservice_portal_config (
-            id, naming_series, name, branding_json, welcome_message,
-            enabled_modules, enabled_actions, require_mfa, session_timeout_minutes,
-            is_active, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("selfservice_portal_config", {
+        "id": P(), "naming_series": P(), "name": P(), "branding_json": P(),
+        "welcome_message": P(), "enabled_modules": P(), "enabled_actions": P(),
+        "require_mfa": P(), "session_timeout_minutes": P(),
+        "is_active": P(), "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         portal_id, naming, name, branding_json,
         getattr(args, "welcome_message", None),
         enabled_modules, enabled_actions,
@@ -139,7 +142,9 @@ def get_portal_config(conn, args):
     portal_id = getattr(args, "portal_id", None)
     if not portal_id:
         err("--portal-id is required")
-    row = conn.execute("SELECT * FROM selfservice_portal_config WHERE id = ?", (portal_id,)).fetchone()
+    t = Table("selfservice_portal_config")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (portal_id,)).fetchone()
     if not row:
         err(f"Portal config {portal_id} not found")
     d = row_to_dict(row)
@@ -154,7 +159,9 @@ def update_portal_config(conn, args):
     portal_id = getattr(args, "portal_id", None)
     if not portal_id:
         err("--portal-id is required")
-    if not conn.execute("SELECT id FROM selfservice_portal_config WHERE id = ?", (portal_id,)).fetchone():
+    t = Table("selfservice_portal_config")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (portal_id,)).fetchone():
         err(f"Portal config {portal_id} not found")
 
     updates, params, changed = [], [], []
@@ -203,8 +210,9 @@ def activate_portal(conn, args):
     portal_id = getattr(args, "portal_id", None)
     if not portal_id:
         err("--portal-id is required")
-    row = conn.execute("SELECT id, is_active FROM selfservice_portal_config WHERE id = ?",
-                       (portal_id,)).fetchone()
+    t = Table("selfservice_portal_config")
+    q = Q.from_(t).select(t.id, t.is_active).where(t.id == P())
+    row = conn.execute(q.get_sql(), (portal_id,)).fetchone()
     if not row:
         err(f"Portal config {portal_id} not found")
     if row["is_active"] == 1:
@@ -225,8 +233,9 @@ def deactivate_portal(conn, args):
     portal_id = getattr(args, "portal_id", None)
     if not portal_id:
         err("--portal-id is required")
-    row = conn.execute("SELECT id, is_active FROM selfservice_portal_config WHERE id = ?",
-                       (portal_id,)).fetchone()
+    t = Table("selfservice_portal_config")
+    q = Q.from_(t).select(t.id, t.is_active).where(t.id == P())
+    row = conn.execute(q.get_sql(), (portal_id,)).fetchone()
     if not row:
         err(f"Portal config {portal_id} not found")
     if row["is_active"] == 0:

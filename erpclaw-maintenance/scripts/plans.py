@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -40,7 +41,7 @@ def add_maintenance_plan(conn, args):
         err("--plan-name, --equipment-id, and --company-id are required")
 
     # Validate equipment exists
-    eq = conn.execute("SELECT id FROM equipment WHERE id = ?", (equipment_id,)).fetchone()
+    eq = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (equipment_id,)).fetchone()
     if not eq:
         err(f"Equipment {equipment_id} not found")
 
@@ -70,12 +71,8 @@ def add_maintenance_plan(conn, args):
     is_active_val = getattr(args, "is_active", None)
     is_active = 1 if is_active_val is None else int(is_active_val)
 
-    conn.execute(
-        """INSERT INTO maintenance_plan (id, naming_series, name, equipment_id, plan_type,
-           frequency, frequency_days, last_performed, next_due, estimated_duration,
-           estimated_cost, assigned_to, instructions, is_active, company_id,
-           created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("maintenance_plan", {"id": P(), "naming_series": P(), "name": P(), "equipment_id": P(), "plan_type": P(), "frequency": P(), "frequency_days": P(), "last_performed": P(), "next_due": P(), "estimated_duration": P(), "estimated_cost": P(), "assigned_to": P(), "instructions": P(), "is_active": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql,
         (plan_id, naming, name, equipment_id, plan_type,
          frequency, frequency_days,
          getattr(args, "last_performed", None),
@@ -112,7 +109,7 @@ def update_maintenance_plan(conn, args):
     if not plan_id:
         err("--plan-id is required")
 
-    row = conn.execute("SELECT id FROM maintenance_plan WHERE id = ?", (plan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not row:
         err(f"Maintenance plan {plan_id} not found")
 
@@ -176,16 +173,13 @@ def get_maintenance_plan(conn, args):
         err("--plan-id is required")
 
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM maintenance_plan WHERE id = ?", (plan_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_plan")).select(Table("maintenance_plan").star).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not row:
         err(f"Maintenance plan {plan_id} not found")
 
     data = dict(row)
     # Get plan items
-    items = conn.execute(
-        "SELECT * FROM maintenance_plan_item WHERE plan_id = ? ORDER BY created_at",
-        (plan_id,),
-    ).fetchall()
+    items = conn.execute(Q.from_(Table("maintenance_plan_item")).select(Table("maintenance_plan_item").star).where(Field("plan_id") == P()).orderby(Field("created_at")).get_sql(), (plan_id,)).fetchall()
     data["items"] = [dict(i) for i in items]
     data["item_count"] = len(items)
     ok(data)
@@ -254,7 +248,7 @@ def add_plan_item(conn, args):
     if not plan_id or not item_name or not company_id:
         err("--plan-id, --item-name, and --company-id are required")
 
-    plan = conn.execute("SELECT id FROM maintenance_plan WHERE id = ?", (plan_id,)).fetchone()
+    plan = conn.execute(Q.from_(Table("maintenance_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
     if not plan:
         err(f"Maintenance plan {plan_id} not found")
 
@@ -262,10 +256,8 @@ def add_plan_item(conn, args):
     quantity = getattr(args, "quantity", None) or "1"
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO maintenance_plan_item (id, plan_id, item_id, item_name,
-           quantity, notes, company_id, created_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("maintenance_plan_item", {"id": P(), "plan_id": P(), "item_id": P(), "item_name": P(), "quantity": P(), "notes": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (item_id_val, plan_id,
          getattr(args, "item_id", None),
          item_name, quantity,
@@ -289,10 +281,7 @@ def list_plan_items(conn, args):
         err("--plan-id is required")
 
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM maintenance_plan_item WHERE plan_id = ? ORDER BY created_at",
-        (plan_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("maintenance_plan_item")).select(Table("maintenance_plan_item").star).where(Field("plan_id") == P()).orderby(Field("created_at")).get_sql(), (plan_id,)).fetchall()
 
     ok({
         "items": [dict(r) for r in rows],

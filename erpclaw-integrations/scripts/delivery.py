@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("connv2_delivery_connector", "DLC-")
 except ImportError:
@@ -33,16 +34,14 @@ VALID_CONNECTOR_STATUSES = ("active", "inactive", "error")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute(
-        "SELECT * FROM connv2_delivery_connector WHERE id = ?", (connector_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("connv2_delivery_connector")).select(Table("connv2_delivery_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Delivery connector {connector_id} not found")
     return row
@@ -64,13 +63,8 @@ def add_delivery_connector(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "connv2_delivery_connector")
 
-    conn.execute("""
-        INSERT INTO connv2_delivery_connector (
-            id, naming_series, platform, store_id, api_credentials_ref,
-            auto_accept, sync_menu, connector_status,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_delivery_connector", {"id": P(), "naming_series": P(), "platform": P(), "store_id": P(), "api_credentials_ref": P(), "auto_accept": P(), "sync_menu": P(), "connector_status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         conn_id, naming, platform,
         getattr(args, "store_id", None),
         getattr(args, "api_credentials_ref", None),
@@ -144,13 +138,8 @@ def ingest_orders(conn, args):
     net_amount = str(round_currency(net_dec))
 
     company_id = row["company_id"]
-    conn.execute("""
-        INSERT INTO connv2_delivery_order (
-            id, connector_id, external_order_id, order_data,
-            total_amount, commission, net_amount, order_status,
-            received_at, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_delivery_order", {"id": P(), "connector_id": P(), "external_order_id": P(), "order_data": P(), "total_amount": P(), "commission": P(), "net_amount": P(), "order_status": P(), "received_at": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         order_id, connector_id,
         getattr(args, "external_order_id", None),
         getattr(args, "order_data", None),
@@ -193,9 +182,7 @@ def update_order_status(conn, args):
     order_id = getattr(args, "order_id", None)
     if not order_id:
         err("--order-id is required")
-    row = conn.execute(
-        "SELECT * FROM connv2_delivery_order WHERE id = ?", (order_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("connv2_delivery_order")).select(Table("connv2_delivery_order").star).where(Field("id") == P()).get_sql(), (order_id,)).fetchone()
     if not row:
         err(f"Delivery order {order_id} not found")
 

@@ -12,6 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err, row_to_dict
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-pos"
 
@@ -42,8 +43,7 @@ def cash_reconciliation(conn, args):
     if not session_id:
         err("--pos-session-id is required")
 
-    session = conn.execute(
-        "SELECT * FROM pos_session WHERE id = ?", (session_id,)).fetchone()
+    session = conn.execute(Q.from_(Table("pos_session")).select(Table("pos_session").star).where(Field("id") == P()).get_sql(), (session_id,)).fetchone()
     if not session:
         err(f"Session {session_id} not found")
 

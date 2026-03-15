@@ -17,6 +17,7 @@ from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-pos"
 
@@ -36,14 +37,10 @@ def _round(val):
 
 def _recalc_totals(conn, txn_id):
     """Recalculate subtotal and grand_total from line items and transaction-level discount."""
-    items = conn.execute(
-        "SELECT amount FROM pos_transaction_item WHERE pos_transaction_id = ?",
-        (txn_id,)).fetchall()
+    items = conn.execute(Q.from_(Table("pos_transaction_item")).select(Field('amount')).where(Field("pos_transaction_id") == P()).get_sql(), (txn_id,)).fetchall()
     subtotal = _round(sum((_dec(r["amount"]) for r in items), Decimal("0")))
 
-    txn = conn.execute(
-        "SELECT discount_pct, discount_amount, tax_amount FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('discount_pct'), Field('discount_amount'), Field('tax_amount')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
 
     disc_pct = _dec(txn["discount_pct"])
     disc_amt = _dec(txn["discount_amount"])
@@ -74,9 +71,7 @@ def add_transaction(conn, args):
     if not session_id:
         err("--pos-session-id is required")
 
-    session = conn.execute(
-        "SELECT id, company_id, status FROM pos_session WHERE id = ?",
-        (session_id,)).fetchone()
+    session = conn.execute(Q.from_(Table("pos_session")).select(Field('id'), Field('company_id'), Field('status')).where(Field("id") == P()).get_sql(), (session_id,)).fetchone()
     if not session:
         err(f"Session {session_id} not found")
     if session["status"] != "open":
@@ -90,12 +85,8 @@ def add_transaction(conn, args):
     naming = get_next_name(conn, "pos_transaction", company_id=company_id)
 
     try:
-        conn.execute(
-            """INSERT INTO pos_transaction
-               (id, naming_series, pos_session_id, customer_id, customer_name,
-                subtotal, discount_amount, discount_pct, tax_amount,
-                grand_total, paid_amount, change_amount, status, company_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("pos_transaction", {"id": P(), "naming_series": P(), "pos_session_id": P(), "customer_id": P(), "customer_name": P(), "subtotal": P(), "discount_amount": P(), "discount_pct": P(), "tax_amount": P(), "grand_total": P(), "paid_amount": P(), "change_amount": P(), "status": P(), "company_id": P()})
+        conn.execute(sql,
             (txn_id, naming, session_id, customer_id, customer_name,
              "0", "0", "0", "0", "0", "0", "0", "draft", company_id))
     except sqlite3.IntegrityError as e:
@@ -121,18 +112,14 @@ def add_transaction_item(conn, args):
     if not item_id:
         err("--item-id is required")
 
-    txn = conn.execute(
-        "SELECT id, status FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] not in ("draft", "held"):
         err(f"Cannot add items to transaction in '{txn['status']}' status")
 
     # Validate item exists
-    item = conn.execute(
-        "SELECT id, item_name, item_code FROM item WHERE id = ?",
-        (item_id,)).fetchone()
+    item = conn.execute(Q.from_(Table("item")).select(Field('id'), Field('item_name'), Field('item_code')).where(Field("id") == P()).get_sql(), (item_id,)).fetchone()
     if not item:
         err(f"Item {item_id} not found")
 
@@ -169,11 +156,8 @@ def add_transaction_item(conn, args):
 
     line_id = str(uuid.uuid4())
     try:
-        conn.execute(
-            """INSERT INTO pos_transaction_item
-               (id, pos_transaction_id, item_id, item_name, item_code, barcode,
-                qty, rate, discount_pct, discount_amount, amount, uom)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("pos_transaction_item", {"id": P(), "pos_transaction_id": P(), "item_id": P(), "item_name": P(), "item_code": P(), "barcode": P(), "qty": P(), "rate": P(), "discount_pct": P(), "discount_amount": P(), "amount": P(), "uom": P()})
+        conn.execute(sql,
             (line_id, txn_id, item_id, item_name, item_code, barcode,
              str(qty), str(rate), str(disc_pct), str(disc_amt), str(amount), uom))
     except sqlite3.IntegrityError as e:
@@ -196,21 +180,17 @@ def remove_transaction_item(conn, args):
     if not line_id:
         err("--pos-transaction-item-id is required")
 
-    line = conn.execute(
-        "SELECT id, pos_transaction_id FROM pos_transaction_item WHERE id = ?",
-        (line_id,)).fetchone()
+    line = conn.execute(Q.from_(Table("pos_transaction_item")).select(Field('id'), Field('pos_transaction_id')).where(Field("id") == P()).get_sql(), (line_id,)).fetchone()
     if not line:
         err(f"Transaction item {line_id} not found")
 
     txn_id = line["pos_transaction_id"]
 
-    txn = conn.execute(
-        "SELECT id, status FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if txn["status"] not in ("draft", "held"):
         err(f"Cannot remove items from transaction in '{txn['status']}' status")
 
-    conn.execute("DELETE FROM pos_transaction_item WHERE id = ?", (line_id,))
+    conn.execute(Q.from_(Table("pos_transaction_item")).delete().where(Field("id") == P()).get_sql(), (line_id,))
     subtotal, _, grand_total = _recalc_totals(conn, txn_id)
     conn.commit()
 
@@ -226,8 +206,7 @@ def apply_discount(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT * FROM pos_transaction WHERE id = ?", (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Table("pos_transaction").star).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] not in ("draft", "held"):
@@ -240,13 +219,9 @@ def apply_discount(conn, args):
         err("--discount-pct or --discount-amount is required")
 
     # Check profile discount rules
-    session = conn.execute(
-        "SELECT pos_profile_id FROM pos_session WHERE id = ?",
-        (txn["pos_session_id"],)).fetchone()
+    session = conn.execute(Q.from_(Table("pos_session")).select(Field('pos_profile_id')).where(Field("id") == P()).get_sql(), (txn["pos_session_id"],)).fetchone()
     if session:
-        profile = conn.execute(
-            "SELECT allow_discount, max_discount_pct FROM pos_profile WHERE id = ?",
-            (session["pos_profile_id"],)).fetchone()
+        profile = conn.execute(Q.from_(Table("pos_profile")).select(Field('allow_discount'), Field('max_discount_pct')).where(Field("id") == P()).get_sql(), (session["pos_profile_id"],)).fetchone()
         if profile and not profile["allow_discount"]:
             err("Discounts are not allowed for this POS profile")
         if profile and disc_pct is not None:
@@ -285,9 +260,7 @@ def apply_discount(conn, args):
              txn_id))
 
     conn.commit()
-    updated = conn.execute(
-        "SELECT subtotal, discount_pct, discount_amount, grand_total FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    updated = conn.execute(Q.from_(Table("pos_transaction")).select(Field('subtotal'), Field('discount_pct'), Field('discount_amount'), Field('grand_total')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     ok({"id": txn_id,
         "subtotal": updated["subtotal"],
         "discount_pct": updated["discount_pct"],
@@ -303,9 +276,7 @@ def hold_transaction(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT id, status FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] != "draft":
@@ -327,9 +298,7 @@ def resume_transaction(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT id, status FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] != "held":
@@ -361,9 +330,7 @@ def add_payment(conn, args):
     if payment_method not in valid_methods:
         err(f"--payment-method must be one of: {', '.join(valid_methods)}")
 
-    txn = conn.execute(
-        "SELECT id, status, grand_total FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status'), Field('grand_total')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] not in ("draft", "held"):
@@ -375,10 +342,8 @@ def add_payment(conn, args):
 
     payment_id = str(uuid.uuid4())
     try:
-        conn.execute(
-            """INSERT INTO pos_payment
-               (id, pos_transaction_id, payment_method, amount, reference)
-               VALUES (?,?,?,?,?)""",
+        sql, _ = insert_row("pos_payment", {"id": P(), "pos_transaction_id": P(), "payment_method": P(), "amount": P(), "reference": P()})
+        conn.execute(sql,
             (payment_id, txn_id, payment_method, str(_round(pay_amt)), reference))
     except sqlite3.IntegrityError as e:
         sys.stderr.write(f"[{SKILL}] {e}\n")
@@ -407,8 +372,7 @@ def submit_transaction(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT * FROM pos_transaction WHERE id = ?", (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Table("pos_transaction").star).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] not in ("draft", "held"):
@@ -443,12 +407,8 @@ def submit_transaction(conn, args):
         if has_invoice:
             invoice_id = str(uuid.uuid4())
             inv_naming = get_next_name(conn, "sales_invoice")
-            conn.execute(
-                """INSERT INTO sales_invoice
-                   (id, naming_series, customer_id, customer_name,
-                    subtotal, discount_amount, tax_amount, grand_total,
-                    paid_amount, outstanding_amount, status, company_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            sql, _ = insert_row("sales_invoice", {"id": P(), "naming_series": P(), "customer_id": P(), "customer_name": P(), "subtotal": P(), "discount_amount": P(), "tax_amount": P(), "grand_total": P(), "paid_amount": P(), "outstanding_amount": P(), "status": P(), "company_id": P()})
+            conn.execute(sql,
                 (invoice_id, inv_naming, txn["customer_id"], txn["customer_name"],
                  txn["subtotal"], txn["discount_amount"], txn["tax_amount"],
                  txn["grand_total"], txn["paid_amount"], "0", "submitted",
@@ -480,9 +440,7 @@ def void_transaction(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT id, status FROM pos_transaction WHERE id = ?",
-        (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] == "voided":
@@ -506,8 +464,7 @@ def return_transaction(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT * FROM pos_transaction WHERE id = ?", (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Table("pos_transaction").star).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] != "submitted":
@@ -528,44 +485,31 @@ def return_transaction(conn, args):
     tax_amount = str(_round(-_dec(txn["tax_amount"])))
     grand_total = str(_round(-_dec(txn["grand_total"])))
 
-    conn.execute(
-        """INSERT INTO pos_transaction
-           (id, naming_series, pos_session_id, customer_id, customer_name,
-            subtotal, discount_amount, discount_pct, tax_amount,
-            grand_total, paid_amount, change_amount, status, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("pos_transaction", {"id": P(), "naming_series": P(), "pos_session_id": P(), "customer_id": P(), "customer_name": P(), "subtotal": P(), "discount_amount": P(), "discount_pct": P(), "tax_amount": P(), "grand_total": P(), "paid_amount": P(), "change_amount": P(), "status": P(), "company_id": P()})
+    conn.execute(sql,
         (return_id, return_naming, txn["pos_session_id"],
          txn["customer_id"], txn["customer_name"],
          subtotal, discount_amount, txn["discount_pct"], tax_amount,
          grand_total, grand_total, "0", "returned", txn["company_id"]))
 
     # Copy items as negatives
-    items = conn.execute(
-        "SELECT * FROM pos_transaction_item WHERE pos_transaction_id = ?",
-        (txn_id,)).fetchall()
+    items = conn.execute(Q.from_(Table("pos_transaction_item")).select(Table("pos_transaction_item").star).where(Field("pos_transaction_id") == P()).get_sql(), (txn_id,)).fetchall()
     for item in items:
         neg_qty = str(_round(-_dec(item["qty"])))
         neg_amount = str(_round(-_dec(item["amount"])))
         neg_disc = str(_round(-_dec(item["discount_amount"])))
-        conn.execute(
-            """INSERT INTO pos_transaction_item
-               (id, pos_transaction_id, item_id, item_name, item_code, barcode,
-                qty, rate, discount_pct, discount_amount, amount, uom)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("pos_transaction_item", {"id": P(), "pos_transaction_id": P(), "item_id": P(), "item_name": P(), "item_code": P(), "barcode": P(), "qty": P(), "rate": P(), "discount_pct": P(), "discount_amount": P(), "amount": P(), "uom": P()})
+        conn.execute(sql,
             (str(uuid.uuid4()), return_id, item["item_id"], item["item_name"],
              item["item_code"], item["barcode"], neg_qty, item["rate"],
              item["discount_pct"], neg_disc, neg_amount, item["uom"]))
 
     # Copy payments as negatives
-    payments = conn.execute(
-        "SELECT * FROM pos_payment WHERE pos_transaction_id = ?",
-        (txn_id,)).fetchall()
+    payments = conn.execute(Q.from_(Table("pos_payment")).select(Table("pos_payment").star).where(Field("pos_transaction_id") == P()).get_sql(), (txn_id,)).fetchall()
     for pay in payments:
         neg_pay = str(_round(-_dec(pay["amount"])))
-        conn.execute(
-            """INSERT INTO pos_payment
-               (id, pos_transaction_id, payment_method, amount, reference)
-               VALUES (?,?,?,?,?)""",
+        sql, _ = insert_row("pos_payment", {"id": P(), "pos_transaction_id": P(), "payment_method": P(), "amount": P(), "reference": P()})
+        conn.execute(sql,
             (str(uuid.uuid4()), return_id, pay["payment_method"],
              neg_pay, f"Return of {txn_id}"))
 
@@ -586,8 +530,7 @@ def get_transaction(conn, args):
     if not txn_id:
         err("--id is required")
 
-    txn = conn.execute(
-        "SELECT * FROM pos_transaction WHERE id = ?", (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Table("pos_transaction").star).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
 
@@ -595,15 +538,11 @@ def get_transaction(conn, args):
     data["transaction_status"] = data.pop("status", None)
 
     # Items
-    items = conn.execute(
-        "SELECT * FROM pos_transaction_item WHERE pos_transaction_id = ? ORDER BY created_at",
-        (txn_id,)).fetchall()
+    items = conn.execute(Q.from_(Table("pos_transaction_item")).select(Table("pos_transaction_item").star).where(Field("pos_transaction_id") == P()).orderby(Field("created_at")).get_sql(), (txn_id,)).fetchall()
     data["items"] = [row_to_dict(i) for i in items]
 
     # Payments
-    payments = conn.execute(
-        "SELECT * FROM pos_payment WHERE pos_transaction_id = ? ORDER BY created_at",
-        (txn_id,)).fetchall()
+    payments = conn.execute(Q.from_(Table("pos_payment")).select(Table("pos_payment").star).where(Field("pos_transaction_id") == P()).orderby(Field("created_at")).get_sql(), (txn_id,)).fetchall()
     data["payments"] = [row_to_dict(p) for p in payments]
 
     ok(data)
@@ -715,20 +654,15 @@ def generate_receipt(conn, args):
     if not txn_id:
         err("--pos-transaction-id is required")
 
-    txn = conn.execute(
-        "SELECT * FROM pos_transaction WHERE id = ?", (txn_id,)).fetchone()
+    txn = conn.execute(Q.from_(Table("pos_transaction")).select(Table("pos_transaction").star).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
     if not txn:
         err(f"Transaction {txn_id} not found")
     if txn["status"] not in ("submitted", "returned"):
         err(f"Receipt can only be generated for submitted/returned transactions (current: {txn['status']})")
 
-    items = conn.execute(
-        "SELECT item_name, item_code, qty, rate, discount_amount, amount, uom FROM pos_transaction_item WHERE pos_transaction_id = ? ORDER BY created_at",
-        (txn_id,)).fetchall()
+    items = conn.execute(Q.from_(Table("pos_transaction_item")).select(Field('item_name'), Field('item_code'), Field('qty'), Field('rate'), Field('discount_amount'), Field('amount'), Field('uom')).where(Field("pos_transaction_id") == P()).orderby(Field("created_at")).get_sql(), (txn_id,)).fetchall()
 
-    payments = conn.execute(
-        "SELECT payment_method, amount, reference FROM pos_payment WHERE pos_transaction_id = ? ORDER BY created_at",
-        (txn_id,)).fetchall()
+    payments = conn.execute(Q.from_(Table("pos_payment")).select(Field('payment_method'), Field('amount'), Field('reference')).where(Field("pos_transaction_id") == P()).orderby(Field("created_at")).get_sql(), (txn_id,)).fetchall()
 
     # Get company info
     company = conn.execute(
@@ -764,8 +698,7 @@ def session_summary(conn, args):
     if not session_id:
         err("--pos-session-id is required")
 
-    session = conn.execute(
-        "SELECT * FROM pos_session WHERE id = ?", (session_id,)).fetchone()
+    session = conn.execute(Q.from_(Table("pos_session")).select(Table("pos_session").star).where(Field("id") == P()).get_sql(), (session_id,)).fetchone()
     if not session:
         err(f"Session {session_id} not found")
 

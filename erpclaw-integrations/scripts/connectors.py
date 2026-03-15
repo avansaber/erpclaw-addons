@@ -15,6 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("integration_connector", "INT-")
 except ImportError:
@@ -39,7 +40,7 @@ SKILL = "erpclaw-integrations"
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -51,7 +52,7 @@ def _validate_enum(value, valid_values, field_name):
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute("SELECT * FROM integration_connector WHERE id = ?", (connector_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_connector")).select(Table("integration_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Connector {connector_id} not found")
     return row
@@ -84,12 +85,8 @@ def add_connector(conn, args):
     naming = get_next_name(conn, "integration_connector", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO integration_connector (
-            id, naming_series, name, platform, connector_type, base_url,
-            connector_status, config_json, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_connector", {"id": P(), "naming_series": P(), "name": P(), "platform": P(), "connector_type": P(), "base_url": P(), "connector_status": P(), "config_json": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         cid, naming, name, platform, connector_type,
         getattr(args, "base_url", None),
         "inactive", config_json, args.company_id, now, now,
@@ -156,15 +153,9 @@ def get_connector(conn, args):
     data = row_to_dict(row)
 
     # Count child entities
-    cred_count = conn.execute(
-        "SELECT COUNT(*) FROM integration_credential WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
-    webhook_count = conn.execute(
-        "SELECT COUNT(*) FROM integration_webhook WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
-    mapping_count = conn.execute(
-        "SELECT COUNT(*) FROM integration_field_mapping WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
+    cred_count = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
+    webhook_count = conn.execute(Q.from_(Table("integration_webhook")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
+    mapping_count = conn.execute(Q.from_(Table("integration_field_mapping")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
 
     data["credential_count"] = cred_count
     data["webhook_count"] = webhook_count
@@ -255,9 +246,7 @@ def check_connector(conn, args):
 
     issues = []
     # Check credentials exist
-    cred_count = conn.execute(
-        "SELECT COUNT(*) FROM integration_credential WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
+    cred_count = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
     if cred_count == 0:
         issues.append("No credentials configured")
 
@@ -301,12 +290,8 @@ def add_connector_credential(conn, args):
         err("--credential-value is required")
 
     cred_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO integration_credential (
-            id, connector_id, credential_type, credential_key, credential_value,
-            expires_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_credential", {"id": P(), "connector_id": P(), "credential_type": P(), "credential_key": P(), "credential_value": P(), "expires_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         cred_id, cid, credential_type, credential_key, credential_value,
         getattr(args, "expires_at", None), company_id, _now_iso(),
     ))
@@ -324,9 +309,7 @@ def list_connector_credentials(conn, args):
     if not cid:
         err("--connector-id is required")
 
-    total = conn.execute(
-        "SELECT COUNT(*) FROM integration_credential WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
+    total = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
     rows = conn.execute(
         "SELECT id, connector_id, credential_type, credential_key, expires_at, company_id, created_at "
         "FROM integration_credential WHERE connector_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -344,7 +327,7 @@ def delete_connector_credential(conn, args):
     cred_id = getattr(args, "credential_id", None)
     if not cred_id:
         err("--credential-id is required")
-    row = conn.execute("SELECT * FROM integration_credential WHERE id = ?", (cred_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_credential")).select(Table("integration_credential").star).where(Field("id") == P()).get_sql(), (cred_id,)).fetchone()
     if not row:
         err(f"Credential {cred_id} not found")
 
@@ -370,12 +353,8 @@ def add_webhook(conn, args):
         err("--webhook-url is required")
 
     wh_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO integration_webhook (
-            id, connector_id, event_type, webhook_url, webhook_secret,
-            is_active, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("integration_webhook", {"id": P(), "connector_id": P(), "event_type": P(), "webhook_url": P(), "webhook_secret": P(), "is_active": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         wh_id, cid, event_type, webhook_url,
         getattr(args, "webhook_secret", None),
         1, company_id, _now_iso(),
@@ -394,9 +373,7 @@ def list_webhooks(conn, args):
     if not cid:
         err("--connector-id is required")
 
-    total = conn.execute(
-        "SELECT COUNT(*) FROM integration_webhook WHERE connector_id = ?", (cid,)
-    ).fetchone()[0]
+    total = conn.execute(Q.from_(Table("integration_webhook")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
     rows = conn.execute(
         "SELECT * FROM integration_webhook WHERE connector_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (cid, args.limit, args.offset),
@@ -412,7 +389,7 @@ def delete_webhook(conn, args):
     wh_id = getattr(args, "webhook_id", None)
     if not wh_id:
         err("--webhook-id is required")
-    row = conn.execute("SELECT * FROM integration_webhook WHERE id = ?", (wh_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("integration_webhook")).select(Table("integration_webhook").star).where(Field("id") == P()).get_sql(), (wh_id,)).fetchone()
     if not row:
         err(f"Webhook {wh_id} not found")
 
@@ -442,9 +419,7 @@ def connector_health_report(conn, args):
     for c in connectors:
         cd = row_to_dict(c)
         cid = cd["id"]
-        cred_count = conn.execute(
-            "SELECT COUNT(*) FROM integration_credential WHERE connector_id = ?", (cid,)
-        ).fetchone()[0]
+        cred_count = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
         last_sync = conn.execute(
             "SELECT * FROM integration_sync WHERE connector_id = ? ORDER BY created_at DESC LIMIT 1",
             (cid,),

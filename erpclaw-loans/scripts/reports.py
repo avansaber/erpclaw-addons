@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 
 def _dec(val):
@@ -21,7 +22,7 @@ def handle_loan_statement(conn, args):
     if not loan_id:
         return err("--loan-id is required")
 
-    loan = conn.execute("SELECT * FROM loan WHERE id = ?", (loan_id,)).fetchone()
+    loan = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
     if not loan:
         return err(f"Loan {loan_id} not found")
 

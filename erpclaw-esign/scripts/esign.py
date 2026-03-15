@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-esign"
 
@@ -52,14 +53,16 @@ def _add_event(conn, request_id, event_type, company_id,
                user_agent=None, signature_data=None, notes=None):
     """Insert a signature event record."""
     event_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO esign_signature_event
-           (id, request_id, event_type, signer_email, signer_name,
-            ip_address, user_agent, signature_data, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (event_id, request_id, event_type, signer_email, signer_name,
-         ip_address, user_agent, signature_data, notes, company_id),
-    )
+    sql, _ = insert_row("esign_signature_event", {
+        "id": P(), "request_id": P(), "event_type": P(),
+        "signer_email": P(), "signer_name": P(),
+        "ip_address": P(), "user_agent": P(), "signature_data": P(),
+        "notes": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        event_id, request_id, event_type, signer_email, signer_name,
+        ip_address, user_agent, signature_data, notes, company_id,
+    ))
     return event_id
 
 
@@ -80,9 +83,9 @@ def add_signature_request(conn, args):
     if not requested_by:
         err("--requested-by is required")
 
-    if not conn.execute(
-        "SELECT id FROM company WHERE id = ?", (company_id,)
-    ).fetchone():
+    t = Table("company")
+    q = Q.from_(t).select(t.id).where(t.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
     signers = _parse_signers(signers_str)
@@ -91,26 +94,26 @@ def add_signature_request(conn, args):
     req_id = str(uuid.uuid4())
     ns = get_next_name(conn, "signature_request", company_id=company_id)
 
-    conn.execute(
-        """INSERT INTO esign_signature_request
-           (id, naming_series, document_type, document_id, document_name,
-            signers, requested_by, request_status, total_signers, signed_count,
-            message, expires_at, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            req_id, ns, document_type,
-            getattr(args, "document_id", None),
-            document_name,
-            json.dumps(signers),
-            requested_by,
-            "draft",
-            len(signers),
-            0,
-            getattr(args, "message", None),
-            getattr(args, "expires_at", None),
-            company_id,
-        ),
-    )
+    sql, _ = insert_row("esign_signature_request", {
+        "id": P(), "naming_series": P(), "document_type": P(),
+        "document_id": P(), "document_name": P(),
+        "signers": P(), "requested_by": P(), "request_status": P(),
+        "total_signers": P(), "signed_count": P(),
+        "message": P(), "expires_at": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        req_id, ns, document_type,
+        getattr(args, "document_id", None),
+        document_name,
+        json.dumps(signers),
+        requested_by,
+        "draft",
+        len(signers),
+        0,
+        getattr(args, "message", None),
+        getattr(args, "expires_at", None),
+        company_id,
+    ))
 
     # Create audit event
     _add_event(conn, req_id, "created", company_id, notes=f"Request created by {requested_by}")
@@ -129,9 +132,9 @@ def update_signature_request(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] != "draft":
@@ -184,9 +187,9 @@ def get_signature_request(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
 
@@ -198,10 +201,9 @@ def get_signature_request(conn, args):
         pass
 
     # Get events
-    events = conn.execute(
-        "SELECT * FROM esign_signature_event WHERE request_id = ? ORDER BY created_at ASC",
-        (req_id,),
-    ).fetchall()
+    t_ev = Table("esign_signature_event")
+    q_ev = Q.from_(t_ev).select(t_ev.star).where(t_ev.request_id == P()).orderby(t_ev.created_at, order=Order.asc)
+    events = conn.execute(q_ev.get_sql(), (req_id,)).fetchall()
     data["events"] = [row_to_dict(e) for e in events]
     data["event_count"] = len(events)
 
@@ -212,37 +214,39 @@ def get_signature_request(conn, args):
 # list-signature-requests
 # ---------------------------------------------------------------------------
 def list_signature_requests(conn, args):
-    conditions, params = [], []
+    t = Table("esign_signature_request")
+    q_count = Q.from_(t).select(fn.Count("*").as_("cnt"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(company_id)
     request_status = getattr(args, "request_status", None)
     if request_status:
-        conditions.append("request_status = ?")
+        q_count = q_count.where(t.request_status == P())
+        q_rows = q_rows.where(t.request_status == P())
         params.append(request_status)
     requested_by = getattr(args, "requested_by", None)
     if requested_by:
-        conditions.append("requested_by = ?")
+        q_count = q_count.where(t.requested_by == P())
+        q_rows = q_rows.where(t.requested_by == P())
         params.append(requested_by)
     document_type = getattr(args, "document_type", None)
     if document_type:
-        conditions.append("document_type = ?")
+        q_count = q_count.where(t.document_type == P())
+        q_rows = q_rows.where(t.document_type == P())
         params.append(document_type)
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM esign_signature_request {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_count.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM esign_signature_request {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [limit, offset]).fetchall()
 
     requests = []
     for r in rows:
@@ -264,17 +268,17 @@ def send_signature_request(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] != "draft":
         err(f"Cannot send: request is '{row['request_status']}'. Must be draft")
 
     conn.execute(
-        "UPDATE esign_signature_request SET request_status = 'sent', updated_at = datetime('now') WHERE id = ?",
-        (req_id,),
+        "UPDATE \"esign_signature_request\" SET \"request_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
+        ("sent", req_id),
     )
     _add_event(conn, req_id, "sent", row["company_id"],
                notes=f"Request sent to {row['total_signers']} signer(s)")
@@ -298,9 +302,9 @@ def sign_document(conn, args):
     if not signature_data:
         err("--signature-data is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] not in ("sent", "partially_signed"):
@@ -373,9 +377,9 @@ def decline_signature(conn, args):
     if not signer_email:
         err("--signer-email is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] not in ("sent", "partially_signed"):
@@ -426,9 +430,9 @@ def cancel_signature_request(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] in ("completed", "cancelled", "voided"):
@@ -455,9 +459,9 @@ def void_signature_request(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] not in ("completed", "sent", "partially_signed"):
@@ -484,9 +488,9 @@ def add_reminder(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT * FROM esign_signature_request WHERE id = ?", (req_id,)
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.star).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
     if row["request_status"] not in ("sent", "partially_signed"):
@@ -511,17 +515,15 @@ def get_signature_audit_trail(conn, args):
     if not req_id:
         err("--request-id is required")
 
-    row = conn.execute(
-        "SELECT id, naming_series, document_name, request_status FROM esign_signature_request WHERE id = ?",
-        (req_id,),
-    ).fetchone()
+    t = Table("esign_signature_request")
+    q = Q.from_(t).select(t.id, t.naming_series, t.document_name, t.request_status).where(t.id == P())
+    row = conn.execute(q.get_sql(), (req_id,)).fetchone()
     if not row:
         err(f"Signature request {req_id} not found")
 
-    events = conn.execute(
-        "SELECT * FROM esign_signature_event WHERE request_id = ? ORDER BY created_at ASC",
-        (req_id,),
-    ).fetchall()
+    t_ev = Table("esign_signature_event")
+    q_ev = Q.from_(t_ev).select(t_ev.star).where(t_ev.request_id == P()).orderby(t_ev.created_at, order=Order.asc)
+    events = conn.execute(q_ev.get_sql(), (req_id,)).fetchall()
 
     event_list = [row_to_dict(e) for e in events]
 
@@ -544,13 +546,12 @@ def signature_summary_report(conn, args):
         err("--company-id is required")
 
     # Status breakdown
-    rows = conn.execute(
-        """SELECT request_status, COUNT(*) as cnt
-           FROM esign_signature_request
-           WHERE company_id = ?
-           GROUP BY request_status""",
-        (company_id,),
-    ).fetchall()
+    t = Table("esign_signature_request")
+    q = (Q.from_(t)
+         .select(t.request_status, fn.Count("*").as_("cnt"))
+         .where(t.company_id == P())
+         .groupby(t.request_status))
+    rows = conn.execute(q.get_sql(), (company_id,)).fetchall()
 
     by_status = {}
     total_requests = 0
@@ -570,11 +571,12 @@ def signature_summary_report(conn, args):
     avg_completion_hours = round(avg_row["avg_hours"], 2) if avg_row and avg_row["avg_hours"] is not None else None
 
     # Total signatures
-    sig_count = conn.execute(
-        """SELECT COUNT(*) as cnt FROM esign_signature_event
-           WHERE company_id = ? AND event_type = 'signed'""",
-        (company_id,),
-    ).fetchone()["cnt"]
+    t_ev = Table("esign_signature_event")
+    q_sig = (Q.from_(t_ev)
+             .select(fn.Count("*").as_("cnt"))
+             .where(t_ev.company_id == P())
+             .where(t_ev.event_type == "signed"))
+    sig_count = conn.execute(q_sig.get_sql(), (company_id,)).fetchone()["cnt"]
 
     ok({
         "company_id": company_id,
@@ -591,9 +593,9 @@ def signature_summary_report(conn, args):
 def module_status(conn, args):
     tables = []
     for tbl in ["esign_signature_request", "esign_signature_event"]:
-        row = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {tbl}"
-        ).fetchone()
+        t = Table(tbl)
+        q = Q.from_(t).select(fn.Count("*").as_("cnt"))
+        conn.execute(q.get_sql()).fetchone()
         tables.append(tbl)
 
     ok({

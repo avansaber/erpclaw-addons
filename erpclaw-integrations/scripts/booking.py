@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("connv2_booking_connector", "BKC-")
 except ImportError:
@@ -35,16 +36,14 @@ VALID_CONNECTOR_STATUSES = ("active", "inactive", "error")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _get_connector(conn, connector_id):
     if not connector_id:
         err("--connector-id is required")
-    row = conn.execute(
-        "SELECT * FROM connv2_booking_connector WHERE id = ?", (connector_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("connv2_booking_connector")).select(Table("connv2_booking_connector").star).where(Field("id") == P()).get_sql(), (connector_id,)).fetchone()
     if not row:
         err(f"Booking connector {connector_id} not found")
     return row
@@ -66,13 +65,8 @@ def add_booking_connector(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "connv2_booking_connector")
 
-    conn.execute("""
-        INSERT INTO connv2_booking_connector (
-            id, naming_series, platform, property_id, api_credentials_ref,
-            sync_reservations, sync_rates, sync_availability,
-            connector_status, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_booking_connector", {"id": P(), "naming_series": P(), "platform": P(), "property_id": P(), "api_credentials_ref": P(), "sync_reservations": P(), "sync_rates": P(), "sync_availability": P(), "connector_status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         conn_id, naming, platform,
         getattr(args, "property_id", None),
         getattr(args, "api_credentials_ref", None),
@@ -144,12 +138,8 @@ def sync_reservations(conn, args):
     sync_status = "completed" if errors == 0 else "failed"
 
     company_id = row["company_id"]
-    conn.execute("""
-        INSERT INTO connv2_booking_sync_log (
-            id, connector_id, sync_type, direction, records_synced, errors,
-            sync_status, started_at, completed_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_booking_sync_log", {"id": P(), "connector_id": P(), "sync_type": P(), "direction": P(), "records_synced": P(), "errors": P(), "sync_status": P(), "started_at": P(), "completed_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         log_id, connector_id, "reservations", "inbound",
         records, errors, sync_status, now, now,
         company_id, now,
@@ -179,12 +169,8 @@ def push_rates(conn, args):
     sync_status = "completed" if errors == 0 else "failed"
 
     company_id = row["company_id"]
-    conn.execute("""
-        INSERT INTO connv2_booking_sync_log (
-            id, connector_id, sync_type, direction, records_synced, errors,
-            sync_status, started_at, completed_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_booking_sync_log", {"id": P(), "connector_id": P(), "sync_type": P(), "direction": P(), "records_synced": P(), "errors": P(), "sync_status": P(), "started_at": P(), "completed_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         log_id, connector_id, "rates", "outbound",
         records, errors, sync_status, now, now,
         company_id, now,
@@ -214,12 +200,8 @@ def push_availability(conn, args):
     sync_status = "completed" if errors == 0 else "failed"
 
     company_id = row["company_id"]
-    conn.execute("""
-        INSERT INTO connv2_booking_sync_log (
-            id, connector_id, sync_type, direction, records_synced, errors,
-            sync_status, started_at, completed_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("connv2_booking_sync_log", {"id": P(), "connector_id": P(), "sync_type": P(), "direction": P(), "records_synced": P(), "errors": P(), "sync_status": P(), "started_at": P(), "completed_at": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         log_id, connector_id, "availability", "outbound",
         records, errors, sync_status, now, now,
         company_id, now,

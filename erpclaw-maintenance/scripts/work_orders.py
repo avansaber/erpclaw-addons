@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -44,7 +45,7 @@ def add_maintenance_work_order(conn, args):
     if not equipment_id or not company_id:
         err("--equipment-id and --company-id are required")
 
-    eq = conn.execute("SELECT id FROM equipment WHERE id = ?", (equipment_id,)).fetchone()
+    eq = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (equipment_id,)).fetchone()
     if not eq:
         err(f"Equipment {equipment_id} not found")
 
@@ -62,7 +63,7 @@ def add_maintenance_work_order(conn, args):
 
     plan_id = getattr(args, "plan_id", None)
     if plan_id:
-        plan = conn.execute("SELECT id FROM maintenance_plan WHERE id = ?", (plan_id,)).fetchone()
+        plan = conn.execute(Q.from_(Table("maintenance_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone()
         if not plan:
             err(f"Maintenance plan {plan_id} not found")
 
@@ -70,12 +71,8 @@ def add_maintenance_work_order(conn, args):
     if wo_status not in VALID_WO_STATUSES:
         err(f"Invalid status: {wo_status}")
 
-    conn.execute(
-        """INSERT INTO maintenance_work_order (id, naming_series, equipment_id, plan_id,
-           work_order_type, priority, description, assigned_to, scheduled_date,
-           started_at, completed_at, actual_duration, actual_cost, failure_mode,
-           root_cause, resolution, status, company_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("maintenance_work_order", {"id": P(), "naming_series": P(), "equipment_id": P(), "plan_id": P(), "work_order_type": P(), "priority": P(), "description": P(), "assigned_to": P(), "scheduled_date": P(), "started_at": P(), "completed_at": P(), "actual_duration": P(), "actual_cost": P(), "failure_mode": P(), "root_cause": P(), "resolution": P(), "status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql,
         (wo_id, naming, equipment_id, plan_id,
          wo_type, priority,
          getattr(args, "description", None),
@@ -109,7 +106,7 @@ def update_maintenance_work_order(conn, args):
     if not wo_id:
         err("--work-order-id is required")
 
-    row = conn.execute("SELECT * FROM maintenance_work_order WHERE id = ?", (wo_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_work_order")).select(Table("maintenance_work_order").star).where(Field("id") == P()).get_sql(), (wo_id,)).fetchone()
     if not row:
         err(f"Work order {wo_id} not found")
 
@@ -163,7 +160,7 @@ def get_maintenance_work_order(conn, args):
         err("--work-order-id is required")
 
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM maintenance_work_order WHERE id = ?", (wo_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_work_order")).select(Table("maintenance_work_order").star).where(Field("id") == P()).get_sql(), (wo_id,)).fetchone()
     if not row:
         err(f"Work order {wo_id} not found")
 
@@ -171,18 +168,12 @@ def get_maintenance_work_order(conn, args):
     data["wo_status"] = data.pop("status", None)
 
     # Get items
-    items = conn.execute(
-        "SELECT * FROM maintenance_work_order_item WHERE work_order_id = ? ORDER BY created_at",
-        (wo_id,),
-    ).fetchall()
+    items = conn.execute(Q.from_(Table("maintenance_work_order_item")).select(Table("maintenance_work_order_item").star).where(Field("work_order_id") == P()).orderby(Field("created_at")).get_sql(), (wo_id,)).fetchall()
     data["items"] = [dict(i) for i in items]
     data["item_count"] = len(items)
 
     # Get checklists
-    checklists = conn.execute(
-        "SELECT * FROM maintenance_checklist WHERE work_order_id = ? ORDER BY created_at",
-        (wo_id,),
-    ).fetchall()
+    checklists = conn.execute(Q.from_(Table("maintenance_checklist")).select(Table("maintenance_checklist").star).where(Field("work_order_id") == P()).orderby(Field("created_at")).get_sql(), (wo_id,)).fetchall()
     data["checklists"] = [dict(c) for c in checklists]
 
     ok(data)
@@ -265,7 +256,7 @@ def add_wo_item(conn, args):
     if not work_order_id or not item_name or not company_id:
         err("--work-order-id, --item-name, and --company-id are required")
 
-    wo = conn.execute("SELECT id FROM maintenance_work_order WHERE id = ?", (work_order_id,)).fetchone()
+    wo = conn.execute(Q.from_(Table("maintenance_work_order")).select(Field('id')).where(Field("id") == P()).get_sql(), (work_order_id,)).fetchone()
     if not wo:
         err(f"Work order {work_order_id} not found")
 
@@ -283,10 +274,8 @@ def add_wo_item(conn, args):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO maintenance_work_order_item (id, work_order_id, item_id,
-           item_name, quantity, unit_cost, total_cost, notes, company_id, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("maintenance_work_order_item", {"id": P(), "work_order_id": P(), "item_id": P(), "item_name": P(), "quantity": P(), "unit_cost": P(), "total_cost": P(), "notes": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (item_row_id, work_order_id,
          getattr(args, "item_id", None),
          item_name, quantity, unit_cost, total_cost,
@@ -312,10 +301,7 @@ def list_wo_items(conn, args):
         err("--work-order-id is required")
 
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM maintenance_work_order_item WHERE work_order_id = ? ORDER BY created_at",
-        (work_order_id,),
-    ).fetchall()
+    rows = conn.execute(Q.from_(Table("maintenance_work_order_item")).select(Table("maintenance_work_order_item").star).where(Field("work_order_id") == P()).orderby(Field("created_at")).get_sql(), (work_order_id,)).fetchall()
 
     ok({
         "items": [dict(r) for r in rows],
@@ -331,7 +317,7 @@ def start_maintenance_work_order(conn, args):
         err("--work-order-id is required")
 
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM maintenance_work_order WHERE id = ?", (wo_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_work_order")).select(Table("maintenance_work_order").star).where(Field("id") == P()).get_sql(), (wo_id,)).fetchone()
     if not row:
         err(f"Work order {wo_id} not found")
 
@@ -378,7 +364,7 @@ def complete_maintenance_work_order(conn, args):
         err("--work-order-id is required")
 
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM maintenance_work_order WHERE id = ?", (wo_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_work_order")).select(Table("maintenance_work_order").star).where(Field("id") == P()).get_sql(), (wo_id,)).fetchone()
     if not row:
         err(f"Work order {wo_id} not found")
 
@@ -423,9 +409,7 @@ def complete_maintenance_work_order(conn, args):
     # Update plan if linked
     plan_updated = False
     if row["plan_id"]:
-        plan = conn.execute(
-            "SELECT * FROM maintenance_plan WHERE id = ?", (row["plan_id"],)
-        ).fetchone()
+        plan = conn.execute(Q.from_(Table("maintenance_plan")).select(Table("maintenance_plan").star).where(Field("id") == P()).get_sql(), (row["plan_id"],)).fetchone()
         if plan:
             freq_days = plan["frequency_days"]
             if not freq_days:
@@ -466,7 +450,7 @@ def cancel_maintenance_work_order(conn, args):
     if not wo_id:
         err("--work-order-id is required")
 
-    row = conn.execute("SELECT status, equipment_id FROM maintenance_work_order WHERE id = ?", (wo_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("maintenance_work_order")).select(Field('status'), Field('equipment_id')).where(Field("id") == P()).get_sql(), (wo_id,)).fetchone()
     if not row:
         err(f"Work order {wo_id} not found")
 
@@ -532,11 +516,8 @@ def generate_preventive_work_orders(conn, args):
         naming = get_next_name(conn, "maintenance_work_order", company_id=company_id)
         now = datetime.now(timezone.utc).isoformat()
 
-        conn.execute(
-            """INSERT INTO maintenance_work_order (id, naming_series, equipment_id, plan_id,
-               work_order_type, priority, description, assigned_to, scheduled_date,
-               status, company_id, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("maintenance_work_order", {"id": P(), "naming_series": P(), "equipment_id": P(), "plan_id": P(), "work_order_type": P(), "priority": P(), "description": P(), "assigned_to": P(), "scheduled_date": P(), "status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+        conn.execute(sql,
             (wo_id, naming, plan["equipment_id"], plan["id"],
              "preventive", "medium",
              f"Preventive maintenance per plan: {plan['name']}",
@@ -569,7 +550,7 @@ def add_downtime_record(conn, args):
     if not equipment_id or not company_id:
         err("--equipment-id and --company-id are required")
 
-    eq = conn.execute("SELECT id FROM equipment WHERE id = ?", (equipment_id,)).fetchone()
+    eq = conn.execute(Q.from_(Table("equipment")).select(Field('id')).where(Field("id") == P()).get_sql(), (equipment_id,)).fetchone()
     if not eq:
         err(f"Equipment {equipment_id} not found")
 
@@ -583,11 +564,8 @@ def add_downtime_record(conn, args):
     end_time = getattr(args, "end_time", None)
     duration_hours = getattr(args, "duration_hours", None)
 
-    conn.execute(
-        """INSERT INTO downtime_record (id, equipment_id, work_order_id, start_time,
-           end_time, duration_hours, reason, description, impact, company_id,
-           created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+    sql, _ = insert_row("downtime_record", {"id": P(), "equipment_id": P(), "work_order_id": P(), "start_time": P(), "end_time": P(), "duration_hours": P(), "reason": P(), "description": P(), "impact": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql,
         (dt_id, equipment_id,
          getattr(args, "work_order_id", None),
          start_time, end_time, duration_hours, reason,

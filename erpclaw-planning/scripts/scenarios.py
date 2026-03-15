@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -54,7 +55,7 @@ def add_scenario(conn, args):
 
     base_scenario_id = getattr(args, "base_scenario_id", None)
     if base_scenario_id:
-        if not conn.execute("SELECT id FROM planning_scenario WHERE id = ?", (base_scenario_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("planning_scenario")).select(Field('id')).where(Field("id") == P()).get_sql(), (base_scenario_id,)).fetchone():
             err(f"Base scenario {base_scenario_id} not found")
 
     scenario_id = str(uuid.uuid4())
@@ -88,7 +89,7 @@ def update_scenario(conn, args):
     if not scenario_id:
         err("--scenario-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
 
@@ -133,7 +134,7 @@ def get_scenario(conn, args):
     if not scenario_id:
         err("--scenario-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
 
@@ -194,7 +195,7 @@ def add_scenario_line(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    row = conn.execute("SELECT id, status FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Field('id'), Field('status')).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
     if row_to_dict(row)["status"] in ("approved", "locked", "archived"):
@@ -208,11 +209,8 @@ def add_scenario_line(conn, args):
     naming = get_next_name(conn, "planning_scenario_line", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO planning_scenario_line
-           (id, naming_series, scenario_id, account_name, account_type, period,
-            amount, notes, company_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    sql, _ = insert_row("planning_scenario_line", {"id": P(), "naming_series": P(), "scenario_id": P(), "account_name": P(), "account_type": P(), "period": P(), "amount": P(), "notes": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql,
         (line_id, naming, scenario_id, args.account_name, account_type,
          args.period, amount, getattr(args, "notes", None),
          args.company_id, now)
@@ -269,15 +267,14 @@ def update_scenario_line(conn, args):
     if not line_id:
         err("--scenario-line-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario_line WHERE id = ?", (line_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("id") == P()).get_sql(), (line_id,)).fetchone()
     if not row:
         err(f"Scenario line {line_id} not found")
 
     line_data = row_to_dict(row)
 
     # Check parent scenario status
-    parent = conn.execute("SELECT status FROM planning_scenario WHERE id = ?",
-                          (line_data["scenario_id"],)).fetchone()
+    parent = conn.execute(Q.from_(Table("planning_scenario")).select(Field('status')).where(Field("id") == P()).get_sql(), (line_data["scenario_id"],)).fetchone()
     if parent and row_to_dict(parent)["status"] in ("approved", "locked", "archived"):
         err("Cannot update lines on a scenario that is approved, locked, or archived")
 
@@ -328,7 +325,7 @@ def clone_scenario(conn, args):
     if not getattr(args, "name", None):
         err("--name is required for the cloned scenario")
 
-    source = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (source_id,)).fetchone()
+    source = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (source_id,)).fetchone()
     if not source:
         err(f"Scenario {source_id} not found")
 
@@ -353,19 +350,14 @@ def clone_scenario(conn, args):
     )
 
     # Clone lines
-    source_lines = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ?", (source_id,)
-    ).fetchall()
+    source_lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).get_sql(), (source_id,)).fetchall()
     lines_cloned = 0
     for sl in source_lines:
         sl_data = row_to_dict(sl)
         new_line_id = str(uuid.uuid4())
         line_naming = get_next_name(conn, "planning_scenario_line", company_id=company_id)
-        conn.execute(
-            """INSERT INTO planning_scenario_line
-               (id, naming_series, scenario_id, account_name, account_type, period,
-                amount, notes, company_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        sql, _ = insert_row("planning_scenario_line", {"id": P(), "naming_series": P(), "scenario_id": P(), "account_name": P(), "account_type": P(), "period": P(), "amount": P(), "notes": P(), "company_id": P(), "created_at": P()})
+        conn.execute(sql,
             (new_line_id, line_naming, new_id, sl_data["account_name"],
              sl_data["account_type"], sl_data["period"], sl_data["amount"],
              sl_data.get("notes"), company_id, now)
@@ -387,7 +379,7 @@ def approve_scenario(conn, args):
     if not scenario_id:
         err("--scenario-id is required")
 
-    row = conn.execute("SELECT status FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Field('status')).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
 
@@ -414,7 +406,7 @@ def archive_scenario(conn, args):
     if not scenario_id:
         err("--scenario-id is required")
 
-    row = conn.execute("SELECT status FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Field('status')).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
 
@@ -440,8 +432,8 @@ def compare_scenarios(conn, args):
     if not id_1 or not id_2:
         err("--scenario-id-1 and --scenario-id-2 are required")
 
-    s1 = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (id_1,)).fetchone()
-    s2 = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (id_2,)).fetchone()
+    s1 = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (id_1,)).fetchone()
+    s2 = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (id_2,)).fetchone()
     if not s1:
         err(f"Scenario {id_1} not found")
     if not s2:
@@ -449,14 +441,8 @@ def compare_scenarios(conn, args):
 
     d1, d2 = row_to_dict(s1), row_to_dict(s2)
 
-    lines1 = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (id_1,)
-    ).fetchall()
-    lines2 = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ? ORDER BY period, account_name",
-        (id_2,)
-    ).fetchall()
+    lines1 = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (id_1,)).fetchall()
+    lines2 = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).orderby(Field("period")).orderby(Field("account_name")).get_sql(), (id_2,)).fetchall()
 
     # Build lookup: (period, account_name) -> amount
     map1 = {}
@@ -512,15 +498,13 @@ def scenario_summary(conn, args):
     if not scenario_id:
         err("--scenario-id is required")
 
-    row = conn.execute("SELECT * FROM planning_scenario WHERE id = ?", (scenario_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("planning_scenario")).select(Table("planning_scenario").star).where(Field("id") == P()).get_sql(), (scenario_id,)).fetchone()
     if not row:
         err(f"Scenario {scenario_id} not found")
 
     data = row_to_dict(row)
 
-    lines = conn.execute(
-        "SELECT * FROM planning_scenario_line WHERE scenario_id = ?", (scenario_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Table("planning_scenario_line").star).where(Field("scenario_id") == P()).get_sql(), (scenario_id,)).fetchall()
 
     revenue = Decimal("0")
     expense = Decimal("0")
@@ -580,10 +564,7 @@ def scenario_summary(conn, args):
 # ---------------------------------------------------------------------------
 def _recalculate_scenario_totals(conn, scenario_id):
     """Recalculate total_revenue, total_expense, net_income from lines."""
-    lines = conn.execute(
-        "SELECT account_type, amount FROM planning_scenario_line WHERE scenario_id = ?",
-        (scenario_id,)
-    ).fetchall()
+    lines = conn.execute(Q.from_(Table("planning_scenario_line")).select(Field('account_type'), Field('amount')).where(Field("scenario_id") == P()).get_sql(), (scenario_id,)).fetchall()
 
     revenue = Decimal("0")
     expense = Decimal("0")

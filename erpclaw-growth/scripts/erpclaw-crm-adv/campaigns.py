@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("crmadv_email_campaign", "EMCAMP-")
 except ImportError:
@@ -32,7 +33,7 @@ VALID_EVENT_TYPES = ("sent", "opened", "clicked", "bounced", "unsubscribed", "co
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -52,12 +53,12 @@ def add_email_campaign(conn, args):
 
     template_id = getattr(args, "template_id", None)
     if template_id:
-        if not conn.execute("SELECT id FROM crmadv_campaign_template WHERE id = ?", (template_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("crmadv_campaign_template")).select(Field('id')).where(Field("id") == P()).get_sql(), (template_id,)).fetchone():
             err(f"Campaign template {template_id} not found")
 
     recipient_list_id = getattr(args, "recipient_list_id", None)
     if recipient_list_id:
-        if not conn.execute("SELECT id FROM crmadv_recipient_list WHERE id = ?", (recipient_list_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("crmadv_recipient_list")).select(Field('id')).where(Field("id") == P()).get_sql(), (recipient_list_id,)).fetchone():
             err(f"Recipient list {recipient_list_id} not found")
 
     conn.execute("""
@@ -87,7 +88,7 @@ def update_email_campaign(conn, args):
     camp_id = getattr(args, "campaign_id", None)
     if not camp_id:
         err("--campaign-id is required")
-    row = conn.execute("SELECT * FROM crmadv_email_campaign WHERE id = ?", (camp_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_email_campaign")).select(Table("crmadv_email_campaign").star).where(Field("id") == P()).get_sql(), (camp_id,)).fetchone()
     if not row:
         err(f"Email campaign {camp_id} not found")
 
@@ -127,7 +128,7 @@ def get_email_campaign(conn, args):
     camp_id = getattr(args, "campaign_id", None)
     if not camp_id:
         err("--campaign-id is required")
-    row = conn.execute("SELECT * FROM crmadv_email_campaign WHERE id = ?", (camp_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_email_campaign")).select(Table("crmadv_email_campaign").star).where(Field("id") == P()).get_sql(), (camp_id,)).fetchone()
     if not row:
         err(f"Email campaign {camp_id} not found")
     ok(row_to_dict(row))
@@ -297,7 +298,7 @@ def schedule_campaign(conn, args):
     if not scheduled_date:
         err("--scheduled-date is required")
 
-    row = conn.execute("SELECT * FROM crmadv_email_campaign WHERE id = ?", (camp_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_email_campaign")).select(Table("crmadv_email_campaign").star).where(Field("id") == P()).get_sql(), (camp_id,)).fetchone()
     if not row:
         err(f"Email campaign {camp_id} not found")
 
@@ -325,7 +326,7 @@ def send_campaign(conn, args):
     if not camp_id:
         err("--campaign-id is required")
 
-    row = conn.execute("SELECT * FROM crmadv_email_campaign WHERE id = ?", (camp_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("crmadv_email_campaign")).select(Table("crmadv_email_campaign").star).where(Field("id") == P()).get_sql(), (camp_id,)).fetchone()
     if not row:
         err(f"Email campaign {camp_id} not found")
 
@@ -354,7 +355,7 @@ def track_campaign_event(conn, args):
         err("--campaign-id is required")
     _validate_company(conn, args.company_id)
 
-    if not conn.execute("SELECT id FROM crmadv_email_campaign WHERE id = ?", (camp_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("crmadv_email_campaign")).select(Field('id')).where(Field("id") == P()).get_sql(), (camp_id,)).fetchone():
         err(f"Email campaign {camp_id} not found")
 
     event_type = getattr(args, "event_type", None)

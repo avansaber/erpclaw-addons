@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
 SKILL = "erpclaw-pos"
 
@@ -47,8 +48,7 @@ def add_pos_profile(conn, args):
         err("--company-id is required")
 
     # Validate company exists
-    if not conn.execute("SELECT id FROM company WHERE id = ?",
-                        (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
     warehouse_id = getattr(args, "warehouse_id", None)
@@ -76,12 +76,8 @@ def add_pos_profile(conn, args):
     naming = get_next_name(conn, "pos_profile", company_id=company_id)
 
     try:
-        conn.execute(
-            """INSERT INTO pos_profile
-               (id, naming_series, name, warehouse_id, price_list_id,
-                default_payment_method, allow_discount, max_discount_pct,
-                auto_print_receipt, is_active, company_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        sql, _ = insert_row("pos_profile", {"id": P(), "naming_series": P(), "name": P(), "warehouse_id": P(), "price_list_id": P(), "default_payment_method": P(), "allow_discount": P(), "max_discount_pct": P(), "auto_print_receipt": P(), "is_active": P(), "company_id": P()})
+        conn.execute(sql,
             (profile_id, naming, name, warehouse_id, price_list_id,
              default_pm, allow_discount, max_discount_pct,
              auto_print, 1, company_id))
@@ -103,7 +99,7 @@ def update_pos_profile(conn, args):
     if not pid:
         err("--id is required")
 
-    row = conn.execute("SELECT * FROM pos_profile WHERE id = ?", (pid,)).fetchone()
+    row = conn.execute(Q.from_(Table("pos_profile")).select(Table("pos_profile").star).where(Field("id") == P()).get_sql(), (pid,)).fetchone()
     if not row:
         err(f"POS profile {pid} not found")
 
@@ -155,7 +151,7 @@ def get_pos_profile(conn, args):
     if not pid:
         err("--id is required")
 
-    row = conn.execute("SELECT * FROM pos_profile WHERE id = ?", (pid,)).fetchone()
+    row = conn.execute(Q.from_(Table("pos_profile")).select(Table("pos_profile").star).where(Field("id") == P()).get_sql(), (pid,)).fetchone()
     if not row:
         err(f"POS profile {pid} not found")
 
