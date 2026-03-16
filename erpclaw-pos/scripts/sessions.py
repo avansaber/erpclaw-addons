@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
 SKILL = "erpclaw-pos"
 
@@ -56,8 +57,10 @@ def open_session(conn, args):
     company_id = profile["company_id"]
 
     # Only one open session per profile
+    t_sess = Table("pos_session")
     existing = conn.execute(
-        "SELECT id FROM pos_session WHERE pos_profile_id = ? AND status = 'open'",
+        Q.from_(t_sess).select(t_sess.id)
+        .where(t_sess.pos_profile_id == P()).where(t_sess.status == "open").get_sql(),
         (profile_id,)).fetchone()
     if existing:
         err(f"Profile {profile_id} already has an open session: {existing['id']}")
@@ -121,36 +124,36 @@ def get_session(conn, args):
 # list-sessions
 # ---------------------------------------------------------------------------
 def list_sessions(conn, args):
+    s = Table("pos_session")
+    p = Table("pos_profile")
+    q = Q.from_(s).left_join(p).on(s.pos_profile_id == p.id).select(s.star, p.name.as_("profile_name"))
+    q_cnt = Q.from_(s).select(fn.Count(s.star))
     params = []
-    where = ["1=1"]
 
     profile_id = getattr(args, "pos_profile_id", None)
     status = getattr(args, "status", None)
     company_id = getattr(args, "company_id", None)
 
     if profile_id:
-        where.append("s.pos_profile_id = ?"); params.append(profile_id)
+        q = q.where(s.pos_profile_id == P())
+        q_cnt = q_cnt.where(s.pos_profile_id == P())
+        params.append(profile_id)
     if status:
-        where.append("s.status = ?"); params.append(status)
+        q = q.where(s.status == P())
+        q_cnt = q_cnt.where(s.status == P())
+        params.append(status)
     if company_id:
-        where.append("s.company_id = ?"); params.append(company_id)
+        q = q.where(s.company_id == P())
+        q_cnt = q_cnt.where(s.company_id == P())
+        params.append(company_id)
 
-    where_clause = " AND ".join(where)
-
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM pos_session s WHERE {where_clause}",
-        params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
     limit = int(getattr(args, "limit", None) or 50)
     offset = int(getattr(args, "offset", None) or 0)
 
-    rows = conn.execute(
-        f"""SELECT s.*, p.name as profile_name
-            FROM pos_session s
-            LEFT JOIN pos_profile p ON s.pos_profile_id = p.id
-            WHERE {where_clause}
-            ORDER BY s.opened_at DESC LIMIT ? OFFSET ?""",
-        params + [limit, offset]).fetchall()
+    q = q.orderby(s.opened_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     sessions = []
     for r in rows:
@@ -184,6 +187,7 @@ def close_session(conn, args):
     closing = _round(_dec(closing_amount))
     opening = _dec(row["opening_amount"])
 
+    # PyPika: skipped — complex CASE+SUM+CAST aggregates in close-session queries
     # Calculate totals from submitted transactions
     stats = conn.execute(
         """SELECT
@@ -229,14 +233,13 @@ def close_session(conn, args):
     expected = _round(expected)
     difference = _round(closing - expected)
 
-    conn.execute(
-        """UPDATE pos_session
-           SET closing_amount = ?, expected_amount = ?, difference = ?,
-               total_sales = ?, total_returns = ?, transaction_count = ?,
-               closed_at = datetime('now'), status = 'closed'
-           WHERE id = ?""",
-        (str(closing), str(expected), str(difference),
-         str(total_sales), str(total_returns), txn_count, sid))
+    sql, upd_params = dynamic_update("pos_session", {
+        "closing_amount": str(closing), "expected_amount": str(expected),
+        "difference": str(difference), "total_sales": str(total_sales),
+        "total_returns": str(total_returns), "transaction_count": txn_count,
+        "closed_at": LiteralValue("datetime('now')"), "status": "closed",
+    }, {"id": sid})
+    conn.execute(sql, upd_params)
 
     audit(conn, SKILL, "pos-close-session", "pos_session", sid,
           new_values={"closing_amount": str(closing), "expected_amount": str(expected),

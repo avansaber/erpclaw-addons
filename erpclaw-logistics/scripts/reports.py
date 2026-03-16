@@ -11,6 +11,7 @@ try:
     sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 except ImportError:
     pass
 
@@ -41,9 +42,11 @@ def on_time_delivery_report(conn, args):
     company_id = getattr(args, "company_id", None)
     _validate_company(conn, company_id)
 
+    t = Table("logistics_shipment")
     total_delivered = conn.execute(
-        "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ? "
-        "AND shipment_status = 'delivered'", (company_id,)
+        Q.from_(t).select(fn.Count(t.star))
+        .where(t.company_id == P()).where(t.shipment_status == "delivered").get_sql(),
+        (company_id,)
     ).fetchone()[0]
 
     on_time = 0
@@ -52,20 +55,24 @@ def on_time_delivery_report(conn, args):
 
     if total_delivered > 0:
         on_time = conn.execute(
-            "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ? "
-            "AND shipment_status = 'delivered' AND estimated_delivery IS NOT NULL "
-            "AND actual_delivery <= estimated_delivery", (company_id,)
+            Q.from_(t).select(fn.Count(t.star))
+            .where(t.company_id == P()).where(t.shipment_status == "delivered")
+            .where(t.estimated_delivery.isnotnull())
+            .where(t.actual_delivery <= t.estimated_delivery).get_sql(),
+            (company_id,)
         ).fetchone()[0]
 
         late = conn.execute(
-            "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ? "
-            "AND shipment_status = 'delivered' AND estimated_delivery IS NOT NULL "
-            "AND actual_delivery > estimated_delivery", (company_id,)
+            Q.from_(t).select(fn.Count(t.star))
+            .where(t.company_id == P()).where(t.shipment_status == "delivered")
+            .where(t.estimated_delivery.isnotnull())
+            .where(t.actual_delivery > t.estimated_delivery).get_sql(),
+            (company_id,)
         ).fetchone()[0]
 
         no_estimate = total_delivered - on_time - late
 
-    # By carrier
+    # By carrier — PyPika: skipped (complex CASE in SUM + JOIN)
     by_carrier = []
     carriers = conn.execute(
         "SELECT c.id, c.name, COUNT(s.id) as total, "
@@ -107,13 +114,15 @@ def delivery_exception_report(conn, args):
     _validate_company(conn, company_id)
 
     # Shipments with exception status
+    t_ship = Table("logistics_shipment")
     exceptions = conn.execute(
-        "SELECT * FROM logistics_shipment WHERE company_id = ? "
-        "AND shipment_status = 'exception' ORDER BY updated_at DESC",
+        Q.from_(t_ship).select(t_ship.star)
+        .where(t_ship.company_id == P()).where(t_ship.shipment_status == "exception")
+        .orderby(t_ship.updated_at, order=Order.desc).get_sql(),
         (company_id,)
     ).fetchall()
 
-    # Exception tracking events
+    # Exception tracking events — PyPika: skipped (JOIN with te.* + s.tracking_number)
     exception_events = conn.execute(
         "SELECT te.*, s.tracking_number, s.reference_number "
         "FROM logistics_tracking_event te "
@@ -125,8 +134,9 @@ def delivery_exception_report(conn, args):
 
     # Returned shipments
     returned = conn.execute(
-        "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ? "
-        "AND shipment_status = 'returned'", (company_id,)
+        Q.from_(t_ship).select(fn.Count(t_ship.star))
+        .where(t_ship.company_id == P()).where(t_ship.shipment_status == "returned").get_sql(),
+        (company_id,)
     ).fetchone()[0]
 
     ok({
@@ -160,7 +170,8 @@ def delivery_exception_report(conn, args):
 def status_action(conn, args):
     counts = {}
     for tbl in LOGISTICS_TABLES:
-        counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        t = Table(tbl)
+        counts[tbl] = conn.execute(Q.from_(t).select(fn.Count(t.star)).get_sql()).fetchone()[0]
     ok({
         "skill": "erpclaw-logistics",
         "version": "1.0.0",

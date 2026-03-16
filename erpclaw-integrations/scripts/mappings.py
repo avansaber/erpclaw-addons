@@ -119,6 +119,7 @@ def update_field_mapping(conn, args):
     if not updates:
         err("No fields to update. Provide at least one field flag.")
 
+    # PyPika: skipped — dynamic UPDATE with variable columns
     params.append(fm_id)
     conn.execute(
         f"UPDATE integration_field_mapping SET {', '.join(updates)} WHERE id = ?",
@@ -147,6 +148,7 @@ def get_field_mapping(conn, args):
 # 4. list-field-mappings
 # ===========================================================================
 def list_field_mappings(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     cid = getattr(args, "connector_id", None)
     if cid:
@@ -178,7 +180,8 @@ def delete_field_mapping(conn, args):
     if not row:
         err(f"Field mapping {fm_id} not found")
 
-    conn.execute("DELETE FROM integration_field_mapping WHERE id = ?", (fm_id,))
+    _tfm = Table("integration_field_mapping")
+    conn.execute(Q.from_(_tfm).delete().where(_tfm.id == P()).get_sql(), (fm_id,))
     audit(conn, SKILL, "integration-delete-field-mapping", "integration_field_mapping", fm_id)
     conn.commit()
     ok({"id": fm_id, "deleted": True})
@@ -203,8 +206,12 @@ def add_entity_map(conn, args):
         err("--remote-id is required")
 
     # Check for duplicate
+    _tem = Table("integration_entity_map")
     existing = conn.execute(
-        "SELECT id FROM integration_entity_map WHERE connector_id = ? AND entity_type = ? AND local_id = ?",
+        Q.from_(_tem).select(_tem.id)
+        .where(_tem.connector_id == P())
+        .where(_tem.entity_type == P())
+        .where(_tem.local_id == P()).get_sql(),
         (cid, entity_type, local_id),
     ).fetchone()
     if existing:
@@ -242,6 +249,7 @@ def get_entity_map(conn, args):
 # 8. list-entity-maps
 # ===========================================================================
 def list_entity_maps(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     cid = getattr(args, "connector_id", None)
     if cid:
@@ -281,7 +289,8 @@ def delete_entity_map(conn, args):
     if not row:
         err(f"Entity map {em_id} not found")
 
-    conn.execute("DELETE FROM integration_entity_map WHERE id = ?", (em_id,))
+    _tem = Table("integration_entity_map")
+    conn.execute(Q.from_(_tem).delete().where(_tem.id == P()).get_sql(), (em_id,))
     audit(conn, SKILL, "integration-delete-entity-map", "integration_entity_map", em_id)
     conn.commit()
     ok({"id": em_id, "deleted": True})
@@ -327,6 +336,7 @@ def add_transform_rule(conn, args):
 # 11. list-transform-rules
 # ===========================================================================
 def list_transform_rules(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     cid = getattr(args, "connector_id", None)
     if cid:
@@ -358,7 +368,8 @@ def delete_transform_rule(conn, args):
     if not row:
         err(f"Transform rule {tr_id} not found")
 
-    conn.execute("DELETE FROM integration_transform_rule WHERE id = ?", (tr_id,))
+    _ttr = Table("integration_transform_rule")
+    conn.execute(Q.from_(_ttr).delete().where(_ttr.id == P()).get_sql(), (tr_id,))
     audit(conn, SKILL, "integration-delete-transform-rule", "integration_transform_rule", tr_id)
     conn.commit()
     ok({"id": tr_id, "deleted": True})

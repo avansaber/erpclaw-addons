@@ -14,7 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -79,16 +79,16 @@ def add_risk(conn, args):
     risk_id = str(uuid.uuid4())
     naming = get_next_name(conn, "risk_register", company_id=args.company_id)
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO risk_register (
-            id, naming_series, name, category, description,
-            likelihood, impact, risk_score, risk_level,
-            owner, mitigation_plan,
-            residual_likelihood, residual_impact, residual_score,
-            status, review_date,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("risk_register", {
+        "id": P(), "naming_series": P(), "name": P(), "category": P(),
+        "description": P(), "likelihood": P(), "impact": P(),
+        "risk_score": P(), "risk_level": P(), "owner": P(),
+        "mitigation_plan": P(), "residual_likelihood": P(),
+        "residual_impact": P(), "residual_score": P(), "status": P(),
+        "review_date": P(), "company_id": P(), "created_at": P(),
+        "updated_at": P(),
+    })
+    conn.execute(sql, (
         risk_id, naming, name, category,
         getattr(args, "description", None),
         likelihood, impact, risk_score, risk_level,
@@ -121,7 +121,7 @@ def update_risk(conn, args):
     current_likelihood = row[0]
     current_impact = row[1]
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "name": "name",
         "description": "description",
@@ -132,22 +132,19 @@ def update_risk(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     category = getattr(args, "category", None)
     if category is not None:
         _validate_enum(category, VALID_RISK_CATEGORIES, "category")
-        updates.append("category = ?")
-        params.append(category)
+        data["category"] = category
         changed.append("category")
 
     status = getattr(args, "status", None)
     if status is not None:
         _validate_enum(status, VALID_RISK_STATUSES, "status")
-        updates.append("status = ?")
-        params.append(status)
+        data["status"] = status
         changed.append("status")
 
     # Handle likelihood/impact recalculation
@@ -157,26 +154,22 @@ def update_risk(conn, args):
         new_likelihood = int(new_likelihood)
         if not (1 <= new_likelihood <= 5):
             err("--likelihood must be between 1 and 5")
-        updates.append("likelihood = ?")
-        params.append(new_likelihood)
+        data["likelihood"] = new_likelihood
         changed.append("likelihood")
         current_likelihood = new_likelihood
     if new_impact is not None:
         new_impact = int(new_impact)
         if not (1 <= new_impact <= 5):
             err("--impact must be between 1 and 5")
-        updates.append("impact = ?")
-        params.append(new_impact)
+        data["impact"] = new_impact
         changed.append("impact")
         current_impact = new_impact
 
     if new_likelihood is not None or new_impact is not None:
         risk_score = current_likelihood * current_impact
         risk_level = _calc_risk_level(risk_score)
-        updates.append("risk_score = ?")
-        params.append(risk_score)
-        updates.append("risk_level = ?")
-        params.append(risk_level)
+        data["risk_score"] = risk_score
+        data["risk_level"] = risk_level
         changed.extend(["risk_score", "risk_level"])
 
     # Residual scores
@@ -186,15 +179,13 @@ def update_risk(conn, args):
         res_likelihood = int(res_likelihood)
         if not (1 <= res_likelihood <= 5):
             err("--residual-likelihood must be between 1 and 5")
-        updates.append("residual_likelihood = ?")
-        params.append(res_likelihood)
+        data["residual_likelihood"] = res_likelihood
         changed.append("residual_likelihood")
     if res_impact is not None:
         res_impact = int(res_impact)
         if not (1 <= res_impact <= 5):
             err("--residual-impact must be between 1 and 5")
-        updates.append("residual_impact = ?")
-        params.append(res_impact)
+        data["residual_impact"] = res_impact
         changed.append("residual_impact")
 
     if res_likelihood is not None or res_impact is not None:
@@ -203,16 +194,15 @@ def update_risk(conn, args):
         rl = res_likelihood if res_likelihood is not None else (cur[0] if cur[0] is not None else current_likelihood)
         ri = res_impact if res_impact is not None else (cur[1] if cur[1] is not None else current_impact)
         residual_score = rl * ri
-        updates.append("residual_score = ?")
-        params.append(residual_score)
+        data["residual_score"] = residual_score
         changed.append("residual_score")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(risk_id)
-    conn.execute(f"UPDATE risk_register SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("risk_register", data, {"id": risk_id})
+    conn.execute(sql, params)
     audit(conn, "risk_register", risk_id, "compliance-update-risk", None, {"updated_fields": changed})
     conn.commit()
     ok({"id": risk_id, "updated_fields": changed})
@@ -231,8 +221,9 @@ def get_risk(conn, args):
     data = row_to_dict(row)
 
     # Enrich: assessment count
+    ra = Table("risk_assessment")
     assess_count = conn.execute(
-        "SELECT COUNT(*) FROM risk_assessment WHERE risk_id = ?", (risk_id,)
+        Q.from_(ra).select(fn.Count(ra.star)).where(ra.risk_id == P()).get_sql(), (risk_id,)
     ).fetchone()[0]
     data["assessment_count"] = assess_count
     ok(data)
@@ -242,30 +233,38 @@ def get_risk(conn, args):
 # 4. list-risks
 # ---------------------------------------------------------------------------
 def list_risks(conn, args):
-    where, params = ["1=1"], []
+    t = Table("risk_register")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "category", None):
-        where.append("category = ?")
+        q = q.where(t.category == P())
+        q_cnt = q_cnt.where(t.category == P())
         params.append(args.category)
     if getattr(args, "status", None):
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(args.status)
     if getattr(args, "risk_level", None):
-        where.append("risk_level = ?")
+        q = q.where(t.risk_level == P())
+        q_cnt = q_cnt.where(t.risk_level == P())
         params.append(args.risk_level)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{args.search}%", f"%{args.search}%"])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM risk_register WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM risk_register WHERE {where_sql} ORDER BY risk_score DESC, created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.risk_score, order=Order.desc).orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -298,13 +297,12 @@ def add_risk_assessment(conn, args):
 
     assess_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO risk_assessment (
-            id, risk_id, assessment_date, assessor,
-            likelihood, impact, score, notes,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("risk_assessment", {
+        "id": P(), "risk_id": P(), "assessment_date": P(), "assessor": P(),
+        "likelihood": P(), "impact": P(), "score": P(), "notes": P(),
+        "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         assess_id, risk_id, now[:10],
         getattr(args, "assessor", None),
         likelihood, impact, score,
@@ -320,18 +318,20 @@ def add_risk_assessment(conn, args):
 # 6. list-risk-assessments
 # ---------------------------------------------------------------------------
 def list_risk_assessments(conn, args):
-    where, params = ["1=1"], []
+    t = Table("risk_assessment")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "risk_id", None):
-        where.append("risk_id = ?")
+        q = q.where(t.risk_id == P())
+        q_cnt = q_cnt.where(t.risk_id == P())
         params.append(args.risk_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM risk_assessment WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM risk_assessment WHERE {where_sql} ORDER BY assessment_date DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.assessment_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -396,10 +396,10 @@ def close_risk(conn, args):
     if row[0] == "closed":
         err("Risk is already closed")
 
-    conn.execute(
-        "UPDATE risk_register SET status = 'closed', updated_at = datetime('now') WHERE id = ?",
-        (risk_id,)
-    )
+    sql = update_row("risk_register",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("closed", risk_id))
     audit(conn, "risk_register", risk_id, "compliance-close-risk", None)
     conn.commit()
     ok({"id": risk_id, "risk_status": "closed"})

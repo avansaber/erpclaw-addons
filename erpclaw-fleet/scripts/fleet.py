@@ -17,7 +17,8 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
 
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
     ENTITY_PREFIXES.setdefault("fleet_vehicle", "VEH-")
     ENTITY_PREFIXES.setdefault("fleet_vehicle_maintenance", "FMNT-")
 except ImportError:
@@ -232,27 +233,34 @@ def get_vehicle(conn, args):
 # 4. list-vehicles
 # ===========================================================================
 def list_vehicles(conn, args):
-    where, params = ["1=1"], []
+    t = Table("fleet_vehicle")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "vehicle_status", None):
-        where.append("vehicle_status = ?")
+        q_count = q_count.where(t.vehicle_status == P())
+        q_rows = q_rows.where(t.vehicle_status == P())
         params.append(args.vehicle_status)
     if getattr(args, "vehicle_type", None):
-        where.append("vehicle_type = ?")
+        q_count = q_count.where(t.vehicle_type == P())
+        q_rows = q_rows.where(t.vehicle_type == P())
         params.append(args.vehicle_type)
     if getattr(args, "search", None):
-        where.append("(make LIKE ? OR model LIKE ? OR license_plate LIKE ? OR vin LIKE ?)")
-        params.extend([f"%{args.search}%"] * 4)
+        s = f"%{args.search}%"
+        search_crit = (t.make.like(P())) | (t.model.like(P())) | (t.license_plate.like(P())) | (t.vin.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
+        params.extend([s, s, s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM fleet_vehicle WHERE {where_sql}", params).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM fleet_vehicle WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -299,10 +307,11 @@ def add_vehicle_assignment(conn, args):
     ))
 
     # Update vehicle status to assigned
-    conn.execute(
-        "UPDATE \"fleet_vehicle\" SET \"vehicle_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-        ("assigned", vehicle_id),
-    )
+    sql, params_upd = dynamic_update("fleet_vehicle",
+                                      data={"vehicle_status": "assigned",
+                                            "updated_at": LiteralValue("datetime('now')")},
+                                      where={"id": vehicle_id})
+    conn.execute(sql, params_upd)
 
     audit(conn, SKILL, "fleet-add-vehicle-assignment", "fleet_vehicle_assignment", assign_id,
           new_values={"vehicle_id": vehicle_id, "driver_name": driver_name})
@@ -345,10 +354,11 @@ def end_vehicle_assignment(conn, args):
                 .where(t_va.id != P()))
     active_count = conn.execute(q_active.get_sql(), (vehicle_id, assign_id)).fetchone()[0]
     if active_count == 0:
-        conn.execute(
-            "UPDATE \"fleet_vehicle\" SET \"vehicle_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-            ("available", vehicle_id),
-        )
+        sql, params_upd = dynamic_update("fleet_vehicle",
+                                          data={"vehicle_status": "available",
+                                                "updated_at": LiteralValue("datetime('now')")},
+                                          where={"id": vehicle_id})
+        conn.execute(sql, params_upd)
 
     audit(conn, SKILL, "fleet-end-vehicle-assignment", "fleet_vehicle_assignment", assign_id,
           new_values={"assignment_status": "ended", "end_date": end_date})
@@ -360,32 +370,36 @@ def end_vehicle_assignment(conn, args):
 # 7. list-vehicle-assignments
 # ===========================================================================
 def list_vehicle_assignments(conn, args):
-    where, params = ["1=1"], []
+    t = Table("fleet_vehicle_assignment")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "vehicle_id", None):
-        where.append("vehicle_id = ?")
+        q_count = q_count.where(t.vehicle_id == P())
+        q_rows = q_rows.where(t.vehicle_id == P())
         params.append(args.vehicle_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "assignment_status", None):
-        where.append("assignment_status = ?")
+        q_count = q_count.where(t.assignment_status == P())
+        q_rows = q_rows.where(t.assignment_status == P())
         params.append(args.assignment_status)
     if getattr(args, "driver_id", None):
-        where.append("driver_id = ?")
+        q_count = q_count.where(t.driver_id == P())
+        q_rows = q_rows.where(t.driver_id == P())
         params.append(args.driver_id)
     if getattr(args, "search", None):
-        where.append("driver_name LIKE ?")
+        q_count = q_count.where(t.driver_name.like(P()))
+        q_rows = q_rows.where(t.driver_name.like(P()))
         params.append(f"%{args.search}%")
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM fleet_vehicle_assignment WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM fleet_vehicle_assignment WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -440,10 +454,11 @@ def add_fuel_log(conn, args):
 
     # Update vehicle odometer if provided
     if odometer_reading:
-        conn.execute(
-            "UPDATE \"fleet_vehicle\" SET \"current_odometer\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-            (str(to_decimal(odometer_reading)), vehicle_id),
-        )
+        sql, params_upd = dynamic_update("fleet_vehicle",
+                                          data={"current_odometer": str(to_decimal(odometer_reading)),
+                                                "updated_at": LiteralValue("datetime('now')")},
+                                          where={"id": vehicle_id})
+        conn.execute(sql, params_upd)
 
     audit(conn, SKILL, "fleet-add-fuel-log", "fleet_fuel_log", log_id,
           new_values={"vehicle_id": vehicle_id, "gallons": gallons, "cost": cost})
@@ -459,29 +474,32 @@ def add_fuel_log(conn, args):
 # 9. list-fuel-logs
 # ===========================================================================
 def list_fuel_logs(conn, args):
-    where, params = ["1=1"], []
+    t = Table("fleet_fuel_log")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "vehicle_id", None):
-        where.append("vehicle_id = ?")
+        q_count = q_count.where(t.vehicle_id == P())
+        q_rows = q_rows.where(t.vehicle_id == P())
         params.append(args.vehicle_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "start_date", None):
-        where.append("log_date >= ?")
+        q_count = q_count.where(t.log_date >= P())
+        q_rows = q_rows.where(t.log_date >= P())
         params.append(args.start_date)
     if getattr(args, "end_date", None):
-        where.append("log_date <= ?")
+        q_count = q_count.where(t.log_date <= P())
+        q_rows = q_rows.where(t.log_date <= P())
         params.append(args.end_date)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM fleet_fuel_log WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM fleet_fuel_log WHERE {where_sql} ORDER BY log_date DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+
+    q_rows = q_rows.orderby(t.log_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -594,29 +612,32 @@ def complete_vehicle_maintenance(conn, args):
 # 12. list-vehicle-maintenance
 # ===========================================================================
 def list_vehicle_maintenance(conn, args):
-    where, params = ["1=1"], []
+    t = Table("fleet_vehicle_maintenance")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "vehicle_id", None):
-        where.append("vehicle_id = ?")
+        q_count = q_count.where(t.vehicle_id == P())
+        q_rows = q_rows.where(t.vehicle_id == P())
         params.append(args.vehicle_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "maintenance_status", None):
-        where.append("maintenance_status = ?")
+        q_count = q_count.where(t.maintenance_status == P())
+        q_rows = q_rows.where(t.maintenance_status == P())
         params.append(args.maintenance_status)
     if getattr(args, "maintenance_type", None):
-        where.append("maintenance_type = ?")
+        q_count = q_count.where(t.maintenance_type == P())
+        q_rows = q_rows.where(t.maintenance_type == P())
         params.append(args.maintenance_type)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM fleet_vehicle_maintenance WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM fleet_vehicle_maintenance WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -633,25 +654,32 @@ def vehicle_cost_report(conn, args):
         err("--company-id is required")
     _validate_company(conn, company_id)
 
-    where_clause = "v.company_id = ?"
+    v = Table("fleet_vehicle")
+    f = Table("fleet_fuel_log")
+    m = Table("fleet_vehicle_maintenance")
     params = [company_id]
+
+    # Subquery for maintenance cost
+    maint_sub = (Q.from_(m)
+                 .select(fn.Coalesce(fn.Sum(LiteralValue('CAST("cost" AS REAL)')), 0))
+                 .where(m.vehicle_id == v.id))
+
+    q = (Q.from_(v)
+         .left_join(f).on(f.vehicle_id == v.id)
+         .select(v.id, v.make, v.model, v.year, v.license_plate,
+                 fn.Coalesce(fn.Sum(LiteralValue('CAST("fleet_fuel_log"."cost" AS REAL)')), 0).as_("total_fuel_cost"),
+                 LiteralValue(f"({maint_sub.get_sql()})").as_("total_maint_cost"))
+         .where(v.company_id == P())
+         .groupby(v.id)
+         .orderby(v.make)
+         .orderby(v.model))
 
     vehicle_id = getattr(args, "vehicle_id", None)
     if vehicle_id:
-        where_clause += " AND v.id = ?"
+        q = q.where(v.id == P())
         params.append(vehicle_id)
 
-    rows = conn.execute(f"""
-        SELECT v.id, v.make, v.model, v.year, v.license_plate,
-               COALESCE(SUM(CAST(f.cost AS REAL)), 0) AS total_fuel_cost,
-               (SELECT COALESCE(SUM(CAST(m.cost AS REAL)), 0)
-                FROM fleet_vehicle_maintenance m WHERE m.vehicle_id = v.id) AS total_maint_cost
-        FROM fleet_vehicle v
-        LEFT JOIN fleet_fuel_log f ON f.vehicle_id = v.id
-        WHERE {where_clause}
-        GROUP BY v.id
-        ORDER BY v.make, v.model
-    """, params).fetchall()
+    rows = conn.execute(q.get_sql(), params).fetchall()
 
     vehicles = []
     for r in rows:
@@ -685,10 +713,12 @@ def vehicle_utilization_report(conn, args):
     params = [company_id]
 
     # Vehicle counts by status
-    status_rows = conn.execute("""
-        SELECT vehicle_status, COUNT(*) FROM fleet_vehicle
-        WHERE company_id = ? GROUP BY vehicle_status
-    """, params).fetchall()
+    t_v = Table("fleet_vehicle")
+    q_status = (Q.from_(t_v)
+                .select(t_v.vehicle_status, fn.Count("*"))
+                .where(t_v.company_id == P())
+                .groupby(t_v.vehicle_status))
+    status_rows = conn.execute(q_status.get_sql(), params).fetchall()
 
     status_counts = {}
     total = 0
@@ -697,10 +727,12 @@ def vehicle_utilization_report(conn, args):
         total += r[1]
 
     # Active assignment count
-    active_assignments = conn.execute("""
-        SELECT COUNT(*) FROM fleet_vehicle_assignment
-        WHERE assignment_status = 'active' AND company_id = ?
-    """, params).fetchone()[0]
+    t_a = Table("fleet_vehicle_assignment")
+    q_active = (Q.from_(t_a)
+                .select(fn.Count("*"))
+                .where(t_a.assignment_status == "active")
+                .where(t_a.company_id == P()))
+    active_assignments = conn.execute(q_active.get_sql(), params).fetchone()[0]
 
     utilization_rate = "0.00"
     if total > 0:

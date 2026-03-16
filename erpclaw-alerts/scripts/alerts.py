@@ -15,7 +15,8 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("alert_rule", "ALRT-")
     ENTITY_PREFIXES.setdefault("notification_channel", "NCHP-")
@@ -477,10 +478,13 @@ def trigger_alert(conn, args):
     ))
 
     # Update rule: last_triggered_at and trigger_count
-    conn.execute(
-        "UPDATE \"alert_rule\" SET \"last_triggered_at\"=?,\"trigger_count\"=\"trigger_count\"+1,\"updated_at\"=? WHERE \"id\"=?",
-        (now, now, rule_id),
-    )
+    t_rule = Table("alert_rule")
+    q_upd = (Q.update(t_rule)
+             .set(t_rule.last_triggered_at, P())
+             .set(t_rule.trigger_count, LiteralValue('"trigger_count"+1'))
+             .set(t_rule.updated_at, P())
+             .where(t_rule.id == P()))
+    conn.execute(q_upd.get_sql(), (now, now, rule_id))
 
     audit(conn, "alert_log", log_id, "alert-trigger-alert", company_id)
     conn.commit()

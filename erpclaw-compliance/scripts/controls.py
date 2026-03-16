@@ -14,7 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, Case, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -69,15 +69,15 @@ def add_control_test(conn, args):
     test_id = str(uuid.uuid4())
     naming = get_next_name(conn, "control_test", company_id=args.company_id)
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO control_test (
-            id, naming_series, control_name, control_description,
-            control_type, frequency, test_date, tester,
-            test_procedure, test_result, evidence,
-            deficiency_type, remediation_plan, next_test_date,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("control_test", {
+        "id": P(), "naming_series": P(), "control_name": P(),
+        "control_description": P(), "control_type": P(), "frequency": P(),
+        "test_date": P(), "tester": P(), "test_procedure": P(),
+        "test_result": P(), "evidence": P(), "deficiency_type": P(),
+        "remediation_plan": P(), "next_test_date": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         test_id, naming, control_name,
         getattr(args, "control_description", None),
         control_type, frequency,
@@ -109,7 +109,7 @@ def update_control_test(conn, args):
     if not conn.execute(Q.from_(Table("control_test")).select(Field('id')).where(Field("id") == P()).get_sql(), (test_id,)).fetchone():
         err(f"Control test {test_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "control_name": "control_name",
         "control_description": "control_description",
@@ -121,30 +121,27 @@ def update_control_test(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     control_type = getattr(args, "control_type", None)
     if control_type is not None:
         _validate_enum(control_type, VALID_CONTROL_TYPES, "control-type")
-        updates.append("control_type = ?")
-        params.append(control_type)
+        data["control_type"] = control_type
         changed.append("control_type")
 
     frequency = getattr(args, "frequency", None)
     if frequency is not None:
         _validate_enum(frequency, VALID_FREQUENCIES, "frequency")
-        updates.append("frequency = ?")
-        params.append(frequency)
+        data["frequency"] = frequency
         changed.append("frequency")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(test_id)
-    conn.execute(f"UPDATE control_test SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("control_test", data, {"id": test_id})
+    conn.execute(sql, params)
     audit(conn, "control_test", test_id, "compliance-update-control-test", None, {"updated_fields": changed})
     conn.commit()
     ok({"id": test_id, "updated_fields": changed})
@@ -167,30 +164,38 @@ def get_control_test(conn, args):
 # 4. list-control-tests
 # ---------------------------------------------------------------------------
 def list_control_tests(conn, args):
-    where, params = ["1=1"], []
+    t = Table("control_test")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "control_type", None):
-        where.append("control_type = ?")
+        q = q.where(t.control_type == P())
+        q_cnt = q_cnt.where(t.control_type == P())
         params.append(args.control_type)
     if getattr(args, "test_result", None):
-        where.append("test_result = ?")
+        q = q.where(t.test_result == P())
+        q_cnt = q_cnt.where(t.test_result == P())
         params.append(args.test_result)
     if getattr(args, "frequency", None):
-        where.append("frequency = ?")
+        q = q.where(t.frequency == P())
+        q_cnt = q_cnt.where(t.frequency == P())
         params.append(args.frequency)
     if getattr(args, "search", None):
-        where.append("(control_name LIKE ? OR control_description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.control_name.like(like)) | (t.control_description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{args.search}%", f"%{args.search}%"])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM control_test WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM control_test WHERE {where_sql} ORDER BY test_date DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.test_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -214,35 +219,32 @@ def execute_control_test(conn, args):
     _validate_enum(test_result, VALID_TEST_RESULTS, "test-result")
 
     now = _now_iso()
-    updates = [
-        "test_result = ?", "test_date = ?", "updated_at = ?"
-    ]
-    params = [test_result, _today_iso(), now]
+    upd_data = {
+        "test_result": test_result,
+        "test_date": _today_iso(),
+        "updated_at": now,
+    }
 
     tester = getattr(args, "tester", None)
     if tester:
-        updates.append("tester = ?")
-        params.append(tester)
+        upd_data["tester"] = tester
 
     evidence = getattr(args, "evidence", None)
     if evidence:
-        updates.append("evidence = ?")
-        params.append(evidence)
+        upd_data["evidence"] = evidence
 
     # Set deficiency_type if result is ineffective
     deficiency_type = getattr(args, "deficiency_type", None)
     if deficiency_type:
         _validate_enum(deficiency_type, VALID_DEFICIENCY_TYPES, "deficiency-type")
-        updates.append("deficiency_type = ?")
-        params.append(deficiency_type)
+        upd_data["deficiency_type"] = deficiency_type
 
     notes = getattr(args, "notes", None)
     if notes:
-        updates.append("remediation_plan = ?")
-        params.append(notes)
+        upd_data["remediation_plan"] = notes
 
-    params.append(test_id)
-    conn.execute(f"UPDATE control_test SET {', '.join(updates)} WHERE id = ?", params)
+    sql, params = dynamic_update("control_test", upd_data, {"id": test_id})
+    conn.execute(sql, params)
     audit(conn, "control_test", test_id, "compliance-execute-control-test", None, {"test_result": test_result})
     conn.commit()
     ok({"id": test_id, "test_result_status": test_result, "test_date": _today_iso()})
@@ -276,13 +278,13 @@ def add_calendar_item(conn, args):
     item_id = str(uuid.uuid4())
     naming = get_next_name(conn, "compliance_calendar", company_id=args.company_id)
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO compliance_calendar (
-            id, title, compliance_type, due_date, reminder_days,
-            responsible, description, recurrence, status,
-            notes, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("compliance_calendar", {
+        "id": P(), "title": P(), "compliance_type": P(), "due_date": P(),
+        "reminder_days": P(), "responsible": P(), "description": P(),
+        "recurrence": P(), "status": P(), "notes": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         item_id, title, compliance_type, due_date,
         int(getattr(args, "reminder_days", None) or 30),
         getattr(args, "responsible", None),
@@ -307,7 +309,7 @@ def update_calendar_item(conn, args):
     if not conn.execute(Q.from_(Table("compliance_calendar")).select(Field('id')).where(Field("id") == P()).get_sql(), (item_id,)).fetchone():
         err(f"Calendar item {item_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "title": "title",
         "due_date": "due_date",
@@ -317,36 +319,32 @@ def update_calendar_item(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     compliance_type = getattr(args, "compliance_type", None)
     if compliance_type is not None:
         _validate_enum(compliance_type, VALID_COMPLIANCE_TYPES, "compliance-type")
-        updates.append("compliance_type = ?")
-        params.append(compliance_type)
+        data["compliance_type"] = compliance_type
         changed.append("compliance_type")
 
     recurrence = getattr(args, "recurrence", None)
     if recurrence is not None:
         _validate_enum(recurrence, VALID_RECURRENCES, "recurrence")
-        updates.append("recurrence = ?")
-        params.append(recurrence)
+        data["recurrence"] = recurrence
         changed.append("recurrence")
 
     reminder_days = getattr(args, "reminder_days", None)
     if reminder_days is not None:
-        updates.append("reminder_days = ?")
-        params.append(int(reminder_days))
+        data["reminder_days"] = int(reminder_days)
         changed.append("reminder_days")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(item_id)
-    conn.execute(f"UPDATE compliance_calendar SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("compliance_calendar", data, {"id": item_id})
+    conn.execute(sql, params)
     audit(conn, "compliance_calendar", item_id, "compliance-update-calendar-item", None, {"updated_fields": changed})
     conn.commit()
     ok({"id": item_id, "updated_fields": changed})
@@ -369,27 +367,34 @@ def get_calendar_item(conn, args):
 # 9. list-calendar-items
 # ---------------------------------------------------------------------------
 def list_calendar_items(conn, args):
-    where, params = ["1=1"], []
+    t = Table("compliance_calendar")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "compliance_type", None):
-        where.append("compliance_type = ?")
+        q = q.where(t.compliance_type == P())
+        q_cnt = q_cnt.where(t.compliance_type == P())
         params.append(args.compliance_type)
     if getattr(args, "status", None):
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(args.status)
     if getattr(args, "search", None):
-        where.append("(title LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.title.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{args.search}%", f"%{args.search}%"])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM compliance_calendar WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM compliance_calendar WHERE {where_sql} ORDER BY due_date ASC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.due_date).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -411,10 +416,10 @@ def complete_calendar_item(conn, args):
         err("Calendar item is already completed")
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE compliance_calendar SET status = 'completed', completed_date = ?, updated_at = ? WHERE id = ?",
-        (_today_iso(), now, item_id)
-    )
+    sql = update_row("compliance_calendar",
+                     data={"status": P(), "completed_date": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("completed", _today_iso(), now, item_id))
     audit(conn, "compliance_calendar", item_id, "compliance-complete-calendar-item", None)
     conn.commit()
     ok({"id": item_id, "calendar_status": "completed", "completed_date": _today_iso()})

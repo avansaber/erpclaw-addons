@@ -14,7 +14,8 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_carrier", "CAR-")
 except ImportError:
@@ -77,15 +78,15 @@ def add_carrier(conn, args):
     naming = get_next_name(conn, "logistics_carrier", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO logistics_carrier (
-            id, naming_series, name, carrier_code, supplier_id,
-            contact_name, contact_email,
-            contact_phone, dot_number, mc_number, carrier_type,
-            insurance_expiry, carrier_status, on_time_pct, total_shipments,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_carrier", {
+        "id": P(), "naming_series": P(), "name": P(), "carrier_code": P(),
+        "supplier_id": P(), "contact_name": P(), "contact_email": P(),
+        "contact_phone": P(), "dot_number": P(), "mc_number": P(),
+        "carrier_type": P(), "insurance_expiry": P(), "carrier_status": P(),
+        "on_time_pct": P(), "total_shipments": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         carrier_id, naming, name,
         getattr(args, "carrier_code", None),
         supplier_id,
@@ -116,15 +117,14 @@ def update_carrier(conn, args):
     carrier_id = getattr(args, "id", None)
     _get_carrier(conn, carrier_id)
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     # Handle supplier_id with FK validation
     supplier_id = getattr(args, "supplier_id", None)
     if supplier_id is not None:
         if supplier_id and not conn.execute(Q.from_(Table("supplier")).select(Field('id')).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone():
             err(f"Supplier {supplier_id} not found")
-        updates.append("supplier_id = ?")
-        params.append(supplier_id if supplier_id else None)
+        data["supplier_id"] = supplier_id if supplier_id else None
         changed.append("supplier_id")
 
     for arg_name, col_name in {
@@ -136,30 +136,27 @@ def update_carrier(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     carrier_type = getattr(args, "carrier_type", None)
     if carrier_type:
         _validate_enum(carrier_type, VALID_CARRIER_TYPES, "carrier-type")
-        updates.append("carrier_type = ?")
-        params.append(carrier_type)
+        data["carrier_type"] = carrier_type
         changed.append("carrier_type")
 
     carrier_status = getattr(args, "carrier_status", None)
     if carrier_status:
         _validate_enum(carrier_status, VALID_CARRIER_STATUSES, "carrier-status")
-        updates.append("carrier_status = ?")
-        params.append(carrier_status)
+        data["carrier_status"] = carrier_status
         changed.append("carrier_status")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(carrier_id)
-    conn.execute(f"UPDATE logistics_carrier SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("logistics_carrier", data, {"id": carrier_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "logistics-update-carrier", "logistics_carrier", carrier_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -180,9 +177,11 @@ def get_carrier(conn, args):
     data["rate_count"] = len(rates)
 
     # Recent shipment stats
+    t_ship = Table("logistics_shipment")
     shipments = conn.execute(
-        "SELECT shipment_status, COUNT(*) as cnt FROM logistics_shipment "
-        "WHERE carrier_id = ? GROUP BY shipment_status", (carrier_id,)
+        Q.from_(t_ship).select(t_ship.shipment_status, fn.Count(t_ship.star).as_("cnt"))
+        .where(t_ship.carrier_id == P()).groupby(t_ship.shipment_status).get_sql(),
+        (carrier_id,)
     ).fetchall()
     data["shipment_stats"] = {r[0]: r[1] for r in shipments}
 
@@ -193,29 +192,32 @@ def get_carrier(conn, args):
 # 4. list-carriers
 # ===========================================================================
 def list_carriers(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_carrier")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "carrier_status", None):
-        where.append("carrier_status = ?")
+        q = q.where(t.carrier_status == P())
+        q_cnt = q_cnt.where(t.carrier_status == P())
         params.append(args.carrier_status)
     if getattr(args, "carrier_type", None):
-        where.append("carrier_type = ?")
+        q = q.where(t.carrier_type == P())
+        q_cnt = q_cnt.where(t.carrier_type == P())
         params.append(args.carrier_type)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR carrier_code LIKE ?)")
+        search_crit = (t.name.like(P()) | t.carrier_code.like(P()))
+        q = q.where(search_crit)
+        q_cnt = q_cnt.where(search_crit)
         params.extend([f"%{args.search}%"] * 2)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_carrier WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_carrier WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -241,13 +243,13 @@ def add_carrier_rate(conn, args):
 
     rate_id = str(uuid.uuid4())
 
-    conn.execute("""
-        INSERT INTO logistics_carrier_rate (
-            id, carrier_id, origin_zone, destination_zone, service_level,
-            weight_min, weight_max, rate_per_unit, flat_rate,
-            effective_date, expiry_date, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_carrier_rate", {
+        "id": P(), "carrier_id": P(), "origin_zone": P(), "destination_zone": P(),
+        "service_level": P(), "weight_min": P(), "weight_max": P(),
+        "rate_per_unit": P(), "flat_rate": P(), "effective_date": P(),
+        "expiry_date": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         rate_id, carrier_id,
         getattr(args, "origin_zone", None),
         getattr(args, "destination_zone", None),
@@ -273,27 +275,28 @@ def add_carrier_rate(conn, args):
 # 6. list-carrier-rates
 # ===========================================================================
 def list_carrier_rates(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_carrier_rate")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     carrier_id = getattr(args, "carrier_id", None)
     if carrier_id:
-        where.append("carrier_id = ?")
+        q = q.where(t.carrier_id == P())
+        q_cnt = q_cnt.where(t.carrier_id == P())
         params.append(carrier_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "service_level", None):
-        where.append("service_level = ?")
+        q = q.where(t.service_level == P())
+        q_cnt = q_cnt.where(t.service_level == P())
         params.append(args.service_level)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_carrier_rate WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_carrier_rate WHERE {where_sql} ORDER BY service_level, created_at LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.service_level).orderby(t.created_at).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -308,19 +311,24 @@ def carrier_performance_report(conn, args):
     company_id = getattr(args, "company_id", None)
     _validate_company(conn, company_id)
 
+    t_car = Table("logistics_carrier")
     carriers = conn.execute(
-        "SELECT id, name, carrier_type, on_time_pct, total_shipments, carrier_status "
-        "FROM logistics_carrier WHERE company_id = ? ORDER BY total_shipments DESC",
+        Q.from_(t_car).select(t_car.id, t_car.name, t_car.carrier_type,
+                              t_car.on_time_pct, t_car.total_shipments, t_car.carrier_status)
+        .where(t_car.company_id == P())
+        .orderby(t_car.total_shipments, order=Order.desc).get_sql(),
         (company_id,)
     ).fetchall()
 
+    t_ship = Table("logistics_shipment")
     report = []
     for c in carriers:
         carrier_data = row_to_dict(c)
         # Count actual shipments by status
         stats = conn.execute(
-            "SELECT shipment_status, COUNT(*) FROM logistics_shipment "
-            "WHERE carrier_id = ? GROUP BY shipment_status", (c["id"],)
+            Q.from_(t_ship).select(t_ship.shipment_status, fn.Count(t_ship.star))
+            .where(t_ship.carrier_id == P()).groupby(t_ship.shipment_status).get_sql(),
+            (c["id"],)
         ).fetchall()
         carrier_data["shipment_breakdown"] = {s[0]: s[1] for s in stats}
         delivered = carrier_data["shipment_breakdown"].get("delivered", 0)
@@ -348,39 +356,38 @@ def carrier_cost_comparison(conn, args):
 
     service_level = getattr(args, "service_level", None)
 
+    t_car = Table("logistics_carrier")
     carriers = conn.execute(
-        "SELECT id, name, carrier_type FROM logistics_carrier "
-        "WHERE company_id = ? AND carrier_status = 'active' ORDER BY name",
+        Q.from_(t_car).select(t_car.id, t_car.name, t_car.carrier_type)
+        .where(t_car.company_id == P()).where(t_car.carrier_status == "active")
+        .orderby(t_car.name).get_sql(),
         (company_id,)
     ).fetchall()
 
+    t_rate = Table("logistics_carrier_rate")
+    t_ship = Table("logistics_shipment")
     comparison = []
     for c in carriers:
         c_data = row_to_dict(c)
-        rate_where = "carrier_id = ?"
+        q_rate = (Q.from_(t_rate)
+                  .select(t_rate.service_level, t_rate.rate_per_unit, t_rate.flat_rate)
+                  .where(t_rate.carrier_id == P()))
         rate_params = [c["id"]]
         if service_level:
-            rate_where += " AND service_level = ?"
+            q_rate = q_rate.where(t_rate.service_level == P())
             rate_params.append(service_level)
-
-        rates = conn.execute(
-            f"SELECT service_level, rate_per_unit, flat_rate FROM logistics_carrier_rate "
-            f"WHERE {rate_where} ORDER BY service_level",
-            rate_params
-        ).fetchall()
+        q_rate = q_rate.orderby(t_rate.service_level)
+        rates = conn.execute(q_rate.get_sql(), rate_params).fetchall()
         c_data["rates"] = [row_to_dict(r) for r in rates]
 
         # Average shipping cost from actual shipments
-        ship_where = "carrier_id = ? AND shipping_cost IS NOT NULL"
+        q_ship = (Q.from_(t_ship).select(t_ship.shipping_cost)
+                  .where(t_ship.carrier_id == P()).where(t_ship.shipping_cost.isnotnull()))
         ship_params = [c["id"]]
         if service_level:
-            ship_where += " AND service_level = ?"
+            q_ship = q_ship.where(t_ship.service_level == P())
             ship_params.append(service_level)
-
-        ship_rows = conn.execute(
-            f"SELECT shipping_cost FROM logistics_shipment WHERE {ship_where}",
-            ship_params
-        ).fetchall()
+        ship_rows = conn.execute(q_ship.get_sql(), ship_params).fetchall()
         if ship_rows:
             costs = [Decimal(r[0]) for r in ship_rows]
             c_data["avg_actual_cost"] = str(sum(costs) / len(costs))

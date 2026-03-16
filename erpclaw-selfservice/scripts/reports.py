@@ -59,12 +59,12 @@ def log_activity(conn, args):
     log_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO selfservice_activity_log (
-            id, session_id, user_id, action, entity_type, entity_id,
-            result, ip_address, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("selfservice_activity_log", {
+        "id": P(), "session_id": P(), "user_id": P(), "action": P(),
+        "entity_type": P(), "entity_id": P(), "result": P(),
+        "ip_address": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         log_id, session_id, user_id, action_name,
         getattr(args, "entity_type", None),
         getattr(args, "entity_id", None),
@@ -82,24 +82,21 @@ def log_activity(conn, args):
 def usage_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    rows = conn.execute("""
-        SELECT action, result, COUNT(*) as count
-        FROM selfservice_activity_log
-        WHERE company_id = ?
-        GROUP BY action, result
-        ORDER BY count DESC
-        LIMIT ? OFFSET ?
-    """, (args.company_id, args.limit, args.offset)).fetchall()
+    t = Table("selfservice_activity_log")
+    q_breakdown = (Q.from_(t)
+                   .select(t.action, t.result, fn.Count("*").as_("count"))
+                   .where(t.company_id == P())
+                   .groupby(t.action, t.result)
+                   .orderby(Field("count"), order=Order.desc)
+                   .limit(P()).offset(P()))
+    rows = conn.execute(q_breakdown.get_sql(), (args.company_id, args.limit, args.offset)).fetchall()
 
-    total_activities = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_activity_log WHERE company_id = ?",
-        (args.company_id,)
-    ).fetchone()[0]
+    q_total = Q.from_(t).select(fn.Count("*")).where(t.company_id == P())
+    total_activities = conn.execute(q_total.get_sql(), (args.company_id,)).fetchone()[0]
 
-    total_users = conn.execute(
-        "SELECT COUNT(DISTINCT user_id) FROM selfservice_activity_log WHERE company_id = ?",
-        (args.company_id,)
-    ).fetchone()[0]
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
+    q_users = Q.from_(t).select(LiteralValue('COUNT(DISTINCT "user_id")')).where(t.company_id == P())
+    total_users = conn.execute(q_users.get_sql(), (args.company_id,)).fetchone()[0]
 
     ok({
         "company_id": args.company_id,
@@ -115,22 +112,24 @@ def usage_report(conn, args):
 def portal_analytics_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    portals = conn.execute(
-        "SELECT id, name, is_active, session_timeout_minutes FROM selfservice_portal_config WHERE company_id = ?",
-        (args.company_id,)
-    ).fetchall()
+    t_pc = Table("selfservice_portal_config")
+    q_portals = (Q.from_(t_pc)
+                 .select(t_pc.id, t_pc.name, t_pc.is_active, t_pc.session_timeout_minutes)
+                 .where(t_pc.company_id == P()))
+    portals = conn.execute(q_portals.get_sql(), (args.company_id,)).fetchall()
 
+    t_ss = Table("selfservice_session")
     portal_stats = []
     for p in portals:
         pd = row_to_dict(p)
-        session_count = conn.execute(
-            "SELECT COUNT(*) FROM selfservice_session WHERE portal_id = ? AND company_id = ?",
-            (pd["id"], args.company_id)
-        ).fetchone()[0]
-        active_sessions = conn.execute(
-            "SELECT COUNT(*) FROM selfservice_session WHERE portal_id = ? AND session_status = 'active' AND company_id = ?",
-            (pd["id"], args.company_id)
-        ).fetchone()[0]
+        q_sc = (Q.from_(t_ss).select(fn.Count("*"))
+                .where(t_ss.portal_id == P()).where(t_ss.company_id == P()))
+        session_count = conn.execute(q_sc.get_sql(), (pd["id"], args.company_id)).fetchone()[0]
+
+        q_ac = (Q.from_(t_ss).select(fn.Count("*"))
+                .where(t_ss.portal_id == P()).where(t_ss.session_status == "active")
+                .where(t_ss.company_id == P()))
+        active_sessions = conn.execute(q_ac.get_sql(), (pd["id"], args.company_id)).fetchone()[0]
         pd["total_sessions"] = session_count
         pd["active_sessions"] = active_sessions
         portal_stats.append(pd)
@@ -148,25 +147,25 @@ def portal_analytics_report(conn, args):
 def permission_audit_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    rows = conn.execute("""
-        SELECT a.user_id, a.action, a.result, a.entity_type, a.entity_id, a.created_at,
-               s.token, s.ip_address as session_ip
-        FROM selfservice_activity_log a
-        LEFT JOIN selfservice_session s ON a.session_id = s.id
-        WHERE a.company_id = ?
-        ORDER BY a.created_at DESC
-        LIMIT ? OFFSET ?
-    """, (args.company_id, args.limit, args.offset)).fetchall()
+    t_a = Table("selfservice_activity_log")
+    t_s = Table("selfservice_session")
+    q_trail = (Q.from_(t_a)
+               .left_join(t_s).on(t_a.session_id == t_s.id)
+               .select(t_a.user_id, t_a.action, t_a.result, t_a.entity_type,
+                       t_a.entity_id, t_a.created_at,
+                       t_s.token, t_s.ip_address.as_("session_ip"))
+               .where(t_a.company_id == P())
+               .orderby(t_a.created_at, order=Order.desc)
+               .limit(P()).offset(P()))
+    rows = conn.execute(q_trail.get_sql(), (args.company_id, args.limit, args.offset)).fetchall()
 
-    denied_count = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_activity_log WHERE company_id = ? AND result = 'denied'",
-        (args.company_id,)
-    ).fetchone()[0]
+    q_denied = (Q.from_(t_a).select(fn.Count("*"))
+                .where(t_a.company_id == P()).where(t_a.result == "denied"))
+    denied_count = conn.execute(q_denied.get_sql(), (args.company_id,)).fetchone()[0]
 
-    error_count = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_activity_log WHERE company_id = ? AND result = 'error'",
-        (args.company_id,)
-    ).fetchone()[0]
+    q_error = (Q.from_(t_a).select(fn.Count("*"))
+               .where(t_a.company_id == P()).where(t_a.result == "error"))
+    error_count = conn.execute(q_error.get_sql(), (args.company_id,)).fetchone()[0]
 
     ok({
         "company_id": args.company_id,
@@ -182,29 +181,28 @@ def permission_audit_report(conn, args):
 def active_sessions_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    total_active = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_session WHERE company_id = ? AND session_status = 'active'",
-        (args.company_id,)
-    ).fetchone()[0]
+    t_ss = Table("selfservice_session")
 
-    total_expired = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_session WHERE company_id = ? AND session_status = 'expired'",
-        (args.company_id,)
-    ).fetchone()[0]
+    q_active = (Q.from_(t_ss).select(fn.Count("*"))
+                .where(t_ss.company_id == P()).where(t_ss.session_status == "active"))
+    total_active = conn.execute(q_active.get_sql(), (args.company_id,)).fetchone()[0]
 
-    total_ended = conn.execute(
-        "SELECT COUNT(*) FROM selfservice_session WHERE company_id = ? AND session_status = 'ended'",
-        (args.company_id,)
-    ).fetchone()[0]
+    q_expired = (Q.from_(t_ss).select(fn.Count("*"))
+                 .where(t_ss.company_id == P()).where(t_ss.session_status == "expired"))
+    total_expired = conn.execute(q_expired.get_sql(), (args.company_id,)).fetchone()[0]
 
-    by_profile = conn.execute("""
-        SELECT p.name as profile_name, COUNT(*) as active_count
-        FROM selfservice_session s
-        JOIN selfservice_permission_profile p ON s.profile_id = p.id
-        WHERE s.company_id = ? AND s.session_status = 'active'
-        GROUP BY p.name
-        ORDER BY active_count DESC
-    """, (args.company_id,)).fetchall()
+    q_ended = (Q.from_(t_ss).select(fn.Count("*"))
+               .where(t_ss.company_id == P()).where(t_ss.session_status == "ended"))
+    total_ended = conn.execute(q_ended.get_sql(), (args.company_id,)).fetchone()[0]
+
+    t_p = Table("selfservice_permission_profile")
+    q_bp = (Q.from_(t_ss)
+            .join(t_p).on(t_ss.profile_id == t_p.id)
+            .select(t_p.name.as_("profile_name"), fn.Count("*").as_("active_count"))
+            .where(t_ss.company_id == P()).where(t_ss.session_status == "active")
+            .groupby(t_p.name)
+            .orderby(Field("active_count"), order=Order.desc))
+    by_profile = conn.execute(q_bp.get_sql(), (args.company_id,)).fetchall()
 
     ok({
         "company_id": args.company_id,
@@ -228,7 +226,9 @@ def status_action(conn, args):
     }
     for tbl in tables:
         try:
-            tables[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            t = Table(tbl)
+            q = Q.from_(t).select(fn.Count("*"))
+            tables[tbl] = conn.execute(q.get_sql()).fetchone()[0]
         except Exception:
             tables[tbl] = -1
 

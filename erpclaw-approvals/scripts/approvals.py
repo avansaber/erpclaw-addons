@@ -14,7 +14,8 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("approval_rule", "ARULE-")
     ENTITY_PREFIXES.setdefault("approval_request", "APR-")
@@ -347,21 +348,26 @@ def approve_request(conn, args):
 
     if current_step >= max_step:
         # Final step -- mark as approved
-        conn.execute(
-            "UPDATE approval_request SET request_status = 'approved', notes = COALESCE(?, notes), "
-            "updated_at = datetime('now') WHERE id = ?",
-            (notes, req_id)
-        )
+        t_ar = Table("approval_request")
+        q_upd = (Q.update(t_ar)
+                 .set(t_ar.request_status, P())
+                 .set(t_ar.notes, LiteralValue('COALESCE(?,\"notes\")'))
+                 .set(t_ar.updated_at, LiteralValue("datetime('now')"))
+                 .where(t_ar.id == P()))
+        conn.execute(q_upd.get_sql(), ("approved", notes, req_id))
         new_status = "approved"
         new_step = current_step
     else:
         # Advance to next step
         new_step = current_step + 1
-        conn.execute(
-            "UPDATE approval_request SET current_step = ?, request_status = 'in_progress', "
-            "notes = COALESCE(?, notes), updated_at = datetime('now') WHERE id = ?",
-            (new_step, notes, req_id)
-        )
+        t_ar = Table("approval_request")
+        q_upd = (Q.update(t_ar)
+                 .set(t_ar.current_step, P())
+                 .set(t_ar.request_status, P())
+                 .set(t_ar.notes, LiteralValue('COALESCE(?,\"notes\")'))
+                 .set(t_ar.updated_at, LiteralValue("datetime('now')"))
+                 .where(t_ar.id == P()))
+        conn.execute(q_upd.get_sql(), (new_step, "in_progress", notes, req_id))
         new_status = "in_progress"
 
     audit(conn, SKILL, "approval-approve-request", "approval_request", req_id,
@@ -388,10 +394,12 @@ def reject_request(conn, args):
         err(f"Cannot reject request in status '{data['request_status']}'. Must be pending or in_progress.")
 
     notes = getattr(args, "notes", None)
-    conn.execute(
-        "UPDATE \"approval_request\" SET \"request_status\"=?,\"notes\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-        ("rejected", notes, req_id)
-    )
+    sql, params = dynamic_update("approval_request",
+                                  data={"request_status": "rejected",
+                                        "notes": notes,
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "approval-reject-request", "approval_request", req_id,
           new_values={"request_status": "rejected", "notes": notes})
     conn.commit()
@@ -415,10 +423,11 @@ def cancel_request(conn, args):
     if data["request_status"] in ("approved", "rejected", "cancelled"):
         err(f"Cannot cancel request in status '{data['request_status']}'.")
 
-    conn.execute(
-        "UPDATE \"approval_request\" SET \"request_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-        ("cancelled", req_id)
-    )
+    sql, params = dynamic_update("approval_request",
+                                  data={"request_status": "cancelled",
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "approval-cancel-request", "approval_request", req_id,
           new_values={"request_status": "cancelled"})
     conn.commit()

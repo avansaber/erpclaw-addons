@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-advmfg"
 
@@ -46,13 +46,15 @@ def add_tool(conn, args):
     if max_usage is not None:
         max_usage = int(max_usage)
 
-    conn.execute(
-        """INSERT INTO tool
-           (id, naming_series, name, tool_type, tool_code, manufacturer,
-            model, serial_number, location, purchase_date, purchase_cost,
-            max_usage_count, current_usage_count, calibration_due,
-            condition, status, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)""",
+    sql, _ = insert_row("tool", {
+        "id": P(), "naming_series": P(), "name": P(), "tool_type": P(),
+        "tool_code": P(), "manufacturer": P(), "model": P(),
+        "serial_number": P(), "location": P(), "purchase_date": P(),
+        "purchase_cost": P(), "max_usage_count": P(), "current_usage_count": P(),
+        "calibration_due": P(), "condition": P(), "status": P(),
+        "notes": P(), "company_id": P(),
+    })
+    conn.execute(sql,
         (
             tool_id, ns, args.name, tool_type,
             getattr(args, "tool_code", None),
@@ -62,7 +64,7 @@ def add_tool(conn, args):
             getattr(args, "location", None),
             getattr(args, "purchase_date", None),
             getattr(args, "purchase_cost", None) or "0",
-            max_usage,
+            max_usage, 0,
             getattr(args, "calibration_due", None),
             "good", "available",
             getattr(args, "notes", None),
@@ -87,7 +89,7 @@ def update_tool(conn, args):
     if not row:
         err(f"Tool {tool_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("name", "name"),
@@ -102,48 +104,41 @@ def update_tool(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     tt = getattr(args, "tool_type", None)
     if tt is not None:
         if tt not in VALID_TOOL_TYPES:
             err(f"Invalid tool-type: {tt}")
-        updates.append("tool_type = ?")
-        params.append(tt)
+        data["tool_type"] = tt
         changed.append("tool_type")
 
     cond = getattr(args, "condition", None)
     if cond is not None:
         if cond not in VALID_CONDITIONS:
             err(f"Invalid condition: {cond}")
-        updates.append("condition = ?")
-        params.append(cond)
+        data["condition"] = cond
         changed.append("condition")
 
     ts = getattr(args, "tool_status", None)
     if ts is not None:
         if ts not in VALID_TOOL_STATUSES:
             err(f"Invalid tool-status: {ts}")
-        updates.append("status = ?")
-        params.append(ts)
+        data["status"] = ts
         changed.append("status")
 
     mu = getattr(args, "max_usage_count", None)
     if mu is not None:
-        updates.append("max_usage_count = ?")
-        params.append(int(mu))
+        data["max_usage_count"] = int(mu)
         changed.append("max_usage_count")
 
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(tool_id)
-    conn.execute(
-        f"UPDATE tool SET {', '.join(updates)} WHERE id = ?", params
-    )
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("tool", data, {"id": tool_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "update-tool", "tool", tool_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -165,8 +160,9 @@ def get_tool(conn, args):
     data["tool_status"] = data.pop("status", "available")
 
     # Get usage count
+    tu = Table("tool_usage")
     usage_count = conn.execute(
-        "SELECT COUNT(*) as cnt FROM tool_usage WHERE tool_id = ?",
+        Q.from_(tu).select(fn.Count(tu.star).as_("cnt")).where(tu.tool_id == P()).get_sql(),
         (tool_id,),
     ).fetchone()
     data["usage_records"] = usage_count["cnt"] if usage_count else 0
@@ -177,40 +173,46 @@ def get_tool(conn, args):
 # list-tools
 # ---------------------------------------------------------------------------
 def list_tools(conn, args):
-    conditions, params = [], []
+    t = Table("tool")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(company_id)
     tool_type = getattr(args, "tool_type", None)
     if tool_type:
-        conditions.append("tool_type = ?")
+        q = q.where(t.tool_type == P())
+        q_cnt = q_cnt.where(t.tool_type == P())
         params.append(tool_type)
     cond = getattr(args, "condition", None)
     if cond:
-        conditions.append("condition = ?")
+        q = q.where(t.condition == P())
+        q_cnt = q_cnt.where(t.condition == P())
         params.append(cond)
     ts = getattr(args, "tool_status", None)
     if ts:
-        conditions.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(ts)
     search = getattr(args, "search", None)
     if search:
-        conditions.append("(name LIKE ? OR tool_code LIKE ? OR manufacturer LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.tool_code.like(like)) | (t.manufacturer.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM tool {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM tool {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     tools_list = []
     for r in rows:
@@ -264,20 +266,20 @@ def add_tool_usage(conn, args):
 
     # Increment current_usage_count on tool
     new_count = tool["current_usage_count"] + usage_count
-    update_sql = "UPDATE tool SET current_usage_count = ?, updated_at = datetime('now')"
-    update_params = [new_count]
+    upd_data = {
+        "current_usage_count": new_count,
+        "updated_at": LiteralValue("datetime('now')"),
+    }
 
     # Update condition if specified
     if condition_after:
-        update_sql += ", condition = ?"
-        update_params.append(condition_after)
+        upd_data["condition"] = condition_after
         # Auto-scrap if condition is scrapped
         if condition_after == "scrapped":
-            update_sql += ", status = 'scrapped'"
+            upd_data["status"] = "scrapped"
 
-    update_sql += " WHERE id = ?"
-    update_params.append(args.tool_id)
-    conn.execute(update_sql, update_params)
+    upd_sql, upd_params = dynamic_update("tool", upd_data, {"id": args.tool_id})
+    conn.execute(upd_sql, upd_params)
 
     audit(conn, SKILL, "add-tool-usage", "tool_usage", usage_id,
           new_values={"tool_id": args.tool_id, "usage_count": usage_count})
@@ -294,28 +296,29 @@ def add_tool_usage(conn, args):
 # list-tool-usage
 # ---------------------------------------------------------------------------
 def list_tool_usage(conn, args):
-    conditions, params = [], []
+    tu = Table("tool_usage")
+    q = Q.from_(tu).select(tu.star)
+    q_cnt = Q.from_(tu).select(fn.Count(tu.star).as_("cnt"))
+    params = []
+
     tool_id = getattr(args, "tool_id", None)
     if tool_id:
-        conditions.append("tool_id = ?")
+        q = q.where(tu.tool_id == P())
+        q_cnt = q_cnt.where(tu.tool_id == P())
         params.append(tool_id)
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q = q.where(tu.company_id == P())
+        q_cnt = q_cnt.where(tu.company_id == P())
         params.append(company_id)
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM tool_usage {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM tool_usage {where} ORDER BY usage_date DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(tu.usage_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     usages = [row_to_dict(r) for r in rows]
     ok({"usages": usages, "total_count": total, "limit": limit, "offset": offset})
@@ -328,14 +331,13 @@ def calibration_due_report(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    rows = conn.execute(
-        """SELECT * FROM tool
-           WHERE company_id = ?
-             AND calibration_due IS NOT NULL
-             AND status NOT IN ('scrapped')
-           ORDER BY calibration_due ASC""",
-        (args.company_id,),
-    ).fetchall()
+    t = Table("tool")
+    q = (Q.from_(t).select(t.star)
+         .where(t.company_id == P())
+         .where(t.calibration_due.isnotnull())
+         .where(t.status != "scrapped")
+         .orderby(t.calibration_due))
+    rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     tools_list = []
     overdue = 0
@@ -363,19 +365,21 @@ def tool_utilization_report(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    rows = conn.execute(
-        """SELECT t.id, t.name, t.tool_type, t.current_usage_count,
-                  t.max_usage_count, t.condition, t.status,
-                  COUNT(tu.id) as usage_records,
-                  COALESCE(SUM(tu.usage_count), 0) as total_usages,
-                  COALESCE(SUM(tu.usage_duration_minutes), 0) as total_duration
-           FROM tool t
-           LEFT JOIN tool_usage tu ON tu.tool_id = t.id
-           WHERE t.company_id = ?
-           GROUP BY t.id
-           ORDER BY total_usages DESC""",
-        (args.company_id,),
-    ).fetchall()
+    t = Table("tool")
+    tu = Table("tool_usage")
+    q = (Q.from_(t)
+         .left_join(tu).on(tu.tool_id == t.id)
+         .select(
+             t.id, t.name, t.tool_type, t.current_usage_count,
+             t.max_usage_count, t.condition, t.status,
+             fn.Count(tu.id).as_("usage_records"),
+             fn.Coalesce(fn.Sum(tu.usage_count), 0).as_("total_usages"),
+             fn.Coalesce(fn.Sum(tu.usage_duration_minutes), 0).as_("total_duration"),
+         )
+         .where(t.company_id == P())
+         .groupby(t.id)
+         .orderby(Field("total_usages"), order=Order.desc))
+    rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     tools_list = []
     for r in rows:

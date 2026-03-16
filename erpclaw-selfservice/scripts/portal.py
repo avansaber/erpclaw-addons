@@ -110,23 +110,25 @@ def add_portal_config(conn, args):
 # 2. list-portal-configs
 # ===========================================================================
 def list_portal_configs(conn, args):
-    where, params = ["1=1"], []
+    t = Table("selfservice_portal_config")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR welcome_message LIKE ?)")
+        search_crit = (t.name.like(P())) | (t.welcome_message.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
         params.extend([f"%{args.search}%"] * 2)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM selfservice_portal_config WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM selfservice_portal_config WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    page_params = list(params) + [args.limit, args.offset]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), page_params).fetchall()
     items = [_parse_json_fields(row_to_dict(r), JSON_PORTAL_FIELDS) for r in rows]
     ok({
         "rows": items,
@@ -218,8 +220,10 @@ def activate_portal(conn, args):
     if row["is_active"] == 1:
         err(f"Portal {portal_id} is already active")
 
-    conn.execute("UPDATE selfservice_portal_config SET is_active = 1, updated_at = ? WHERE id = ?",
-                 (_now_iso(), portal_id))
+    sql = update_row("selfservice_portal_config",
+                     data={"is_active": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, (1, _now_iso(), portal_id))
     audit(conn, SKILL, "selfservice-activate-portal", "selfservice_portal_config", portal_id,
           new_values={"is_active": 1})
     conn.commit()
@@ -241,8 +245,10 @@ def deactivate_portal(conn, args):
     if row["is_active"] == 0:
         err(f"Portal {portal_id} is already inactive")
 
-    conn.execute("UPDATE selfservice_portal_config SET is_active = 0, updated_at = ? WHERE id = ?",
-                 (_now_iso(), portal_id))
+    sql = update_row("selfservice_portal_config",
+                     data={"is_active": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, (0, _now_iso(), portal_id))
     audit(conn, SKILL, "selfservice-deactivate-portal", "selfservice_portal_config", portal_id,
           new_values={"is_active": 0})
     conn.commit()

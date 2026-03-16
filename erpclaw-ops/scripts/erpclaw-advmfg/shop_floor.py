@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-advmfg"
 
@@ -81,7 +81,7 @@ def update_shop_floor_entry(conn, args):
     if not row:
         err(f"Shop floor entry {entry_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("equipment_id", "equipment_id"),
@@ -93,45 +93,38 @@ def update_shop_floor_entry(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     et = getattr(args, "entry_type", None)
     if et is not None:
         if et not in VALID_ENTRY_TYPES:
             err(f"Invalid entry-type: {et}")
-        updates.append("entry_type = ?")
-        params.append(et)
+        data["entry_type"] = et
         changed.append("entry_type")
 
     ms = getattr(args, "machine_status", None)
     if ms is not None:
         if ms not in VALID_MACHINE_STATUSES:
             err(f"Invalid machine-status: {ms}")
-        updates.append("machine_status = ?")
-        params.append(ms)
+        data["machine_status"] = ms
         changed.append("machine_status")
 
     qp = getattr(args, "quantity_produced", None)
     if qp is not None:
-        updates.append("quantity_produced = ?")
-        params.append(int(qp))
+        data["quantity_produced"] = int(qp)
         changed.append("quantity_produced")
 
     qr = getattr(args, "quantity_rejected", None)
     if qr is not None:
-        updates.append("quantity_rejected = ?")
-        params.append(int(qr))
+        data["quantity_rejected"] = int(qr)
         changed.append("quantity_rejected")
 
     if not changed:
         err("No fields to update")
 
-    params.append(entry_id)
-    conn.execute(
-        f"UPDATE shop_floor_entry SET {', '.join(updates)} WHERE id = ?", params
-    )
+    sql, params = dynamic_update("shop_floor_entry", data, {"id": entry_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "update-shop-floor-entry", "shop_floor_entry", entry_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -158,36 +151,40 @@ def get_shop_floor_entry(conn, args):
 # list-shop-floor-entries
 # ---------------------------------------------------------------------------
 def list_shop_floor_entries(conn, args):
-    conditions, params = [], []
+    t = Table("shop_floor_entry")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(company_id)
     equipment_id = getattr(args, "equipment_id", None)
     if equipment_id:
-        conditions.append("equipment_id = ?")
+        q = q.where(t.equipment_id == P())
+        q_cnt = q_cnt.where(t.equipment_id == P())
         params.append(equipment_id)
     entry_type = getattr(args, "entry_type", None)
     if entry_type:
-        conditions.append("entry_type = ?")
+        q = q.where(t.entry_type == P())
+        q_cnt = q_cnt.where(t.entry_type == P())
         params.append(entry_type)
     search = getattr(args, "search", None)
     if search:
-        conditions.append("(operator LIKE ? OR batch_number LIKE ? OR notes LIKE ?)")
+        like = LiteralValue("?")
+        q = q.where((t.operator.like(like)) | (t.batch_number.like(like)) | (t.notes.like(like)))
+        q_cnt = q_cnt.where((t.operator.like(like)) | (t.batch_number.like(like)) | (t.notes.like(like)))
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM shop_floor_entry {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM shop_floor_entry {where} ORDER BY start_time DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(t.start_time, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     entries = []
     for r in rows:
@@ -222,26 +219,26 @@ def complete_shop_floor_entry(conn, args):
     except (ValueError, TypeError):
         duration_minutes = 0
 
-    updates = "end_time = ?, duration_minutes = ?, machine_status = 'idle'"
-    params = [end_time, duration_minutes]
+    data = {
+        "end_time": end_time,
+        "duration_minutes": duration_minutes,
+        "machine_status": "idle",
+    }
 
     qp = getattr(args, "quantity_produced", None)
     if qp is not None:
-        updates += ", quantity_produced = ?"
-        params.append(int(qp))
+        data["quantity_produced"] = int(qp)
 
     qr = getattr(args, "quantity_rejected", None)
     if qr is not None:
-        updates += ", quantity_rejected = ?"
-        params.append(int(qr))
+        data["quantity_rejected"] = int(qr)
 
     notes = getattr(args, "notes", None)
     if notes is not None:
-        updates += ", notes = ?"
-        params.append(notes)
+        data["notes"] = notes
 
-    params.append(entry_id)
-    conn.execute(f"UPDATE shop_floor_entry SET {updates} WHERE id = ?", params)
+    sql, params = dynamic_update("shop_floor_entry", data, {"id": entry_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "complete-shop-floor-entry", "shop_floor_entry", entry_id,
           new_values={"end_time": end_time, "duration_minutes": duration_minutes})
     conn.commit()
@@ -261,27 +258,29 @@ def shop_floor_dashboard(conn, args):
         err("--company-id is required")
 
     company_id = args.company_id
+    t = Table("shop_floor_entry")
 
     # Total entries
     total = conn.execute(
-        "SELECT COUNT(*) as cnt FROM shop_floor_entry WHERE company_id = ?",
+        Q.from_(t).select(fn.Count(t.star).as_("cnt")).where(t.company_id == P()).get_sql(),
         (company_id,),
     ).fetchone()["cnt"]
 
     # By entry type
     by_type = conn.execute(
-        """SELECT entry_type, COUNT(*) as cnt
-           FROM shop_floor_entry WHERE company_id = ?
-           GROUP BY entry_type ORDER BY cnt DESC""",
+        Q.from_(t).select(t.entry_type, fn.Count(t.star).as_("cnt"))
+        .where(t.company_id == P())
+        .groupby(t.entry_type).orderby(Field("cnt"), order=Order.desc).get_sql(),
         (company_id,),
     ).fetchall()
     type_breakdown = {r["entry_type"]: r["cnt"] for r in by_type}
 
     # Total production
     prod_stats = conn.execute(
-        """SELECT COALESCE(SUM(quantity_produced), 0) as total_produced,
-                  COALESCE(SUM(quantity_rejected), 0) as total_rejected
-           FROM shop_floor_entry WHERE company_id = ?""",
+        Q.from_(t).select(
+            fn.Coalesce(fn.Sum(t.quantity_produced), 0).as_("total_produced"),
+            fn.Coalesce(fn.Sum(t.quantity_rejected), 0).as_("total_rejected"),
+        ).where(t.company_id == P()).get_sql(),
         (company_id,),
     ).fetchone()
 
@@ -294,7 +293,8 @@ def shop_floor_dashboard(conn, args):
 
     # Active (no end_time)
     active = conn.execute(
-        "SELECT COUNT(*) as cnt FROM shop_floor_entry WHERE company_id = ? AND end_time IS NULL",
+        Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+        .where(t.company_id == P()).where(t.end_time.isnull()).get_sql(),
         (company_id,),
     ).fetchone()["cnt"]
 
@@ -316,33 +316,29 @@ def production_log_report(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    conditions = ["company_id = ?"]
+    t = Table("shop_floor_entry")
+    q = Q.from_(t).select(t.star).where(t.company_id == P())
     params = [args.company_id]
 
     start_date = getattr(args, "start_date", None)
     if start_date:
-        conditions.append("start_time >= ?")
+        q = q.where(t.start_time >= P())
         params.append(start_date)
     end_date = getattr(args, "end_date", None)
     if end_date:
-        conditions.append("start_time <= ?")
+        q = q.where(t.start_time <= P())
         params.append(end_date + " 23:59:59")
     equipment_id = getattr(args, "equipment_id", None)
     if equipment_id:
-        conditions.append("equipment_id = ?")
+        q = q.where(t.equipment_id == P())
         params.append(equipment_id)
     operator = getattr(args, "operator", None)
     if operator:
-        conditions.append("operator = ?")
+        q = q.where(t.operator == P())
         params.append(operator)
 
-    where = f"WHERE {' AND '.join(conditions)}"
-
-    rows = conn.execute(
-        f"""SELECT * FROM shop_floor_entry {where}
-            ORDER BY start_time DESC""",
-        params,
-    ).fetchall()
+    q = q.orderby(t.start_time, order=Order.desc)
+    rows = conn.execute(q.get_sql(), params).fetchall()
 
     entries = []
     total_produced = 0
@@ -374,23 +370,20 @@ def oee_report(conn, args):
     if not getattr(args, "equipment_id", None):
         err("--equipment-id is required")
 
-    conditions = ["company_id = ?", "equipment_id = ?"]
+    t = Table("shop_floor_entry")
+    q = Q.from_(t).select(t.star).where(t.company_id == P()).where(t.equipment_id == P())
     params = [args.company_id, args.equipment_id]
 
     start_date = getattr(args, "start_date", None)
     if start_date:
-        conditions.append("start_time >= ?")
+        q = q.where(t.start_time >= P())
         params.append(start_date)
     end_date = getattr(args, "end_date", None)
     if end_date:
-        conditions.append("start_time <= ?")
+        q = q.where(t.start_time <= P())
         params.append(end_date + " 23:59:59")
 
-    where = f"WHERE {' AND '.join(conditions)}"
-
-    rows = conn.execute(
-        f"SELECT * FROM shop_floor_entry {where}", params
-    ).fetchall()
+    rows = conn.execute(q.get_sql(), params).fetchall()
 
     if not rows:
         ok({

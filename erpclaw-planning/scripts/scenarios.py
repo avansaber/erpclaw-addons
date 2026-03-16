@@ -16,7 +16,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -62,17 +62,20 @@ def add_scenario(conn, args):
     naming = get_next_name(conn, "planning_scenario", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO planning_scenario
-           (id, naming_series, name, scenario_type, description, assumptions,
-            base_scenario_id, fiscal_year, total_revenue, total_expense, net_income,
-            status, company_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', '0', '0', 'draft', ?, ?, ?)""",
+    sql, _ = insert_row("planning_scenario", {
+        "id": P(), "naming_series": P(), "name": P(), "scenario_type": P(),
+        "description": P(), "assumptions": P(), "base_scenario_id": P(),
+        "fiscal_year": P(), "total_revenue": P(), "total_expense": P(),
+        "net_income": P(), "status": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql,
         (scenario_id, naming, args.name, scenario_type,
          getattr(args, "description", None),
          getattr(args, "assumptions", None),
          base_scenario_id,
          getattr(args, "fiscal_year", None),
+         "0", "0", "0", "draft",
          args.company_id, now, now)
     )
     audit(conn, SKILL_NAME, "planning-add-scenario", "planning_scenario", scenario_id)
@@ -97,30 +100,28 @@ def update_scenario(conn, args):
     if current["status"] in ("approved", "locked", "archived"):
         err(f"Cannot update scenario in '{current['status']}' status")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "name": "name", "description": "description",
         "assumptions": "assumptions", "fiscal_year": "fiscal_year",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     scenario_type = getattr(args, "scenario_type", None)
     if scenario_type:
         _validate_enum(scenario_type, VALID_SCENARIO_TYPES, "scenario-type")
-        updates.append("scenario_type = ?")
-        params.append(scenario_type)
+        data["scenario_type"] = scenario_type
         changed.append("scenario_type")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(scenario_id)
-    conn.execute(f"UPDATE planning_scenario SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("planning_scenario", data, {"id": scenario_id})
+    conn.execute(sql, params)
     audit(conn, SKILL_NAME, "planning-update-scenario", "planning_scenario", scenario_id)
     conn.commit()
     ok({"id": scenario_id, "updated_fields": changed})
@@ -148,34 +149,40 @@ def get_scenario(conn, args):
 # 4. list-scenarios
 # ---------------------------------------------------------------------------
 def list_scenarios(conn, args):
-    where, params = ["1=1"], []
+    t = Table("planning_scenario")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "scenario_type", None):
-        where.append("scenario_type = ?")
+        q = q.where(t.scenario_type == P())
+        q_cnt = q_cnt.where(t.scenario_type == P())
         params.append(args.scenario_type)
     status_val = getattr(args, "status", None)
     if status_val:
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(status_val)
     if getattr(args, "fiscal_year", None):
-        where.append("fiscal_year = ?")
+        q = q.where(t.fiscal_year == P())
+        q_cnt = q_cnt.where(t.fiscal_year == P())
         params.append(args.fiscal_year)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         s = f"%{args.search}%"
         params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM planning_scenario WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM planning_scenario WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "total_count": total,
         "limit": args.limit, "offset": args.offset,
         "has_more": (args.offset + args.limit) < total})
@@ -230,30 +237,35 @@ def add_scenario_line(conn, args):
 # ---------------------------------------------------------------------------
 def list_scenario_lines(conn, args):
     scenario_id = getattr(args, "scenario_id", None)
-    where, params = ["1=1"], []
+    t = Table("planning_scenario_line")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if scenario_id:
-        where.append("scenario_id = ?")
+        q = q.where(t.scenario_id == P())
+        q_cnt = q_cnt.where(t.scenario_id == P())
         params.append(scenario_id)
     if getattr(args, "account_type", None):
-        where.append("account_type = ?")
+        q = q.where(t.account_type == P())
+        q_cnt = q_cnt.where(t.account_type == P())
         params.append(args.account_type)
     if getattr(args, "period", None):
-        where.append("period = ?")
+        q = q.where(t.period == P())
+        q_cnt = q_cnt.where(t.period == P())
         params.append(args.period)
     if getattr(args, "search", None):
-        where.append("(account_name LIKE ? OR notes LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.account_name.like(like)) | (t.notes.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         s = f"%{args.search}%"
         params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM planning_scenario_line WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM planning_scenario_line WHERE {where_sql} ORDER BY period, account_name LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.period).orderby(t.account_name).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "total_count": total,
         "limit": args.limit, "offset": args.offset,
         "has_more": (args.offset + args.limit) < total})
@@ -278,34 +290,31 @@ def update_scenario_line(conn, args):
     if parent and row_to_dict(parent)["status"] in ("approved", "locked", "archived"):
         err("Cannot update lines on a scenario that is approved, locked, or archived")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "account_name": "account_name", "period": "period", "notes": "notes",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     account_type = getattr(args, "account_type", None)
     if account_type:
         _validate_enum(account_type, VALID_ACCOUNT_TYPES, "account-type")
-        updates.append("account_type = ?")
-        params.append(account_type)
+        data["account_type"] = account_type
         changed.append("account_type")
 
     amount = getattr(args, "amount", None)
     if amount is not None:
-        updates.append("amount = ?")
-        params.append(str(round_currency(to_decimal(amount))))
+        data["amount"] = str(round_currency(to_decimal(amount)))
         changed.append("amount")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    params.append(line_id)
-    conn.execute(f"UPDATE planning_scenario_line SET {', '.join(updates)} WHERE id = ?", params)
+    sql, params = dynamic_update("planning_scenario_line", data, {"id": line_id})
+    conn.execute(sql, params)
 
     # Recalculate scenario totals
     _recalculate_scenario_totals(conn, line_data["scenario_id"])
@@ -336,17 +345,19 @@ def clone_scenario(conn, args):
     naming = get_next_name(conn, "planning_scenario", company_id=company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO planning_scenario
-           (id, naming_series, name, scenario_type, description, assumptions,
-            base_scenario_id, fiscal_year, total_revenue, total_expense, net_income,
-            status, company_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)""",
+    clone_sql, _ = insert_row("planning_scenario", {
+        "id": P(), "naming_series": P(), "name": P(), "scenario_type": P(),
+        "description": P(), "assumptions": P(), "base_scenario_id": P(),
+        "fiscal_year": P(), "total_revenue": P(), "total_expense": P(),
+        "net_income": P(), "status": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(clone_sql,
         (new_id, naming, args.name, source_data["scenario_type"],
          source_data.get("description"), source_data.get("assumptions"),
          source_id, source_data.get("fiscal_year"),
          source_data["total_revenue"], source_data["total_expense"],
-         source_data["net_income"], company_id, now, now)
+         source_data["net_income"], "draft", company_id, now, now)
     )
 
     # Clone lines
@@ -389,10 +400,10 @@ def approve_scenario(conn, args):
     if current_status in ("locked", "archived"):
         err(f"Cannot approve scenario in '{current_status}' status")
 
-    conn.execute(
-        "UPDATE planning_scenario SET status = 'approved', updated_at = datetime('now') WHERE id = ?",
-        (scenario_id,)
-    )
+    sql = update_row("planning_scenario",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("approved", scenario_id))
     audit(conn, SKILL_NAME, "planning-approve-scenario", "planning_scenario", scenario_id)
     conn.commit()
     ok({"id": scenario_id, "scenario_status": "approved"})
@@ -414,10 +425,10 @@ def archive_scenario(conn, args):
     if current_status == "archived":
         err("Scenario is already archived")
 
-    conn.execute(
-        "UPDATE planning_scenario SET status = 'archived', updated_at = datetime('now') WHERE id = ?",
-        (scenario_id,)
-    )
+    sql = update_row("planning_scenario",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("archived", scenario_id))
     audit(conn, SKILL_NAME, "planning-archive-scenario", "planning_scenario", scenario_id)
     conn.commit()
     ok({"id": scenario_id, "scenario_status": "archived"})
@@ -577,9 +588,11 @@ def _recalculate_scenario_totals(conn, scenario_id):
             expense += amt
 
     net = revenue - expense
-    conn.execute(
-        """UPDATE planning_scenario SET total_revenue = ?, total_expense = ?,
-           net_income = ?, updated_at = datetime('now') WHERE id = ?""",
+    sql = update_row("planning_scenario",
+                     data={"total_revenue": P(), "total_expense": P(),
+                           "net_income": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql,
         (str(round_currency(revenue)), str(round_currency(expense)),
          str(round_currency(net)), scenario_id)
     )

@@ -914,6 +914,7 @@ def list_campaigns(conn, args):
 
     Optional: --status, --limit, --offset
     """
+    # PyPika: skipped — complex LEFT JOIN + CASE SUM + GROUP BY with aliased table
     conditions = ["1=1"]
     params = []
 
@@ -938,9 +939,10 @@ def list_campaigns(conn, args):
         params + [limit, offset],
     ).fetchall()
 
-    total = conn.execute(
-        f"SELECT COUNT(*) AS cnt FROM campaign c WHERE {where}", params,
-    ).fetchone()["cnt"]
+    q_cnt = Q.from_(_t_campaign).select(fn.Count("*").as_("cnt"))
+    if args.status:
+        q_cnt = q_cnt.where(_t_campaign.status == P())
+    total = conn.execute(q_cnt.get_sql(), [p for p in params]).fetchone()["cnt"]
 
     ok({
         "campaigns": [row_to_dict(r) for r in rows],
@@ -1068,6 +1070,7 @@ def pipeline_report(conn, args):
 
     Optional: --stage, --from-date, --to-date
     """
+    # PyPika: skipped — CASE-based ORDER BY + decimal_sum aggregate
     conditions = ["1=1"]
     params = []
 

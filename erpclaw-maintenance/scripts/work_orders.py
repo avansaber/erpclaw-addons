@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-maintenance"
 
@@ -110,8 +110,7 @@ def update_maintenance_work_order(conn, args):
     if not row:
         err(f"Work order {wo_id} not found")
 
-    updates = []
-    params = []
+    data = {}
     updated_fields = []
     now = datetime.now(timezone.utc).isoformat()
 
@@ -128,26 +127,22 @@ def update_maintenance_work_order(conn, args):
                 err(f"Invalid work_order_type: {val}")
             if field == "priority" and val not in VALID_PRIORITIES:
                 err(f"Invalid priority: {val}")
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             updated_fields.append(field)
 
     wo_status = getattr(args, "wo_status", None)
     if wo_status is not None:
         if wo_status not in VALID_WO_STATUSES:
             err(f"Invalid status: {wo_status}")
-        updates.append("status = ?")
-        params.append(wo_status)
+        data["status"] = wo_status
         updated_fields.append("status")
 
-    if not updates:
+    if not updated_fields:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(now)
-    params.append(wo_id)
-
-    conn.execute(f"UPDATE maintenance_work_order SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = now
+    sql, params = dynamic_update("maintenance_work_order", data, {"id": wo_id})
+    conn.execute(sql, params)
     conn.commit()
 
     ok({"id": wo_id, "updated_fields": updated_fields})
@@ -327,16 +322,16 @@ def start_maintenance_work_order(conn, args):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        "UPDATE maintenance_work_order SET status = 'in_progress', started_at = ?, updated_at = ? WHERE id = ?",
-        (now, now, wo_id),
-    )
+    sql = update_row("maintenance_work_order",
+                     data={"status": P(), "started_at": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("in_progress", now, now, wo_id))
 
     # Update equipment status to 'maintenance'
-    conn.execute(
-        "UPDATE equipment SET status = 'maintenance', updated_at = ? WHERE id = ?",
-        (now, row["equipment_id"]),
-    )
+    sql = update_row("equipment",
+                     data={"status": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("maintenance", now, row["equipment_id"]))
     conn.commit()
 
     audit(conn, SKILL, "maintenance-start-maintenance-work-order", "maintenance_work_order", wo_id,
@@ -382,29 +377,33 @@ def complete_maintenance_work_order(conn, args):
     root_cause = getattr(args, "root_cause", None)
 
     # Calculate total cost from WO items
+    woi = Table("maintenance_work_order_item")
     items_cost_row = conn.execute(
-        "SELECT COALESCE(SUM(CAST(total_cost AS REAL)), 0) FROM maintenance_work_order_item WHERE work_order_id = ?",
+        Q.from_(woi).select(
+            fn.Coalesce(fn.Sum(LiteralValue("CAST(\"total_cost\" AS REAL)")), 0)
+        ).where(woi.work_order_id == P()).get_sql(),
         (wo_id,),
     ).fetchone()
     items_cost = str(Decimal(str(items_cost_row[0])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     if actual_cost == "0" and items_cost != "0.00":
         actual_cost = items_cost
 
+    # PyPika: skipped — too complex (COALESCE with column fallback in SET)
     update_params = [now, actual_duration, actual_cost, resolution, root_cause, now, wo_id]
     conn.execute(
-        """UPDATE maintenance_work_order SET status = 'completed', completed_at = ?,
-           actual_duration = COALESCE(?, actual_duration),
-           actual_cost = ?, resolution = COALESCE(?, resolution),
-           root_cause = COALESCE(?, root_cause),
-           updated_at = ? WHERE id = ?""",
+        """UPDATE "maintenance_work_order" SET "status" = 'completed', "completed_at" = ?,
+           "actual_duration" = COALESCE(?, "actual_duration"),
+           "actual_cost" = ?, "resolution" = COALESCE(?, "resolution"),
+           "root_cause" = COALESCE(?, "root_cause"),
+           "updated_at" = ? WHERE "id" = ?""",
         update_params,
     )
 
     # Update equipment status back to operational
-    conn.execute(
-        "UPDATE equipment SET status = 'operational', updated_at = ? WHERE id = ?",
-        (now, row["equipment_id"]),
-    )
+    sql = update_row("equipment",
+                     data={"status": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("operational", now, row["equipment_id"]))
 
     # Update plan if linked
     plan_updated = False
@@ -417,10 +416,10 @@ def complete_maintenance_work_order(conn, args):
             next_due_date = datetime.now(timezone.utc) + timedelta(days=freq_days)
             next_due_str = next_due_date.strftime("%Y-%m-%d")
 
-            conn.execute(
-                "UPDATE maintenance_plan SET last_performed = ?, next_due = ?, updated_at = ? WHERE id = ?",
-                (today_str, next_due_str, now, row["plan_id"]),
-            )
+            plan_upd = update_row("maintenance_plan",
+                                 data={"last_performed": P(), "next_due": P(), "updated_at": P()},
+                                 where={"id": P()})
+            conn.execute(plan_upd, (today_str, next_due_str, now, row["plan_id"]))
             plan_updated = True
 
     conn.commit()
@@ -459,17 +458,17 @@ def cancel_maintenance_work_order(conn, args):
         err(f"Cannot cancel work order in '{current_status}' status")
 
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE maintenance_work_order SET status = 'cancelled', updated_at = ? WHERE id = ?",
-        (now, wo_id),
-    )
+    sql = update_row("maintenance_work_order",
+                     data={"status": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("cancelled", now, wo_id))
 
     # If equipment was in maintenance, restore to operational
     if current_status == "in_progress":
-        conn.execute(
-            "UPDATE equipment SET status = 'operational', updated_at = ? WHERE id = ?",
-            (now, row[1]),
-        )
+        sql = update_row("equipment",
+                         data={"status": P(), "updated_at": P()},
+                         where={"id": P()})
+        conn.execute(sql, ("operational", now, row[1]))
 
     conn.commit()
 
@@ -494,19 +493,25 @@ def generate_preventive_work_orders(conn, args):
     conn.row_factory = sqlite3.Row
 
     # Find plans that are due (next_due <= as_of) and active
+    mp = Table("maintenance_plan")
     plans = conn.execute(
-        """SELECT * FROM maintenance_plan
-           WHERE company_id = ? AND is_active = 1
-           AND next_due IS NOT NULL AND next_due <= ?""",
+        Q.from_(mp).select(mp.star)
+        .where(mp.company_id == P())
+        .where(mp.is_active == 1)
+        .where(mp.next_due.isnotnull())
+        .where(mp.next_due <= P()).get_sql(),
         (company_id, as_of),
     ).fetchall()
 
     created = []
+    mwo = Table("maintenance_work_order")
     for plan in plans:
         # Check if there's already an open WO for this plan
         existing = conn.execute(
-            """SELECT id FROM maintenance_work_order
-               WHERE plan_id = ? AND status NOT IN ('completed','cancelled')""",
+            Q.from_(mwo).select(mwo.id)
+            .where(mwo.plan_id == P())
+            .where(mwo.status != "completed")
+            .where(mwo.status != "cancelled").get_sql(),
             (plan["id"],),
         ).fetchone()
         if existing:
@@ -594,33 +599,33 @@ def list_downtime_records(conn, args):
     limit = getattr(args, "limit", None) or 50
     offset = getattr(args, "offset", None) or 0
 
-    where = []
+    dt = Table("downtime_record")
+    q = Q.from_(dt).select(dt.star)
+    q_cnt = Q.from_(dt).select(fn.Count(dt.star))
     params = []
 
     if equipment_id:
-        where.append("equipment_id = ?")
+        q = q.where(dt.equipment_id == P())
+        q_cnt = q_cnt.where(dt.equipment_id == P())
         params.append(equipment_id)
     if company_id:
-        where.append("company_id = ?")
+        q = q.where(dt.company_id == P())
+        q_cnt = q_cnt.where(dt.company_id == P())
         params.append(company_id)
     if work_order_id:
-        where.append("work_order_id = ?")
+        q = q.where(dt.work_order_id == P())
+        q_cnt = q_cnt.where(dt.work_order_id == P())
         params.append(work_order_id)
     if reason:
-        where.append("reason = ?")
+        q = q.where(dt.reason == P())
+        q_cnt = q_cnt.where(dt.reason == P())
         params.append(reason)
 
-    where_sql = " AND ".join(where) if where else "1=1"
-
     conn.row_factory = sqlite3.Row
-    count = conn.execute(
-        f"SELECT COUNT(*) FROM downtime_record WHERE {where_sql}", params
-    ).fetchone()[0]
+    count = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
-    rows = conn.execute(
-        f"SELECT * FROM downtime_record WHERE {where_sql} ORDER BY start_time DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(dt.start_time, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     ok({
         "items": [dict(r) for r in rows],

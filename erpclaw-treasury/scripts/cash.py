@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 register_prefix("bank_account_extended", "BACC-")
 register_prefix("cash_forecast", "CFST-")
@@ -56,22 +56,22 @@ def add_bank_account(conn, args):
     acct_id = str(uuid.uuid4())
     ns = get_next_name(conn, "bank_account_extended", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO bank_account_extended
-           (id, naming_series, bank_name, account_name, account_number,
-            routing_number, account_type, currency, current_balance,
-            gl_account_id, is_active, notes, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)""",
-        (
-            acct_id, ns, args.bank_name, args.account_name,
-            getattr(args, "account_number", None),
-            getattr(args, "routing_number", None),
-            account_type, currency, current_balance,
-            getattr(args, "gl_account_id", None),
-            getattr(args, "notes", None),
-            args.company_id,
-        ),
-    )
+    sql, _ = insert_row("bank_account_extended", {
+        "id": P(), "naming_series": P(), "bank_name": P(), "account_name": P(),
+        "account_number": P(), "routing_number": P(), "account_type": P(),
+        "currency": P(), "current_balance": P(), "gl_account_id": P(),
+        "is_active": P(), "notes": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        acct_id, ns, args.bank_name, args.account_name,
+        getattr(args, "account_number", None),
+        getattr(args, "routing_number", None),
+        account_type, currency, current_balance,
+        getattr(args, "gl_account_id", None),
+        1,
+        getattr(args, "notes", None),
+        args.company_id,
+    ))
     audit(conn, SKILL, "treasury-add-bank-account", "bank_account_extended", acct_id,
           new_values={"bank_name": args.bank_name, "naming_series": ns})
     conn.commit()
@@ -89,7 +89,7 @@ def update_bank_account(conn, args):
     if not row:
         err(f"Bank account {acct_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("bank_name", "bank_name"),
@@ -102,35 +102,29 @@ def update_bank_account(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     at = getattr(args, "account_type", None)
     if at is not None:
         if at not in VALID_ACCOUNT_TYPES:
             err(f"Invalid account-type: {at}")
-        updates.append("account_type = ?")
-        params.append(at)
+        data["account_type"] = at
         changed.append("account_type")
 
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
         if is_active not in ("0", "1"):
             err("--is-active must be 0 or 1")
-        updates.append("is_active = ?")
-        params.append(int(is_active))
+        data["is_active"] = int(is_active)
         changed.append("is_active")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(acct_id)
-    conn.execute(
-        f"UPDATE bank_account_extended SET {', '.join(updates)} WHERE id = ?",
-        params,
-    )
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("bank_account_extended", data, {"id": acct_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-bank-account", "bank_account_extended", acct_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -155,38 +149,44 @@ def get_bank_account(conn, args):
 # list-bank-accounts
 # ---------------------------------------------------------------------------
 def list_bank_accounts(conn, args):
-    query = "SELECT * FROM bank_account_extended WHERE 1=1"
+    t = Table("bank_account_extended")
     params = []
+
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
     account_type = getattr(args, "account_type", None)
     if account_type:
-        query += " AND account_type = ?"
+        q = q.where(t.account_type == P())
+        cq = cq.where(t.account_type == P())
         params.append(account_type)
 
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        query += " AND is_active = ?"
+        q = q.where(t.is_active == P())
+        cq = cq.where(t.is_active == P())
         params.append(int(is_active))
 
     search = getattr(args, "search", None)
     if search:
-        query += " AND (bank_name LIKE ? OR account_name LIKE ?)"
+        search_crit = (t.bank_name.like(P())) | (t.account_name.like(P()))
+        q = q.where(search_crit)
+        cq = cq.where(search_crit)
         params.extend([f"%{search}%", f"%{search}%"])
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"accounts": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -213,30 +213,27 @@ def record_bank_balance(conn, args):
 
     company_id = row_to_dict(row)["company_id"]
 
-    conn.execute(
-        """UPDATE bank_account_extended
-           SET current_balance = ?, last_reconciled_date = date('now'),
-               updated_at = datetime('now')
-           WHERE id = ?""",
-        (balance, acct_id),
-    )
+    sql = update_row("bank_account_extended",
+        data={"current_balance": P(), "last_reconciled_date": LiteralValue("date('now')"),
+              "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, (balance, acct_id))
 
     # Create a cash_position snapshot
     pos_id = str(uuid.uuid4())
     ns = get_next_name(conn, "cash_position", company_id=company_id)
     total_cash = balance  # simplified: snapshot from this balance update
 
-    conn.execute(
-        """INSERT INTO cash_position
-           (id, naming_series, position_date, total_cash, total_receivables,
-            total_payables, net_position, notes, company_id)
-           VALUES (?,?,date('now'),?,'0','0',?,?,?)""",
-        (
-            pos_id, ns, total_cash, total_cash,
-            f"Balance recorded for bank account {acct_id}",
-            company_id,
-        ),
-    )
+    sql, _ = insert_row("cash_position", {
+        "id": P(), "naming_series": P(), "position_date": LiteralValue("date('now')"),
+        "total_cash": P(), "total_receivables": P(), "total_payables": P(),
+        "net_position": P(), "notes": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        pos_id, ns, total_cash, "0", "0", total_cash,
+        f"Balance recorded for bank account {acct_id}",
+        company_id,
+    ))
     audit(conn, SKILL, "treasury-record-bank-balance", "bank_account_extended", acct_id,
           new_values={"balance": balance, "position_id": pos_id})
     conn.commit()
@@ -288,23 +285,25 @@ def add_cash_position(conn, args):
 # list-cash-positions
 # ---------------------------------------------------------------------------
 def list_cash_positions(conn, args):
-    query = "SELECT * FROM cash_position WHERE 1=1"
+    t = Table("cash_position")
     params = []
+
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY position_date DESC, created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = q.orderby(t.position_date, order=Order.desc).orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"positions": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -354,19 +353,18 @@ def add_cash_forecast(conn, args):
     fc_id = str(uuid.uuid4())
     ns = get_next_name(conn, "cash_forecast", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO cash_forecast
-           (id, naming_series, forecast_name, forecast_date, period_start,
-            period_end, expected_inflows, expected_outflows, net_forecast,
-            assumptions, forecast_type, company_id)
-           VALUES (?,?,?,date('now'),?,?,?,?,?,?,?,?)""",
-        (
-            fc_id, ns, args.forecast_name, args.period_start, args.period_end,
-            inflows, outflows, str(net),
-            getattr(args, "assumptions", None),
-            forecast_type, args.company_id,
-        ),
-    )
+    sql, _ = insert_row("cash_forecast", {
+        "id": P(), "naming_series": P(), "forecast_name": P(),
+        "forecast_date": LiteralValue("date('now')"), "period_start": P(),
+        "period_end": P(), "expected_inflows": P(), "expected_outflows": P(),
+        "net_forecast": P(), "assumptions": P(), "forecast_type": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        fc_id, ns, args.forecast_name, args.period_start, args.period_end,
+        inflows, outflows, str(net),
+        getattr(args, "assumptions", None),
+        forecast_type, args.company_id,
+    ))
     audit(conn, SKILL, "treasury-add-cash-forecast", "cash_forecast", fc_id,
           new_values={"naming_series": ns, "forecast_name": args.forecast_name})
     conn.commit()
@@ -384,7 +382,7 @@ def update_cash_forecast(conn, args):
     if not row:
         err(f"Cash forecast {fc_id} not found")
 
-    updates, params, changed = [], [], []
+    upd_data, changed = {}, []
 
     for field, attr in [
         ("forecast_name", "forecast_name"),
@@ -394,16 +392,14 @@ def update_cash_forecast(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            upd_data[field] = val
             changed.append(field)
 
     ft = getattr(args, "forecast_type", None)
     if ft is not None:
         if ft not in VALID_FORECAST_TYPES:
             err(f"Invalid forecast-type: {ft}")
-        updates.append("forecast_type = ?")
-        params.append(ft)
+        upd_data["forecast_type"] = ft
         changed.append("forecast_type")
 
     # Recalculate net if inflows/outflows changed
@@ -416,8 +412,7 @@ def update_cash_forecast(conn, args):
             Decimal(inflows)
         except Exception:
             err(f"Invalid expected-inflows: {inflows}")
-        updates.append("expected_inflows = ?")
-        params.append(inflows)
+        upd_data["expected_inflows"] = inflows
         changed.append("expected_inflows")
     else:
         inflows = data["expected_inflows"]
@@ -427,26 +422,21 @@ def update_cash_forecast(conn, args):
             Decimal(outflows)
         except Exception:
             err(f"Invalid expected-outflows: {outflows}")
-        updates.append("expected_outflows = ?")
-        params.append(outflows)
+        upd_data["expected_outflows"] = outflows
         changed.append("expected_outflows")
     else:
         outflows = data["expected_outflows"]
 
     if "expected_inflows" in changed or "expected_outflows" in changed:
         net = Decimal(inflows) - Decimal(outflows)
-        updates.append("net_forecast = ?")
-        params.append(str(net))
+        upd_data["net_forecast"] = str(net)
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(fc_id)
-    conn.execute(
-        f"UPDATE cash_forecast SET {', '.join(updates)} WHERE id = ?",
-        params,
-    )
+    upd_data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("cash_forecast", upd_data, {"id": fc_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-cash-forecast", "cash_forecast", fc_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -457,33 +447,37 @@ def update_cash_forecast(conn, args):
 # list-cash-forecasts
 # ---------------------------------------------------------------------------
 def list_cash_forecasts(conn, args):
-    query = "SELECT * FROM cash_forecast WHERE 1=1"
+    t = Table("cash_forecast")
     params = []
+
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
     forecast_type = getattr(args, "forecast_type", None)
     if forecast_type:
-        query += " AND forecast_type = ?"
+        q = q.where(t.forecast_type == P())
+        cq = cq.where(t.forecast_type == P())
         params.append(forecast_type)
 
     search = getattr(args, "search", None)
     if search:
-        query += " AND forecast_name LIKE ?"
+        q = q.where(t.forecast_name.like(P()))
+        cq = cq.where(t.forecast_name.like(P()))
         params.append(f"%{search}%")
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY forecast_date DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = q.orderby(t.forecast_date, order=Order.desc).limit(P()).offset(P())
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"forecasts": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -515,13 +509,13 @@ def generate_cash_forecast(conn, args):
         err(f"Invalid forecast-type: {forecast_type}")
 
     # Get recent cash positions to compute averages
-    rows = conn.execute(
-        """SELECT total_cash, total_receivables, total_payables, net_position
-           FROM cash_position
-           WHERE company_id = ?
-           ORDER BY position_date DESC LIMIT 10""",
-        (args.company_id,),
-    ).fetchall()
+    cp = Table("cash_position")
+    q = (Q.from_(cp)
+         .select(cp.total_cash, cp.total_receivables, cp.total_payables, cp.net_position)
+         .where(cp.company_id == P())
+         .orderby(cp.position_date, order=Order.desc)
+         .limit(10))
+    rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     if not rows:
         err("No cash positions found to generate forecast. Create positions first.")
@@ -558,19 +552,18 @@ def generate_cash_forecast(conn, args):
     avg_outflows_str = str(avg_outflows.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     net_str = str(net.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
-    conn.execute(
-        """INSERT INTO cash_forecast
-           (id, naming_series, forecast_name, forecast_date, period_start,
-            period_end, expected_inflows, expected_outflows, net_forecast,
-            assumptions, forecast_type, company_id)
-           VALUES (?,?,?,date('now'),?,?,?,?,?,?,?,?)""",
-        (
-            fc_id, ns, forecast_name, today.isoformat(), period_end.isoformat(),
-            avg_inflows_str, avg_outflows_str, net_str,
-            f"Auto-generated from {len(rows)} recent cash positions",
-            forecast_type, args.company_id,
-        ),
-    )
+    sql, _ = insert_row("cash_forecast", {
+        "id": P(), "naming_series": P(), "forecast_name": P(),
+        "forecast_date": LiteralValue("date('now')"), "period_start": P(),
+        "period_end": P(), "expected_inflows": P(), "expected_outflows": P(),
+        "net_forecast": P(), "assumptions": P(), "forecast_type": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        fc_id, ns, forecast_name, today.isoformat(), period_end.isoformat(),
+        avg_inflows_str, avg_outflows_str, net_str,
+        f"Auto-generated from {len(rows)} recent cash positions",
+        forecast_type, args.company_id,
+    ))
     audit(conn, SKILL, "treasury-generate-cash-forecast", "cash_forecast", fc_id,
           new_values={"naming_series": ns, "positions_analyzed": len(rows)})
     conn.commit()
@@ -591,17 +584,11 @@ def cash_dashboard(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    # Total cash from active bank accounts
-    row = conn.execute(
-        """SELECT COALESCE(SUM(CAST(current_balance AS REAL)), 0) as total
-           FROM bank_account_extended
-           WHERE company_id = ? AND is_active = 1""",
-        (args.company_id,),
-    ).fetchone()
-    # Re-read as Decimal from text sum
+    # Total cash from active bank accounts (read individual balances for Decimal precision)
+    ba = Table("bank_account_extended")
     accts = conn.execute(
-        """SELECT current_balance FROM bank_account_extended
-           WHERE company_id = ? AND is_active = 1""",
+        Q.from_(ba).select(ba.current_balance)
+        .where(ba.company_id == P()).where(ba.is_active == 1).get_sql(),
         (args.company_id,),
     ).fetchall()
     total_cash = Decimal("0")
@@ -609,10 +596,11 @@ def cash_dashboard(conn, args):
         total_cash += Decimal(a[0] or "0")
 
     # Most recent cash position for receivables/payables
+    cp = Table("cash_position")
     pos = conn.execute(
-        """SELECT total_receivables, total_payables
-           FROM cash_position WHERE company_id = ?
-           ORDER BY position_date DESC LIMIT 1""",
+        Q.from_(cp).select(cp.total_receivables, cp.total_payables)
+        .where(cp.company_id == P())
+        .orderby(cp.position_date, order=Order.desc).limit(1).get_sql(),
         (args.company_id,),
     ).fetchone()
     total_recv = Decimal(pos[0] or "0") if pos else Decimal("0")
@@ -621,13 +609,16 @@ def cash_dashboard(conn, args):
 
     # Count active bank accounts
     acct_count = conn.execute(
-        "SELECT COUNT(*) FROM bank_account_extended WHERE company_id = ? AND is_active = 1",
+        Q.from_(ba).select(fn.Count("*"))
+        .where(ba.company_id == P()).where(ba.is_active == 1).get_sql(),
         (args.company_id,),
     ).fetchone()[0]
 
     # Active investments
+    inv = Table("investment")
     inv_count = conn.execute(
-        "SELECT COUNT(*) FROM investment WHERE company_id = ? AND status = 'active'",
+        Q.from_(inv).select(fn.Count("*"))
+        .where(inv.company_id == P()).where(inv.status == "active").get_sql(),
         (args.company_id,),
     ).fetchone()[0]
 
@@ -649,14 +640,14 @@ def bank_summary_report(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    rows = conn.execute(
-        """SELECT id, naming_series, bank_name, account_name, account_type,
-                  currency, current_balance, is_active, last_reconciled_date
-           FROM bank_account_extended
-           WHERE company_id = ?
-           ORDER BY bank_name, account_name""",
-        (args.company_id,),
-    ).fetchall()
+    ba = Table("bank_account_extended")
+    q = (Q.from_(ba)
+         .select(ba.id, ba.naming_series, ba.bank_name, ba.account_name,
+                 ba.account_type, ba.currency, ba.current_balance,
+                 ba.is_active, ba.last_reconciled_date)
+         .where(ba.company_id == P())
+         .orderby(ba.bank_name).orderby(ba.account_name))
+    rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     accounts = [row_to_dict(r) for r in rows]
     total_balance = Decimal("0")
@@ -683,14 +674,14 @@ def liquidity_report(conn, args):
         err("--company-id is required")
 
     # Liquid bank accounts (checking, savings, money_market)
-    liquid_accts = conn.execute(
-        """SELECT id, bank_name, account_name, account_type, current_balance
-           FROM bank_account_extended
-           WHERE company_id = ? AND is_active = 1
-             AND account_type IN ('checking','savings','money_market')
-           ORDER BY current_balance DESC""",
-        (args.company_id,),
-    ).fetchall()
+    ba = Table("bank_account_extended")
+    q = (Q.from_(ba)
+         .select(ba.id, ba.bank_name, ba.account_name, ba.account_type, ba.current_balance)
+         .where(ba.company_id == P())
+         .where(ba.is_active == 1)
+         .where(ba.account_type.isin(["checking", "savings", "money_market"]))
+         .orderby(ba.current_balance, order=Order.desc))
+    liquid_accts = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     liquid_total = Decimal("0")
     liquid_list = []
@@ -701,14 +692,16 @@ def liquidity_report(conn, args):
 
     # Short-term investments (active, maturing within 90 days)
     cutoff = (date.today() + timedelta(days=90)).isoformat()
-    short_inv = conn.execute(
-        """SELECT id, name, investment_type, current_value, maturity_date
-           FROM investment
-           WHERE company_id = ? AND status = 'active'
-             AND maturity_date IS NOT NULL AND maturity_date <= ?
-           ORDER BY maturity_date""",
-        (args.company_id, cutoff),
-    ).fetchall()
+    inv_t = Table("investment")
+    q = (Q.from_(inv_t)
+         .select(inv_t.id, inv_t.name, inv_t.investment_type,
+                 inv_t.current_value, inv_t.maturity_date)
+         .where(inv_t.company_id == P())
+         .where(inv_t.status == "active")
+         .where(inv_t.maturity_date.isnotnull())
+         .where(inv_t.maturity_date <= P())
+         .orderby(inv_t.maturity_date))
+    short_inv = conn.execute(q.get_sql(), (args.company_id, cutoff)).fetchall()
 
     inv_total = Decimal("0")
     inv_list = []
@@ -737,12 +730,12 @@ def cash_flow_projection(conn, args):
     today = date.today().isoformat()
 
     # Active forecasts with period_end in the future
-    rows = conn.execute(
-        """SELECT * FROM cash_forecast
-           WHERE company_id = ? AND period_end >= ?
-           ORDER BY period_start""",
-        (args.company_id, today),
-    ).fetchall()
+    cf = Table("cash_forecast")
+    q = (Q.from_(cf).select(cf.star)
+         .where(cf.company_id == P())
+         .where(cf.period_end >= P())
+         .orderby(cf.period_start))
+    rows = conn.execute(q.get_sql(), (args.company_id, today)).fetchall()
 
     projections = []
     total_inflows = Decimal("0")
@@ -764,9 +757,10 @@ def cash_flow_projection(conn, args):
         })
 
     # Current cash
+    ba = Table("bank_account_extended")
     accts = conn.execute(
-        """SELECT current_balance FROM bank_account_extended
-           WHERE company_id = ? AND is_active = 1""",
+        Q.from_(ba).select(ba.current_balance)
+        .where(ba.company_id == P()).where(ba.is_active == 1).get_sql(),
         (args.company_id,),
     ).fetchall()
     current_cash = Decimal("0")

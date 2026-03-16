@@ -115,6 +115,7 @@ def configure_booking_sync(conn, args):
     updates.append("updated_at = ?")
     params.append(_now_iso())
     params.append(connector_id)
+    # PyPika: skipped — dynamic UPDATE with variable columns
     conn.execute(
         f"UPDATE connv2_booking_connector SET {', '.join(updates)} WHERE id = ?", params
     )
@@ -145,7 +146,9 @@ def sync_reservations(conn, args):
         company_id, now,
     ))
     conn.execute(
-        "UPDATE connv2_booking_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_booking_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-reservations", "connv2_booking_sync_log", log_id,
@@ -176,7 +179,9 @@ def push_rates(conn, args):
         company_id, now,
     ))
     conn.execute(
-        "UPDATE connv2_booking_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_booking_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-push-rates", "connv2_booking_sync_log", log_id,
@@ -207,7 +212,9 @@ def push_availability(conn, args):
         company_id, now,
     ))
     conn.execute(
-        "UPDATE connv2_booking_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_booking_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-push-availability", "connv2_booking_sync_log", log_id,
@@ -221,6 +228,7 @@ def push_availability(conn, args):
 # 6. list-booking-syncs
 # ===========================================================================
 def list_booking_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with LEFT JOIN
     where, params = ["1=1"], []
     if getattr(args, "company_id", None):
         where.append("l.company_id = ?")
@@ -254,6 +262,7 @@ def list_booking_syncs(conn, args):
 # 7. booking-revenue-report
 # ===========================================================================
 def booking_revenue_report(conn, args):
+    # PyPika: skipped — complex aggregate JOIN report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform, c.property_id,
@@ -276,6 +285,7 @@ def booking_revenue_report(conn, args):
 # 8. booking-channel-report
 # ===========================================================================
 def booking_channel_report(conn, args):
+    # PyPika: skipped — complex aggregate JOIN with CASE report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform,

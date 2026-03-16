@@ -17,7 +17,8 @@ from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
 SKILL = "erpclaw-pos"
 
@@ -54,12 +55,11 @@ def _recalc_totals(conn, txn_id):
     if grand_total < Decimal("0"):
         grand_total = Decimal("0")
 
-    conn.execute(
-        """UPDATE pos_transaction
-           SET subtotal = ?, discount_amount = ?, grand_total = ?,
-               updated_at = datetime('now')
-           WHERE id = ?""",
-        (str(subtotal), str(disc_amt), str(grand_total), txn_id))
+    sql, upd_params = dynamic_update("pos_transaction", {
+        "subtotal": str(subtotal), "discount_amount": str(disc_amt),
+        "grand_total": str(grand_total), "updated_at": LiteralValue("datetime('now')"),
+    }, {"id": txn_id})
+    conn.execute(sql, upd_params)
     return subtotal, disc_amt, grand_total
 
 
@@ -130,8 +130,10 @@ def add_transaction_item(conn, args):
     barcode = getattr(args, "barcode", None)
     if not barcode:
         try:
+            t_bc = Table("item_barcode")
             bc_row = conn.execute(
-                "SELECT barcode FROM item_barcode WHERE item_id = ? LIMIT 1",
+                Q.from_(t_bc).select(t_bc.barcode)
+                .where(t_bc.item_id == P()).limit(1).get_sql(),
                 (item_id,)).fetchone()
             if bc_row:
                 barcode = bc_row["barcode"]
@@ -236,28 +238,24 @@ def apply_discount(conn, args):
         if pct_val < Decimal("0") or pct_val > Decimal("100"):
             err("--discount-pct must be between 0 and 100")
         computed_amt = _round(subtotal * pct_val / Decimal("100"))
-        conn.execute(
-            """UPDATE pos_transaction
-               SET discount_pct = ?, discount_amount = ?,
-                   grand_total = ?, updated_at = datetime('now')
-               WHERE id = ?""",
-            (str(pct_val), str(computed_amt),
-             str(_round(subtotal - computed_amt + _dec(txn["tax_amount"]))),
-             txn_id))
+        sql, upd_params = dynamic_update("pos_transaction", {
+            "discount_pct": str(pct_val), "discount_amount": str(computed_amt),
+            "grand_total": str(_round(subtotal - computed_amt + _dec(txn["tax_amount"]))),
+            "updated_at": LiteralValue("datetime('now')"),
+        }, {"id": txn_id})
+        conn.execute(sql, upd_params)
     else:
         amt_val = _dec(disc_amt)
         if amt_val < Decimal("0"):
             err("--discount-amount must be non-negative")
         if amt_val > subtotal:
             amt_val = subtotal
-        conn.execute(
-            """UPDATE pos_transaction
-               SET discount_pct = '0', discount_amount = ?,
-                   grand_total = ?, updated_at = datetime('now')
-               WHERE id = ?""",
-            (str(_round(amt_val)),
-             str(_round(subtotal - amt_val + _dec(txn["tax_amount"]))),
-             txn_id))
+        sql, upd_params = dynamic_update("pos_transaction", {
+            "discount_pct": "0", "discount_amount": str(_round(amt_val)),
+            "grand_total": str(_round(subtotal - amt_val + _dec(txn["tax_amount"]))),
+            "updated_at": LiteralValue("datetime('now')"),
+        }, {"id": txn_id})
+        conn.execute(sql, upd_params)
 
     conn.commit()
     updated = conn.execute(Q.from_(Table("pos_transaction")).select(Field('subtotal'), Field('discount_pct'), Field('discount_amount'), Field('grand_total')).where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
@@ -282,9 +280,9 @@ def hold_transaction(conn, args):
     if txn["status"] != "draft":
         err(f"Only draft transactions can be held (current: {txn['status']})")
 
-    conn.execute(
-        "UPDATE pos_transaction SET status = 'held', updated_at = datetime('now') WHERE id = ?",
-        (txn_id,))
+    sql, upd_params = dynamic_update("pos_transaction",
+        {"status": "held", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+    conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-hold-transaction", "pos_transaction", txn_id)
     conn.commit()
     ok({"id": txn_id, "transaction_status": "held"})
@@ -304,9 +302,9 @@ def resume_transaction(conn, args):
     if txn["status"] != "held":
         err(f"Only held transactions can be resumed (current: {txn['status']})")
 
-    conn.execute(
-        "UPDATE pos_transaction SET status = 'draft', updated_at = datetime('now') WHERE id = ?",
-        (txn_id,))
+    sql, upd_params = dynamic_update("pos_transaction",
+        {"status": "draft", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+    conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-resume-transaction", "pos_transaction", txn_id)
     conn.commit()
     ok({"id": txn_id, "transaction_status": "draft"})
@@ -350,13 +348,14 @@ def add_payment(conn, args):
         err("Failed to add payment")
 
     # Update paid_amount on transaction
+    # PyPika: skipped — COALESCE+SUM+CAST aggregate
     total_paid = conn.execute(
         "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total FROM pos_payment WHERE pos_transaction_id = ?",
         (txn_id,)).fetchone()
     paid = str(_round(_dec(total_paid["total"])))
-    conn.execute(
-        "UPDATE pos_transaction SET paid_amount = ?, updated_at = datetime('now') WHERE id = ?",
-        (paid, txn_id))
+    sql, upd_params = dynamic_update("pos_transaction",
+        {"paid_amount": paid, "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+    conn.execute(sql, upd_params)
 
     conn.commit()
     ok({"payment_id": payment_id, "payment_method": payment_method,
@@ -390,19 +389,18 @@ def submit_transaction(conn, args):
     receipt_number = txn["naming_series"] or txn_id[:8]
 
     # Submit in a single transaction
-    conn.execute(
-        """UPDATE pos_transaction
-           SET change_amount = ?, receipt_number = ?, status = 'submitted',
-               updated_at = datetime('now')
-           WHERE id = ?""",
-        (str(change), receipt_number, txn_id))
+    sql, upd_params = dynamic_update("pos_transaction", {
+        "change_amount": str(change), "receipt_number": receipt_number,
+        "status": "submitted", "updated_at": LiteralValue("datetime('now')"),
+    }, {"id": txn_id})
+    conn.execute(sql, upd_params)
 
     # Best-effort cross-skill: create sales invoice
     invoice_id = None
     try:
         # Check if selling skill tables exist
         has_invoice = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sales_invoice'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sales_invoice'"  # PyPika: skipped — sqlite_master
         ).fetchone()
         if has_invoice:
             invoice_id = str(uuid.uuid4())
@@ -413,9 +411,9 @@ def submit_transaction(conn, args):
                  txn["subtotal"], txn["discount_amount"], txn["tax_amount"],
                  txn["grand_total"], txn["paid_amount"], "0", "submitted",
                  txn["company_id"]))
-            conn.execute(
-                "UPDATE pos_transaction SET sales_invoice_id = ? WHERE id = ?",
-                (invoice_id, txn_id))
+            sql_si = update_row("pos_transaction",
+                data={"sales_invoice_id": P()}, where={"id": P()})
+            conn.execute(sql_si, (invoice_id, txn_id))
     except Exception:
         # Cross-skill invoice creation is best-effort
         invoice_id = None
@@ -448,9 +446,9 @@ def void_transaction(conn, args):
     if txn["status"] == "returned":
         err("Cannot void a returned transaction")
 
-    conn.execute(
-        "UPDATE pos_transaction SET status = 'voided', updated_at = datetime('now') WHERE id = ?",
-        (txn_id,))
+    sql, upd_params = dynamic_update("pos_transaction",
+        {"status": "voided", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+    conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-void-transaction", "pos_transaction", txn_id)
     conn.commit()
     ok({"id": txn_id, "transaction_status": "voided"})
@@ -471,9 +469,9 @@ def return_transaction(conn, args):
         err(f"Only submitted transactions can be returned (current: {txn['status']})")
 
     # Mark original as returned
-    conn.execute(
-        "UPDATE pos_transaction SET status = 'returned', updated_at = datetime('now') WHERE id = ?",
-        (txn_id,))
+    sql, upd_params = dynamic_update("pos_transaction",
+        {"status": "returned", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+    conn.execute(sql, upd_params)
 
     # Create negative return transaction
     return_id = str(uuid.uuid4())
@@ -552,34 +550,35 @@ def get_transaction(conn, args):
 # list-transactions
 # ---------------------------------------------------------------------------
 def list_transactions(conn, args):
+    t = Table("pos_transaction")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
     params = []
-    where = ["1=1"]
 
     session_id = getattr(args, "pos_session_id", None)
     status = getattr(args, "status", None)
     company_id = getattr(args, "company_id", None)
 
     if session_id:
-        where.append("t.pos_session_id = ?"); params.append(session_id)
+        q = q.where(t.pos_session_id == P())
+        q_cnt = q_cnt.where(t.pos_session_id == P())
+        params.append(session_id)
     if status:
-        where.append("t.status = ?"); params.append(status)
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
+        params.append(status)
     if company_id:
-        where.append("t.company_id = ?"); params.append(company_id)
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
+        params.append(company_id)
 
-    where_clause = " AND ".join(where)
-
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM pos_transaction t WHERE {where_clause}",
-        params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
     limit = int(getattr(args, "limit", None) or 50)
     offset = int(getattr(args, "offset", None) or 0)
 
-    rows = conn.execute(
-        f"""SELECT t.* FROM pos_transaction t
-            WHERE {where_clause}
-            ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
-        params + [limit, offset]).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     transactions = []
     for r in rows:
@@ -608,32 +607,33 @@ def lookup_item(conn, args):
     if barcode:
         # Try item_barcode table first
         try:
-            bc_rows = conn.execute(
-                """SELECT ib.item_id, ib.barcode, i.item_name, i.item_code
-                   FROM item_barcode ib
-                   JOIN item i ON ib.item_id = i.id
-                   WHERE ib.barcode = ?
-                   LIMIT ?""",
-                (barcode, limit)).fetchall()
+            t_ib = Table("item_barcode")
+            t_i = Table("item")
+            q_bc = (Q.from_(t_ib).join(t_i).on(t_ib.item_id == t_i.id)
+                    .select(t_ib.item_id, t_ib.barcode, t_i.item_name, t_i.item_code)
+                    .where(t_ib.barcode == P()).limit(P()))
+            bc_rows = conn.execute(q_bc.get_sql(), (barcode, limit)).fetchall()
             results.extend([row_to_dict(r) for r in bc_rows])
         except sqlite3.OperationalError:
             pass  # item_barcode table may not exist
 
         # If no results from barcode table, search item.item_code
         if not results:
-            rows = conn.execute(
-                "SELECT id as item_id, item_name, item_code FROM item WHERE item_code = ? LIMIT ?",
-                (barcode, limit)).fetchall()
+            t_item = Table("item")
+            q_ic = (Q.from_(t_item)
+                    .select(t_item.id.as_("item_id"), t_item.item_name, t_item.item_code)
+                    .where(t_item.item_code == P()).limit(P()))
+            rows = conn.execute(q_ic.get_sql(), (barcode, limit)).fetchall()
             results.extend([row_to_dict(r) for r in rows])
 
     if search:
         like_term = f"%{search}%"
-        rows = conn.execute(
-            """SELECT id as item_id, item_name, item_code
-               FROM item
-               WHERE item_name LIKE ? OR item_code LIKE ?
-               LIMIT ?""",
-            (like_term, like_term, limit)).fetchall()
+        t_item = Table("item")
+        q_srch = (Q.from_(t_item)
+                  .select(t_item.id.as_("item_id"), t_item.item_name, t_item.item_code)
+                  .where(t_item.item_name.like(P()) | t_item.item_code.like(P()))
+                  .limit(P()))
+        rows = conn.execute(q_srch.get_sql(), (like_term, like_term, limit)).fetchall()
 
         # Deduplicate with any barcode results
         existing_ids = {r.get("item_id") for r in results}
@@ -665,8 +665,10 @@ def generate_receipt(conn, args):
     payments = conn.execute(Q.from_(Table("pos_payment")).select(Field('payment_method'), Field('amount'), Field('reference')).where(Field("pos_transaction_id") == P()).orderby(Field("created_at")).get_sql(), (txn_id,)).fetchall()
 
     # Get company info
+    t_co = Table("company")
     company = conn.execute(
-        "SELECT name as company_name FROM company WHERE id = ?",
+        Q.from_(t_co).select(t_co.name.as_("company_name"))
+        .where(t_co.id == P()).get_sql(),
         (txn["company_id"],)).fetchone()
 
     receipt = {
@@ -784,9 +786,15 @@ def session_summary(conn, args):
 # ---------------------------------------------------------------------------
 def pos_status(conn, args):
     # Count profiles, sessions, transactions
-    profiles = conn.execute("SELECT COUNT(*) FROM pos_profile").fetchone()[0]
+    t_prof = Table("pos_profile")
+    t_sess = Table("pos_session")
+    t_txn = Table("pos_transaction")
+    profiles = conn.execute(
+        Q.from_(t_prof).select(fn.Count(t_prof.star)).get_sql()).fetchone()[0]
     open_sessions = conn.execute(
-        "SELECT COUNT(*) FROM pos_session WHERE status = 'open'").fetchone()[0]
+        Q.from_(t_sess).select(fn.Count(t_sess.star))
+        .where(t_sess.status == "open").get_sql()).fetchone()[0]
+    # PyPika: skipped — date() function filter
     today_txns = conn.execute(
         "SELECT COUNT(*) FROM pos_transaction WHERE date(created_at) = date('now')").fetchone()[0]
     today_sales = conn.execute(

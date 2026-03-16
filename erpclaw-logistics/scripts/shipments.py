@@ -14,7 +14,8 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_shipment", "SHIP-")
 except ImportError:
@@ -76,16 +77,17 @@ def add_shipment(conn, args):
     naming = get_next_name(conn, "logistics_shipment", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO logistics_shipment (
-            id, naming_series, origin_address, origin_city, origin_state, origin_zip,
-            destination_address, destination_city, destination_state, destination_zip,
-            carrier_id, service_level, weight, dimensions, package_count,
-            declared_value, reference_number, shipment_status,
-            estimated_delivery, shipping_cost, tracking_number, notes,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_shipment", {
+        "id": P(), "naming_series": P(), "origin_address": P(), "origin_city": P(),
+        "origin_state": P(), "origin_zip": P(), "destination_address": P(),
+        "destination_city": P(), "destination_state": P(), "destination_zip": P(),
+        "carrier_id": P(), "service_level": P(), "weight": P(), "dimensions": P(),
+        "package_count": P(), "declared_value": P(), "reference_number": P(),
+        "shipment_status": P(), "estimated_delivery": P(), "shipping_cost": P(),
+        "tracking_number": P(), "notes": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         shipment_id, naming,
         getattr(args, "origin_address", None),
         getattr(args, "origin_city", None),
@@ -124,7 +126,7 @@ def update_shipment(conn, args):
     shipment_id = getattr(args, "id", None)
     _get_shipment(conn, shipment_id)
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "origin_address": "origin_address", "origin_city": "origin_city",
         "origin_state": "origin_state", "origin_zip": "origin_zip",
@@ -137,37 +139,33 @@ def update_shipment(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     service_level = getattr(args, "service_level", None)
     if service_level:
         _validate_enum(service_level, VALID_SERVICE_LEVELS, "service-level")
-        updates.append("service_level = ?")
-        params.append(service_level)
+        data["service_level"] = service_level
         changed.append("service_level")
 
     carrier_id = getattr(args, "carrier_id", None)
     if carrier_id:
         if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
             err(f"Carrier {carrier_id} not found")
-        updates.append("carrier_id = ?")
-        params.append(carrier_id)
+        data["carrier_id"] = carrier_id
         changed.append("carrier_id")
 
     package_count = getattr(args, "package_count", None)
     if package_count is not None:
-        updates.append("package_count = ?")
-        params.append(int(package_count))
+        data["package_count"] = int(package_count)
         changed.append("package_count")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(shipment_id)
-    conn.execute(f"UPDATE logistics_shipment SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("logistics_shipment", data, {"id": shipment_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "logistics-update-shipment", "logistics_shipment", shipment_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -206,32 +204,36 @@ def get_shipment(conn, args):
 # 4. list-shipments
 # ===========================================================================
 def list_shipments(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_shipment")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "shipment_status", None):
-        where.append("shipment_status = ?")
+        q = q.where(t.shipment_status == P())
+        q_cnt = q_cnt.where(t.shipment_status == P())
         params.append(args.shipment_status)
     if getattr(args, "carrier_id", None):
-        where.append("carrier_id = ?")
+        q = q.where(t.carrier_id == P())
+        q_cnt = q_cnt.where(t.carrier_id == P())
         params.append(args.carrier_id)
     if getattr(args, "service_level", None):
-        where.append("service_level = ?")
+        q = q.where(t.service_level == P())
+        q_cnt = q_cnt.where(t.service_level == P())
         params.append(args.service_level)
     if getattr(args, "search", None):
-        where.append("(tracking_number LIKE ? OR reference_number LIKE ? OR notes LIKE ?)")
+        search_crit = (t.tracking_number.like(P()) | t.reference_number.like(P()) | t.notes.like(P()))
+        q = q.where(search_crit)
+        q_cnt = q_cnt.where(search_crit)
         params.extend([f"%{args.search}%"] * 3)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_shipment WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_shipment WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -254,26 +256,24 @@ def update_shipment_status(conn, args):
 
     old_status = data["shipment_status"]
 
-    updates = ["shipment_status = ?", "updated_at = datetime('now')"]
-    params = [new_status]
+    upd_data = {"shipment_status": new_status, "updated_at": LiteralValue("datetime('now')")}
 
     # Auto-set actual_delivery when delivered
     if new_status == "delivered" and not data.get("actual_delivery"):
-        updates.append("actual_delivery = ?")
-        params.append(_now_iso())
+        upd_data["actual_delivery"] = _now_iso()
 
-    params.append(shipment_id)
-    conn.execute(
-        f"UPDATE logistics_shipment SET {', '.join(updates)} WHERE id = ?", params
-    )
+    sql, params = dynamic_update("logistics_shipment", upd_data, {"id": shipment_id})
+    conn.execute(sql, params)
 
     # Update carrier total_shipments on first delivery
     if new_status == "delivered" and old_status != "delivered" and data.get("carrier_id"):
-        conn.execute(
-            "UPDATE logistics_carrier SET total_shipments = total_shipments + 1, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (data["carrier_id"],)
-        )
+        t_carrier = Table("logistics_carrier")
+        sql = (Q.update(t_carrier)
+               .set(t_carrier.total_shipments, LiteralValue("total_shipments + 1"))
+               .set(t_carrier.updated_at, LiteralValue("datetime('now')"))
+               .where(t_carrier.id == P())
+               .get_sql())
+        conn.execute(sql, (data["carrier_id"],))
 
     audit(conn, SKILL, "logistics-update-shipment-status", "logistics_shipment", shipment_id,
           old_values={"shipment_status": old_status},
@@ -303,12 +303,11 @@ def add_tracking_event(conn, args):
     event_id = str(uuid.uuid4())
     event_timestamp = getattr(args, "event_timestamp", None) or _now_iso()
 
-    conn.execute("""
-        INSERT INTO logistics_tracking_event (
-            id, shipment_id, event_timestamp, event_type, location, description,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_tracking_event", {
+        "id": P(), "shipment_id": P(), "event_timestamp": P(), "event_type": P(),
+        "location": P(), "description": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         event_id, shipment_id, event_timestamp, event_type,
         getattr(args, "location", None),
         getattr(args, "description", None),
@@ -327,27 +326,28 @@ def add_tracking_event(conn, args):
 # 7. list-tracking-events
 # ===========================================================================
 def list_tracking_events(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_tracking_event")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     shipment_id = getattr(args, "shipment_id", None)
     if shipment_id:
-        where.append("shipment_id = ?")
+        q = q.where(t.shipment_id == P())
+        q_cnt = q_cnt.where(t.shipment_id == P())
         params.append(shipment_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "event_type", None):
-        where.append("event_type = ?")
+        q = q.where(t.event_type == P())
+        q_cnt = q_cnt.where(t.event_type == P())
         params.append(args.event_type)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_tracking_event WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_tracking_event WHERE {where_sql} ORDER BY event_timestamp DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.event_timestamp, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -369,20 +369,26 @@ def add_proof_of_delivery(conn, args):
 
     pod_timestamp = getattr(args, "pod_timestamp", None) or _now_iso()
 
-    conn.execute(
-        "UPDATE logistics_shipment SET pod_signature = ?, pod_timestamp = ?, "
-        "shipment_status = 'delivered', actual_delivery = COALESCE(actual_delivery, ?), "
-        "updated_at = datetime('now') WHERE id = ?",
-        (pod_signature, pod_timestamp, pod_timestamp, shipment_id)
-    )
+    t_ship = Table("logistics_shipment")
+    sql = (Q.update(t_ship)
+           .set(t_ship.pod_signature, P())
+           .set(t_ship.pod_timestamp, P())
+           .set(t_ship.shipment_status, "delivered")
+           .set(t_ship.actual_delivery, LiteralValue("COALESCE(actual_delivery, ?)"))
+           .set(t_ship.updated_at, LiteralValue("datetime('now')"))
+           .where(t_ship.id == P())
+           .get_sql())
+    conn.execute(sql, (pod_signature, pod_timestamp, pod_timestamp, shipment_id))
 
     # Update carrier total_shipments if not already delivered
     if data["shipment_status"] != "delivered" and data.get("carrier_id"):
-        conn.execute(
-            "UPDATE logistics_carrier SET total_shipments = total_shipments + 1, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (data["carrier_id"],)
-        )
+        t_carrier = Table("logistics_carrier")
+        sql = (Q.update(t_carrier)
+               .set(t_carrier.total_shipments, LiteralValue("total_shipments + 1"))
+               .set(t_carrier.updated_at, LiteralValue("datetime('now')"))
+               .where(t_carrier.id == P())
+               .get_sql())
+        conn.execute(sql, (data["carrier_id"],))
 
     audit(conn, SKILL, "logistics-add-proof-of-delivery", "logistics_shipment", shipment_id,
           new_values={"pod_signature": pod_signature, "pod_timestamp": pod_timestamp})
@@ -431,22 +437,26 @@ def shipment_summary_report(conn, args):
     company_id = getattr(args, "company_id", None)
     _validate_company(conn, company_id)
 
+    t = Table("logistics_shipment")
     total = conn.execute(
-        "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ?", (company_id,)
+        Q.from_(t).select(fn.Count(t.star)).where(t.company_id == P()).get_sql(),
+        (company_id,)
     ).fetchone()[0]
 
     by_status = {}
     rows = conn.execute(
-        "SELECT shipment_status, COUNT(*) as cnt FROM logistics_shipment "
-        "WHERE company_id = ? GROUP BY shipment_status", (company_id,)
+        Q.from_(t).select(t.shipment_status, fn.Count(t.star).as_("cnt"))
+        .where(t.company_id == P()).groupby(t.shipment_status).get_sql(),
+        (company_id,)
     ).fetchall()
     for r in rows:
         by_status[r[0]] = r[1]
 
     by_service = {}
     rows2 = conn.execute(
-        "SELECT service_level, COUNT(*) as cnt FROM logistics_shipment "
-        "WHERE company_id = ? GROUP BY service_level", (company_id,)
+        Q.from_(t).select(t.service_level, fn.Count(t.star).as_("cnt"))
+        .where(t.company_id == P()).groupby(t.service_level).get_sql(),
+        (company_id,)
     ).fetchall()
     for r in rows2:
         by_service[r[0]] = r[1]
@@ -455,9 +465,12 @@ def shipment_summary_report(conn, args):
     on_time = 0
     if delivered > 0:
         on_time = conn.execute(
-            "SELECT COUNT(*) FROM logistics_shipment WHERE company_id = ? "
-            "AND shipment_status = 'delivered' AND estimated_delivery IS NOT NULL "
-            "AND actual_delivery <= estimated_delivery",
+            Q.from_(t).select(fn.Count(t.star))
+            .where(t.company_id == P())
+            .where(t.shipment_status == "delivered")
+            .where(t.estimated_delivery.isnotnull())
+            .where(t.actual_delivery <= t.estimated_delivery)
+            .get_sql(),
             (company_id,)
         ).fetchone()[0]
 

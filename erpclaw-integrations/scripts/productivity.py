@@ -87,7 +87,9 @@ def sync_calendar(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_productivity_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_productivity_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-calendar", "connv2_productivity_connector", connector_id,
@@ -105,7 +107,9 @@ def sync_contacts(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_productivity_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_productivity_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-contacts", "connv2_productivity_connector", connector_id,
@@ -123,7 +127,9 @@ def sync_files(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_productivity_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_productivity_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-files", "connv2_productivity_connector", connector_id,
@@ -136,6 +142,7 @@ def sync_files(conn, args):
 # 5. list-productivity-syncs
 # ===========================================================================
 def list_productivity_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = ["1=1"], []
     if getattr(args, "company_id", None):
         where.append("company_id = ?")
@@ -168,6 +175,7 @@ def list_productivity_syncs(conn, args):
 # 6. sync-status-report
 # ===========================================================================
 def sync_status_report(conn, args):
+    # PyPika: skipped — complex aggregate report with CASE
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT platform,

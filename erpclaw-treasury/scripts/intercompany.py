@@ -6,6 +6,7 @@ Fund transfers between companies.
 import os
 import sys
 import uuid
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
@@ -13,7 +14,7 @@ from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row
 
 register_prefix("inter_company_transfer", "ICT-")
 
@@ -56,20 +57,20 @@ def add_inter_company_transfer(conn, args):
     xfer_id = str(uuid.uuid4())
     ns = get_next_name(conn, "inter_company_transfer", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO inter_company_transfer
-           (id, naming_series, from_company_id, to_company_id, amount,
-            transfer_date, reference, reason, status, company_id)
-           VALUES (?,?,?,?,?,COALESCE(?,date('now')),?,?,?,?)""",
-        (
-            xfer_id, ns, args.from_company_id, args.to_company_id, amount,
-            getattr(args, "transfer_date", None),
-            getattr(args, "reference", None),
-            getattr(args, "reason", None),
-            "draft",
-            args.company_id,
-        ),
-    )
+    transfer_date = getattr(args, "transfer_date", None) or date.today().isoformat()
+    sql, _ = insert_row("inter_company_transfer", {
+        "id": P(), "naming_series": P(), "from_company_id": P(), "to_company_id": P(),
+        "amount": P(), "transfer_date": P(), "reference": P(), "reason": P(),
+        "status": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        xfer_id, ns, args.from_company_id, args.to_company_id, amount,
+        transfer_date,
+        getattr(args, "reference", None),
+        getattr(args, "reason", None),
+        "draft",
+        args.company_id,
+    ))
     audit(conn, SKILL, "treasury-add-inter-company-transfer", "inter_company_transfer", xfer_id,
           new_values={"naming_series": ns, "amount": amount})
     conn.commit()
@@ -89,9 +90,11 @@ def get_inter_company_transfer(conn, args):
 
     data = row_to_dict(row)
     # Enrich with company names
+    co = Table("company")
     for field in ("from_company_id", "to_company_id"):
         c = conn.execute(
-            "SELECT name FROM company WHERE id = ?", (data[field],)
+            Q.from_(co).select(co.name).where(co.id == P()).get_sql(),
+            (data[field],),
         ).fetchone()
         data[field.replace("_id", "_name")] = c[0] if c else None
 
@@ -102,43 +105,52 @@ def get_inter_company_transfer(conn, args):
 # list-inter-company-transfers
 # ---------------------------------------------------------------------------
 def list_inter_company_transfers(conn, args):
-    query = "SELECT * FROM inter_company_transfer WHERE 1=1"
+    t = Table("inter_company_transfer")
     params = []
+
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
     transfer_status = getattr(args, "transfer_status", None)
     if transfer_status:
-        query += " AND status = ?"
+        q = q.where(t.status == P())
+        cq = cq.where(t.status == P())
         params.append(transfer_status)
 
     from_id = getattr(args, "from_company_id", None)
     if from_id:
-        query += " AND from_company_id = ?"
+        q = q.where(t.from_company_id == P())
+        cq = cq.where(t.from_company_id == P())
         params.append(from_id)
 
     to_id = getattr(args, "to_company_id", None)
     if to_id:
-        query += " AND to_company_id = ?"
+        q = q.where(t.to_company_id == P())
+        cq = cq.where(t.to_company_id == P())
         params.append(to_id)
 
     search = getattr(args, "search", None)
     if search:
-        query += " AND (reference LIKE ? OR reason LIKE ?)"
+        search_crit = (t.reference.like(P())) | (t.reason.like(P()))
+        q = q.where(search_crit)
+        cq = cq.where(search_crit)
         params.extend([f"%{search}%", f"%{search}%"])
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY transfer_date DESC, created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = (q.orderby(t.transfer_date, order=Order.desc)
+          .orderby(t.created_at, order=Order.desc)
+          .limit(P()).offset(P()))
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"transfers": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -157,10 +169,10 @@ def approve_transfer(conn, args):
     if data["status"] != "draft":
         err(f"Can only approve draft transfers, current status: {data['status']}")
 
-    conn.execute(
-        "UPDATE inter_company_transfer SET status = 'approved', updated_at = datetime('now') WHERE id = ?",
-        (xfer_id,),
-    )
+    sql = update_row("inter_company_transfer",
+        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, ("approved", xfer_id))
     audit(conn, SKILL, "treasury-approve-transfer", "inter_company_transfer", xfer_id,
           old_values={"transfer_status": "draft"}, new_values={"transfer_status": "approved"})
     conn.commit()
@@ -189,34 +201,28 @@ def complete_transfer(conn, args):
     from_acct = getattr(args, "from_account_id", None)
     to_acct = getattr(args, "to_account_id", None)
 
+    ba = Table("bank_account_extended")
+    ba_bal_sql = Q.from_(ba).select(ba.current_balance).where(ba.id == P()).get_sql()
+    ba_upd_sql = update_row("bank_account_extended",
+        data={"current_balance": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+
     if from_acct:
-        fa = conn.execute(
-            "SELECT current_balance FROM bank_account_extended WHERE id = ?",
-            (from_acct,),
-        ).fetchone()
+        fa = conn.execute(ba_bal_sql, (from_acct,)).fetchone()
         if fa:
             new_bal = Decimal(fa[0] or "0") - amount
-            conn.execute(
-                "UPDATE bank_account_extended SET current_balance = ?, updated_at = datetime('now') WHERE id = ?",
-                (str(new_bal), from_acct),
-            )
+            conn.execute(ba_upd_sql, (str(new_bal), from_acct))
 
     if to_acct:
-        ta = conn.execute(
-            "SELECT current_balance FROM bank_account_extended WHERE id = ?",
-            (to_acct,),
-        ).fetchone()
+        ta = conn.execute(ba_bal_sql, (to_acct,)).fetchone()
         if ta:
             new_bal = Decimal(ta[0] or "0") + amount
-            conn.execute(
-                "UPDATE bank_account_extended SET current_balance = ?, updated_at = datetime('now') WHERE id = ?",
-                (str(new_bal), to_acct),
-            )
+            conn.execute(ba_upd_sql, (str(new_bal), to_acct))
 
-    conn.execute(
-        "UPDATE inter_company_transfer SET status = 'completed', updated_at = datetime('now') WHERE id = ?",
-        (xfer_id,),
-    )
+    sql = update_row("inter_company_transfer",
+        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, ("completed", xfer_id))
     audit(conn, SKILL, "treasury-complete-transfer", "inter_company_transfer", xfer_id,
           old_values={"transfer_status": "approved"}, new_values={"transfer_status": "completed"})
     conn.commit()
@@ -240,10 +246,10 @@ def cancel_transfer(conn, args):
     if data["status"] == "cancelled":
         err("Transfer is already cancelled")
 
-    conn.execute(
-        "UPDATE inter_company_transfer SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?",
-        (xfer_id,),
-    )
+    sql = update_row("inter_company_transfer",
+        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, ("cancelled", xfer_id))
     audit(conn, SKILL, "treasury-cancel-transfer", "inter_company_transfer", xfer_id,
           old_values={"transfer_status": data["status"]}, new_values={"transfer_status": "cancelled"})
     conn.commit()
@@ -259,14 +265,13 @@ def inter_company_balance_report(conn, args):
         err("--company-id is required")
 
     # Get completed transfers involving this company
-    rows = conn.execute(
-        """SELECT from_company_id, to_company_id, amount
-           FROM inter_company_transfer
-           WHERE status = 'completed'
-             AND (from_company_id = ? OR to_company_id = ?)
-           ORDER BY transfer_date""",
-        (args.company_id, args.company_id),
-    ).fetchall()
+    ict = Table("inter_company_transfer")
+    q = (Q.from_(ict)
+         .select(ict.from_company_id, ict.to_company_id, ict.amount)
+         .where(ict.status == "completed")
+         .where((ict.from_company_id == P()) | (ict.to_company_id == P()))
+         .orderby(ict.transfer_date))
+    rows = conn.execute(q.get_sql(), (args.company_id, args.company_id)).fetchall()
 
     # Net balances with each counterparty
     balances = {}

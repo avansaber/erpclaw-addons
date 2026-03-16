@@ -87,7 +87,9 @@ def sync_listings(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_realestate_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_realestate_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-listings", "connv2_realestate_connector", connector_id,
@@ -134,6 +136,7 @@ def capture_leads(conn, args):
 # 4. list-realestate-syncs
 # ===========================================================================
 def list_realestate_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = ["1=1"], []
     if getattr(args, "company_id", None):
         where.append("c.company_id = ?")
@@ -166,6 +169,7 @@ def list_realestate_syncs(conn, args):
 # 5. listing-performance-report
 # ===========================================================================
 def listing_performance_report(conn, args):
+    # PyPika: skipped — complex aggregate JOIN with CASE report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform, c.agent_id,
@@ -188,6 +192,7 @@ def listing_performance_report(conn, args):
 # 6. lead-source-report
 # ===========================================================================
 def lead_source_report(conn, args):
+    # PyPika: skipped — complex aggregate JOIN with GROUP BY report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform,

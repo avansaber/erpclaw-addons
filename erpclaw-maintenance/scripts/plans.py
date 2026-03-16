@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-maintenance"
 
@@ -113,8 +113,7 @@ def update_maintenance_plan(conn, args):
     if not row:
         err(f"Maintenance plan {plan_id} not found")
 
-    updates = []
-    params = []
+    data = {}
     updated_fields = []
     now = datetime.now(timezone.utc).isoformat()
 
@@ -132,30 +131,25 @@ def update_maintenance_plan(conn, args):
                 err(f"Invalid plan_type: {val}")
             if field == "frequency" and val not in VALID_FREQUENCIES:
                 err(f"Invalid frequency: {val}")
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             updated_fields.append(field)
 
     is_active_val = getattr(args, "is_active", None)
     if is_active_val is not None:
-        updates.append("is_active = ?")
-        params.append(int(is_active_val))
+        data["is_active"] = int(is_active_val)
         updated_fields.append("is_active")
 
     frequency_days = getattr(args, "frequency_days", None)
     if frequency_days is not None:
-        updates.append("frequency_days = ?")
-        params.append(int(frequency_days))
+        data["frequency_days"] = int(frequency_days)
         updated_fields.append("frequency_days")
 
-    if not updates:
+    if not updated_fields:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(now)
-    params.append(plan_id)
-
-    conn.execute(f"UPDATE maintenance_plan SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = now
+    sql, params = dynamic_update("maintenance_plan", data, {"id": plan_id})
+    conn.execute(sql, params)
     conn.commit()
 
     audit(conn, SKILL, "maintenance-update-maintenance-plan", "maintenance_plan", plan_id,

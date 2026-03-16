@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue
 
 SKILL = "erpclaw-maintenance"
 
@@ -20,18 +20,16 @@ def equipment_status_report(conn, args):
     """Equipment counts grouped by status."""
     company_id = getattr(args, "company_id", None)
 
-    where = ""
+    t = Table("equipment")
+    q = Q.from_(t).select(t.status, fn.Count(t.star).as_("count"))
     params = []
     if company_id:
-        where = "WHERE company_id = ?"
+        q = q.where(t.company_id == P())
         params = [company_id]
+    q = q.groupby(t.status).orderby(Field("count"), order=Order.desc)
 
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        f"""SELECT status, COUNT(*) as count FROM equipment {where}
-            GROUP BY status ORDER BY count DESC""",
-        params,
-    ).fetchall()
+    rows = conn.execute(q.get_sql(), params).fetchall()
 
     total = sum(r["count"] for r in rows)
     breakdown = {r["status"]: r["count"] for r in rows}
@@ -273,14 +271,15 @@ def equipment_history(conn, args):
     limit = getattr(args, "limit", None) or 50
     offset = getattr(args, "offset", None) or 0
 
-    rows = conn.execute(
-        """SELECT * FROM maintenance_work_order WHERE equipment_id = ?
-           ORDER BY created_at DESC LIMIT ? OFFSET ?""",
-        (equipment_id, limit, offset),
-    ).fetchall()
+    mwo = Table("maintenance_work_order")
+    q = (Q.from_(mwo).select(mwo.star)
+         .where(mwo.equipment_id == P())
+         .orderby(mwo.created_at, order=Order.desc)
+         .limit(P()).offset(P()))
+    rows = conn.execute(q.get_sql(), (equipment_id, limit, offset)).fetchall()
 
     count = conn.execute(
-        "SELECT COUNT(*) FROM maintenance_work_order WHERE equipment_id = ?",
+        Q.from_(mwo).select(fn.Count(mwo.star)).where(mwo.equipment_id == P()).get_sql(),
         (equipment_id,),
     ).fetchone()[0]
 

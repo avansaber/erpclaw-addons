@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-maintenance"
 
@@ -89,8 +89,7 @@ def update_equipment(conn, args):
     if not row:
         err(f"Equipment {eq_id} not found")
 
-    updates = []
-    params = []
+    data = {}
     updated_fields = []
     now = datetime.now(timezone.utc).isoformat()
 
@@ -107,8 +106,7 @@ def update_equipment(conn, args):
                 err(f"Invalid equipment_type: {val}")
             if field == "criticality" and val not in VALID_CRITICALITY:
                 err(f"Invalid criticality: {val}")
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             updated_fields.append(field)
 
     # Handle equipment_status separately to avoid ok() collision
@@ -116,18 +114,15 @@ def update_equipment(conn, args):
     if eq_status is not None:
         if eq_status not in VALID_EQUIPMENT_STATUS:
             err(f"Invalid status: {eq_status}")
-        updates.append("status = ?")
-        params.append(eq_status)
+        data["status"] = eq_status
         updated_fields.append("status")
 
-    if not updates:
+    if not updated_fields:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(now)
-    params.append(eq_id)
-
-    conn.execute(f"UPDATE equipment SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = now
+    sql, params = dynamic_update("equipment", data, {"id": eq_id})
+    conn.execute(sql, params)
     conn.commit()
 
     audit(conn, SKILL, "maintenance-update-equipment", "equipment", eq_id,
@@ -165,34 +160,39 @@ def list_equipment(conn, args):
     limit = getattr(args, "limit", None) or 50
     offset = getattr(args, "offset", None) or 0
 
-    where = []
+    t = Table("equipment")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
     params = []
 
     if company_id:
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(company_id)
     if eq_type:
-        where.append("equipment_type = ?")
+        q = q.where(t.equipment_type == P())
+        q_cnt = q_cnt.where(t.equipment_type == P())
         params.append(eq_type)
     if eq_status:
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(eq_status)
     if criticality:
-        where.append("criticality = ?")
+        q = q.where(t.criticality == P())
+        q_cnt = q_cnt.where(t.criticality == P())
         params.append(criticality)
     if search:
-        where.append("(name LIKE ? OR model LIKE ? OR serial_number LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.model.like(like)) | (t.serial_number.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{search}%"] * 3)
 
-    where_sql = " AND ".join(where) if where else "1=1"
-
     conn.row_factory = _row_factory(conn)
-    count = conn.execute(f"SELECT COUNT(*) FROM equipment WHERE {where_sql}", params).fetchone()[0]
+    count = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
-    rows = conn.execute(
-        f"SELECT * FROM equipment WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     items = []
     for r in rows:
@@ -280,8 +280,12 @@ def list_equipment_tree(conn, args):
         ok({"tree": root_data})
     else:
         # Get all root nodes (no parent) for company
+        t_root = Table("equipment")
         roots = conn.execute(
-            "SELECT * FROM equipment WHERE company_id = ? AND parent_equipment_id IS NULL ORDER BY name",
+            Q.from_(t_root).select(t_root.star)
+            .where(t_root.company_id == P())
+            .where(t_root.parent_equipment_id.isnull())
+            .orderby(t_root.name).get_sql(),
             (company_id,),
         ).fetchall()
         tree = []
@@ -343,24 +347,21 @@ def list_equipment_readings(conn, args):
     offset = getattr(args, "offset", None) or 0
     reading_type = getattr(args, "reading_type", None)
 
-    where = ["equipment_id = ?"]
+    er = Table("equipment_reading")
+    q = Q.from_(er).select(er.star).where(er.equipment_id == P())
+    q_cnt = Q.from_(er).select(fn.Count(er.star)).where(er.equipment_id == P())
     params = [equipment_id]
 
     if reading_type:
-        where.append("reading_type = ?")
+        q = q.where(er.reading_type == P())
+        q_cnt = q_cnt.where(er.reading_type == P())
         params.append(reading_type)
 
-    where_sql = " AND ".join(where)
-
     conn.row_factory = _row_factory(conn)
-    count = conn.execute(
-        f"SELECT COUNT(*) FROM equipment_reading WHERE {where_sql}", params
-    ).fetchone()[0]
+    count = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
-    rows = conn.execute(
-        f"SELECT * FROM equipment_reading WHERE {where_sql} ORDER BY reading_date DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(er.reading_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     ok({
         "items": [dict(r) for r in rows],
@@ -383,10 +384,10 @@ def link_equipment_asset(conn, args):
         err(f"Equipment {eq_id} not found")
 
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE equipment SET asset_id = ?, updated_at = ? WHERE id = ?",
-        (asset_id, now, eq_id),
-    )
+    sql = update_row("equipment",
+                     data={"asset_id": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, (asset_id, now, eq_id))
     conn.commit()
 
     audit(conn, SKILL, "maintenance-link-equipment-asset", "equipment", eq_id,

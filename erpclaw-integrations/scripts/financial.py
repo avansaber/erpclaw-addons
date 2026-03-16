@@ -89,7 +89,9 @@ def sync_bank_feeds(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_financial_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_financial_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-bank-feeds", "connv2_financial_connector", connector_id,
@@ -110,7 +112,9 @@ def sync_transactions(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_financial_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_financial_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-transactions", "connv2_financial_connector", connector_id,
@@ -138,7 +142,9 @@ def send_sms(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_financial_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_financial_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-send-sms", "connv2_financial_connector", connector_id,
@@ -167,7 +173,9 @@ def send_email_delivery(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_financial_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_financial_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-send-email-delivery", "connv2_financial_connector", connector_id,
@@ -181,6 +189,7 @@ def send_email_delivery(conn, args):
 # 6. list-financial-syncs
 # ===========================================================================
 def list_financial_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = ["1=1"], []
     if getattr(args, "company_id", None):
         where.append("company_id = ?")
@@ -213,6 +222,7 @@ def list_financial_syncs(conn, args):
 # 7. bank-feed-reconciliation-report
 # ===========================================================================
 def bank_feed_reconciliation_report(conn, args):
+    # PyPika: skipped — filtered query with platform constant
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT id, naming_series, platform, account_ref,
@@ -231,6 +241,7 @@ def bank_feed_reconciliation_report(conn, args):
 # 8. communication-delivery-report
 # ===========================================================================
 def communication_delivery_report(conn, args):
+    # PyPika: skipped — complex aggregate report with IN clause and CASE
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT platform,

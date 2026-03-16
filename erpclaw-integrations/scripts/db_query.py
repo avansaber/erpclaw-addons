@@ -66,13 +66,20 @@ ACTIONS.update(connv2_reports_filtered)
 # Status action (skill health check)
 # ---------------------------------------------------------------------------
 def status_action(conn, args):
-    connector_count = conn.execute("SELECT COUNT(*) FROM integration_connector").fetchone()[0]
-    active_connectors = conn.execute(
-        "SELECT COUNT(*) FROM integration_connector WHERE connector_status = 'active'"
-    ).fetchone()[0]
-    sync_count = conn.execute("SELECT COUNT(*) FROM integration_sync").fetchone()[0]
-    mapping_count = conn.execute("SELECT COUNT(*) FROM integration_field_mapping").fetchone()[0]
-    entity_map_count = conn.execute("SELECT COUNT(*) FROM integration_entity_map").fetchone()[0]
+    from erpclaw_lib.query import Q, P, Table, Field, fn
+
+    _ic = Table("integration_connector")
+    connector_count = conn.execute(Q.from_(_ic).select(fn.Count(_ic.star)).get_sql()).fetchone()[0]
+    active_connectors = conn.execute(Q.from_(_ic).select(fn.Count(_ic.star)).where(_ic.connector_status == P()).get_sql(), ('active',)).fetchone()[0]
+
+    _is = Table("integration_sync")
+    sync_count = conn.execute(Q.from_(_is).select(fn.Count(_is.star)).get_sql()).fetchone()[0]
+
+    _ifm = Table("integration_field_mapping")
+    mapping_count = conn.execute(Q.from_(_ifm).select(fn.Count(_ifm.star)).get_sql()).fetchone()[0]
+
+    _iem = Table("integration_entity_map")
+    entity_map_count = conn.execute(Q.from_(_iem).select(fn.Count(_iem.star)).get_sql()).fetchone()[0]
 
     # Connectors V2 table counts
     connv2_counts = {}
@@ -84,7 +91,8 @@ def status_action(conn, args):
         "connv2_productivity_connector",
     ]:
         try:
-            connv2_counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            _t = Table(tbl)
+            connv2_counts[tbl] = conn.execute(Q.from_(_t).select(fn.Count(_t.star)).get_sql()).fetchone()[0]
         except Exception:
             connv2_counts[tbl] = -1
 

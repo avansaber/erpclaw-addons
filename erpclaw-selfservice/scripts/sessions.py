@@ -77,12 +77,13 @@ def create_session(conn, args):
     session_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO selfservice_session (
-            id, user_id, profile_id, portal_id, token, ip_address, user_agent,
-            session_status, expires_at, last_activity_at, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("selfservice_session", {
+        "id": P(), "user_id": P(), "profile_id": P(), "portal_id": P(),
+        "token": P(), "ip_address": P(), "user_agent": P(),
+        "session_status": P(), "expires_at": P(), "last_activity_at": P(),
+        "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         session_id, user_id, profile_id, portal_id, token,
         getattr(args, "ip_address", None),
         getattr(args, "user_agent", None),
@@ -99,26 +100,28 @@ def create_session(conn, args):
 # 2. list-sessions
 # ===========================================================================
 def list_sessions(conn, args):
-    where, params = ["1=1"], []
+    t = Table("selfservice_session")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "user_id", None):
-        where.append("user_id = ?")
+        q_count = q_count.where(t.user_id == P())
+        q_rows = q_rows.where(t.user_id == P())
         params.append(args.user_id)
     if getattr(args, "profile_id", None):
-        where.append("profile_id = ?")
+        q_count = q_count.where(t.profile_id == P())
+        q_rows = q_rows.where(t.profile_id == P())
         params.append(args.profile_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM selfservice_session WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM selfservice_session WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    page_params = list(params) + [args.limit, args.offset]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), page_params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -140,13 +143,14 @@ def get_session(conn, args):
         q = Q.from_(t).select(t.star).where(t.id == P())
         row = conn.execute(q.get_sql(), (session_id,)).fetchone()
     else:
-        row = conn.execute("""
-            SELECT s.*, p.allowed_actions, p.denied_actions, p.record_scope,
-                   p.field_visibility, p.target_role
-            FROM selfservice_session s
-            LEFT JOIN selfservice_permission_profile p ON s.profile_id = p.id
-            WHERE s.token = ?
-        """, (token,)).fetchone()
+        t_s = Table("selfservice_session")
+        t_p = Table("selfservice_permission_profile")
+        q = (Q.from_(t_s)
+             .left_join(t_p).on(t_s.profile_id == t_p.id)
+             .select(t_s.star, t_p.allowed_actions, t_p.denied_actions,
+                     t_p.record_scope, t_p.field_visibility, t_p.target_role)
+             .where(t_s.token == P()))
+        row = conn.execute(q.get_sql(), (token,)).fetchone()
 
     if not row:
         err("Session not found")
@@ -216,23 +220,24 @@ def expire_session(conn, args):
 # 5. list-active-sessions
 # ===========================================================================
 def list_active_sessions(conn, args):
-    where, params = ["session_status = 'active'"], []
+    t = Table("selfservice_session")
+    q_count = Q.from_(t).select(fn.Count("*")).where(t.session_status == "active")
+    q_rows = Q.from_(t).select(t.star).where(t.session_status == "active")
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "user_id", None):
-        where.append("user_id = ?")
+        q_count = q_count.where(t.user_id == P())
+        q_rows = q_rows.where(t.user_id == P())
         params.append(args.user_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM selfservice_session WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM selfservice_session WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    page_params = list(params) + [args.limit, args.offset]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), page_params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,

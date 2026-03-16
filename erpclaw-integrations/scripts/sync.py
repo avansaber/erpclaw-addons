@@ -83,7 +83,9 @@ def start_sync(conn, args):
 
     # Update connector last_sync_at
     conn.execute(
-        "UPDATE integration_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("integration_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, cid),
     )
 
@@ -116,6 +118,7 @@ def get_sync(conn, args):
 # 3. list-syncs
 # ===========================================================================
 def list_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     cid = getattr(args, "connector_id", None)
     if cid:
@@ -157,8 +160,10 @@ def cancel_sync(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE integration_sync SET sync_status = 'cancelled', completed_at = ? WHERE id = ?",
-        (now, sid),
+        update_row("integration_sync",
+                   data={"sync_status": P(), "completed_at": P()},
+                   where={"id": P()}),
+        ("cancelled", now, sid),
     )
     audit(conn, SKILL, "integration-cancel-sync", "integration_sync", sid)
     conn.commit()
@@ -236,6 +241,7 @@ def update_sync_schedule(conn, args):
     if not updates:
         err("No fields to update. Provide at least one field flag.")
 
+    # PyPika: skipped — dynamic UPDATE with variable columns
     params.append(sched_id)
     conn.execute(
         f"UPDATE integration_sync_schedule SET {', '.join(updates)} WHERE id = ?",
@@ -251,6 +257,7 @@ def update_sync_schedule(conn, args):
 # 7. list-sync-schedules
 # ===========================================================================
 def list_sync_schedules(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     cid = getattr(args, "connector_id", None)
     if cid:
@@ -282,7 +289,8 @@ def delete_sync_schedule(conn, args):
     if not row:
         err(f"Schedule {sched_id} not found")
 
-    conn.execute("DELETE FROM integration_sync_schedule WHERE id = ?", (sched_id,))
+    _tss = Table("integration_sync_schedule")
+    conn.execute(Q.from_(_tss).delete().where(_tss.id == P()).get_sql(), (sched_id,))
     audit(conn, SKILL, "integration-delete-sync-schedule", "integration_sync_schedule", sched_id)
     conn.commit()
     ok({"id": sched_id, "deleted": True})
@@ -315,6 +323,7 @@ def add_sync_error(conn, args):
     ))
 
     # Increment records_failed on the sync
+    # PyPika: skipped — records_failed = records_failed + 1 (self-referential increment)
     conn.execute(
         "UPDATE integration_sync SET records_failed = records_failed + 1 WHERE id = ?",
         (sid,),
@@ -329,6 +338,7 @@ def add_sync_error(conn, args):
 # 10. list-sync-errors
 # ===========================================================================
 def list_sync_errors(conn, args):
+    # PyPika: skipped — dynamic WHERE with optional filters
     where, params = [], []
     sid = getattr(args, "sync_id", None)
     if sid:
@@ -367,8 +377,10 @@ def resolve_sync_error(conn, args):
     now = _now_iso()
     resolution_notes = getattr(args, "resolution_notes", None) or ""
     conn.execute(
-        "UPDATE integration_sync_error SET is_resolved = 1, resolution_notes = ?, resolved_at = ? WHERE id = ?",
-        (resolution_notes, now, err_id),
+        update_row("integration_sync_error",
+                   data={"is_resolved": P(), "resolution_notes": P(), "resolved_at": P()},
+                   where={"id": P()}),
+        (1, resolution_notes, now, err_id),
     )
     audit(conn, SKILL, "integration-resolve-sync-error", "integration_sync_error", err_id)
     conn.commit()
@@ -412,6 +424,7 @@ def retry_sync(conn, args):
 # 13. sync-summary-report
 # ===========================================================================
 def sync_summary_report(conn, args):
+    # PyPika: skipped — complex aggregate report with dynamic WHERE
     where, params = [], []
     company_id = getattr(args, "company_id", None)
     if company_id:
@@ -480,8 +493,11 @@ def get_sync_log(conn, args):
         err(f"Sync {sid} not found")
 
     sync_data = row_to_dict(row)
+    _tse = Table("integration_sync_error")
     errors = conn.execute(
-        "SELECT * FROM integration_sync_error WHERE sync_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        Q.from_(_tse).select(_tse.star).where(_tse.sync_id == P())
+        .orderby(_tse.created_at, order=Order.desc)
+        .limit(P()).offset(P()).get_sql(),
         (sid, args.limit, args.offset),
     ).fetchall()
 

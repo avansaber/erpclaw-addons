@@ -23,7 +23,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -51,16 +51,18 @@ def add_budget_version(conn, args):
     naming = get_next_name(conn, "planning_scenario", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO planning_scenario
-           (id, naming_series, name, scenario_type, description, assumptions,
-            fiscal_year, total_revenue, total_expense, net_income,
-            status, company_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'budget', ?, ?, ?, '0', '0', '0', 'draft', ?, ?, ?)""",
-        (budget_id, naming, args.name,
+    sql, _ = insert_row("planning_scenario", {
+        "id": P(), "naming_series": P(), "name": P(), "scenario_type": P(),
+        "description": P(), "assumptions": P(), "fiscal_year": P(),
+        "total_revenue": P(), "total_expense": P(), "net_income": P(),
+        "status": P(), "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql,
+        (budget_id, naming, args.name, "budget",
          getattr(args, "description", None),
          getattr(args, "assumptions", None),
          getattr(args, "fiscal_year", None),
+         "0", "0", "0", "draft",
          args.company_id, now, now)
     )
     audit(conn, SKILL_NAME, "planning-add-budget-version", "planning_scenario", budget_id)
@@ -74,31 +76,36 @@ def add_budget_version(conn, args):
 # ---------------------------------------------------------------------------
 def list_budget_versions(conn, args):
     """List all budget versions (scenarios with type='budget')."""
-    where, params = ["scenario_type = 'budget'"], []
+    t = Table("planning_scenario")
+    q = Q.from_(t).select(t.star).where(t.scenario_type == "budget")
+    q_cnt = Q.from_(t).select(fn.Count(t.star)).where(t.scenario_type == "budget")
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     status_val = getattr(args, "status", None)
     if status_val:
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(status_val)
     if getattr(args, "fiscal_year", None):
-        where.append("fiscal_year = ?")
+        q = q.where(t.fiscal_year == P())
+        q_cnt = q_cnt.where(t.fiscal_year == P())
         params.append(args.fiscal_year)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         s = f"%{args.search}%"
         params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM planning_scenario WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM planning_scenario WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "total_count": total,
         "limit": args.limit, "offset": args.offset,
         "has_more": (args.offset + args.limit) < total})
@@ -112,8 +119,9 @@ def get_budget_version(conn, args):
     if not budget_id:
         err("--budget-id is required")
 
+    t = Table("planning_scenario")
     row = conn.execute(
-        "SELECT * FROM planning_scenario WHERE id = ? AND scenario_type = 'budget'",
+        Q.from_(t).select(t.star).where(t.id == P()).where(t.scenario_type == "budget").get_sql(),
         (budget_id,)
     ).fetchone()
     if not row:
@@ -149,10 +157,10 @@ def approve_budget(conn, args):
     if data["status"] in ("locked", "archived"):
         err(f"Cannot approve budget in '{data['status']}' status")
 
-    conn.execute(
-        "UPDATE planning_scenario SET status = 'approved', updated_at = datetime('now') WHERE id = ?",
-        (budget_id,)
-    )
+    sql = update_row("planning_scenario",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("approved", budget_id))
     audit(conn, SKILL_NAME, "planning-approve-budget", "planning_scenario", budget_id)
     conn.commit()
     ok({"id": budget_id, "scenario_status": "approved"})
@@ -178,10 +186,10 @@ def lock_budget(conn, args):
     if data["status"] == "archived":
         err("Cannot lock an archived budget")
 
-    conn.execute(
-        "UPDATE planning_scenario SET status = 'locked', updated_at = datetime('now') WHERE id = ?",
-        (budget_id,)
-    )
+    sql = update_row("planning_scenario",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("locked", budget_id))
     audit(conn, SKILL_NAME, "planning-lock-budget", "planning_scenario", budget_id)
     conn.commit()
     ok({"id": budget_id, "scenario_status": "locked"})

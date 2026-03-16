@@ -15,7 +15,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -63,15 +63,17 @@ def add_forecast(conn, args):
     naming = get_next_name(conn, "forecast", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute(
-        """INSERT INTO forecast
-           (id, naming_series, name, forecast_type, period_type, start_period,
-            end_period, description, status, company_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)""",
+    sql, _ = insert_row("forecast", {
+        "id": P(), "naming_series": P(), "name": P(), "forecast_type": P(),
+        "period_type": P(), "start_period": P(), "end_period": P(),
+        "description": P(), "status": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql,
         (forecast_id, naming, args.name, forecast_type, period_type,
          args.start_period, args.end_period,
          getattr(args, "description", None),
-         args.company_id, now, now)
+         "draft", args.company_id, now, now)
     )
     audit(conn, SKILL_NAME, "planning-add-forecast", "forecast", forecast_id)
     conn.commit()
@@ -96,37 +98,34 @@ def update_forecast(conn, args):
     if current["status"] in ("locked", "archived"):
         err(f"Cannot update forecast in '{current['status']}' status")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "name": "name", "description": "description",
         "start_period": "start_period", "end_period": "end_period",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     forecast_type = getattr(args, "forecast_type", None)
     if forecast_type:
         _validate_enum(forecast_type, VALID_FORECAST_TYPES, "forecast-type")
-        updates.append("forecast_type = ?")
-        params.append(forecast_type)
+        data["forecast_type"] = forecast_type
         changed.append("forecast_type")
 
     period_type = getattr(args, "period_type", None)
     if period_type:
         _validate_enum(period_type, VALID_PERIOD_TYPES, "period-type")
-        updates.append("period_type = ?")
-        params.append(period_type)
+        data["period_type"] = period_type
         changed.append("period_type")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(forecast_id)
-    conn.execute(f"UPDATE forecast SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("forecast", data, {"id": forecast_id})
+    conn.execute(sql, params)
     audit(conn, SKILL_NAME, "planning-update-forecast", "forecast", forecast_id)
     conn.commit()
     ok({"id": forecast_id, "updated_fields": changed})
@@ -153,31 +152,36 @@ def get_forecast(conn, args):
 # 4. list-forecasts
 # ---------------------------------------------------------------------------
 def list_forecasts(conn, args):
-    where, params = ["1=1"], []
+    t = Table("forecast")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "forecast_type", None):
-        where.append("forecast_type = ?")
+        q = q.where(t.forecast_type == P())
+        q_cnt = q_cnt.where(t.forecast_type == P())
         params.append(args.forecast_type)
     status_val = getattr(args, "status", None)
     if status_val:
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(status_val)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         s = f"%{args.search}%"
         params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM forecast WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM forecast WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "total_count": total,
         "limit": args.limit, "offset": args.offset,
         "has_more": (args.offset + args.limit) < total})
@@ -242,30 +246,35 @@ def add_forecast_line(conn, args):
 # ---------------------------------------------------------------------------
 def list_forecast_lines(conn, args):
     forecast_id = getattr(args, "forecast_id", None)
-    where, params = ["1=1"], []
+    t = Table("forecast_line")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if forecast_id:
-        where.append("forecast_id = ?")
+        q = q.where(t.forecast_id == P())
+        q_cnt = q_cnt.where(t.forecast_id == P())
         params.append(forecast_id)
     if getattr(args, "account_type", None):
-        where.append("account_type = ?")
+        q = q.where(t.account_type == P())
+        q_cnt = q_cnt.where(t.account_type == P())
         params.append(args.account_type)
     if getattr(args, "period", None):
-        where.append("period = ?")
+        q = q.where(t.period == P())
+        q_cnt = q_cnt.where(t.period == P())
         params.append(args.period)
     if getattr(args, "search", None):
-        where.append("(account_name LIKE ? OR notes LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.account_name.like(like)) | (t.notes.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         s = f"%{args.search}%"
         params.extend([s, s])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM forecast_line WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM forecast_line WHERE {where_sql} ORDER BY period, account_name LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.period).orderby(t.account_name).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "total_count": total,
         "limit": args.limit, "offset": args.offset,
         "has_more": (args.offset + args.limit) < total})
@@ -290,21 +299,19 @@ def update_forecast_line(conn, args):
     if parent and row_to_dict(parent)["status"] in ("locked", "archived"):
         err("Cannot update lines on a forecast that is locked or archived")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "account_name": "account_name", "period": "period", "notes": "notes",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     account_type = getattr(args, "account_type", None)
     if account_type:
         _validate_enum(account_type, VALID_ACCOUNT_TYPES, "account-type")
-        updates.append("account_type = ?")
-        params.append(account_type)
+        data["account_type"] = account_type
         changed.append("account_type")
 
     # Handle money fields and recalculate variance
@@ -315,13 +322,11 @@ def update_forecast_line(conn, args):
     aa = to_decimal(actual_amount) if actual_amount is not None else to_decimal(line_data["actual_amount"])
 
     if forecast_amount is not None:
-        updates.append("forecast_amount = ?")
-        params.append(str(round_currency(fa)))
+        data["forecast_amount"] = str(round_currency(fa))
         changed.append("forecast_amount")
 
     if actual_amount is not None:
-        updates.append("actual_amount = ?")
-        params.append(str(round_currency(aa)))
+        data["actual_amount"] = str(round_currency(aa))
         changed.append("actual_amount")
 
     # Recalculate variance if either amount changed
@@ -329,17 +334,15 @@ def update_forecast_line(conn, args):
         variance = aa - fa
         variance_pct = (str(round_currency((variance / fa) * Decimal("100")))
                         if fa != Decimal("0") else "0")
-        updates.append("variance = ?")
-        params.append(str(round_currency(variance)))
-        updates.append("variance_pct = ?")
-        params.append(variance_pct)
+        data["variance"] = str(round_currency(variance))
+        data["variance_pct"] = variance_pct
         changed.extend(["variance", "variance_pct"])
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    params.append(line_id)
-    conn.execute(f"UPDATE forecast_line SET {', '.join(updates)} WHERE id = ?", params)
+    sql, params = dynamic_update("forecast_line", data, {"id": line_id})
+    conn.execute(sql, params)
     audit(conn, SKILL_NAME, "planning-update-forecast-line", "forecast_line", line_id)
     conn.commit()
     ok({"id": line_id, "updated_fields": changed})
@@ -363,10 +366,10 @@ def lock_forecast(conn, args):
     if current_status == "archived":
         err("Cannot lock an archived forecast")
 
-    conn.execute(
-        "UPDATE forecast SET status = 'locked', updated_at = datetime('now') WHERE id = ?",
-        (forecast_id,)
-    )
+    sql = update_row("forecast",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("locked", forecast_id))
     audit(conn, SKILL_NAME, "planning-lock-forecast", "forecast", forecast_id)
     conn.commit()
     ok({"id": forecast_id, "forecast_status": "locked"})
@@ -395,10 +398,10 @@ def calculate_variance(conn, args):
         variance_pct = (str(round_currency((variance / fa) * Decimal("100")))
                         if fa != Decimal("0") else "0")
 
-        conn.execute(
-            "UPDATE forecast_line SET variance = ?, variance_pct = ? WHERE id = ?",
-            (str(round_currency(variance)), variance_pct, ld["id"])
-        )
+        upd_sql = update_row("forecast_line",
+                             data={"variance": P(), "variance_pct": P()},
+                             where={"id": P()})
+        conn.execute(upd_sql, (str(round_currency(variance)), variance_pct, ld["id"]))
         updated += 1
 
     conn.commit()

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-advmfg"
 
@@ -79,7 +79,7 @@ def update_eco(conn, args):
     if row["status"] in ("implemented", "rejected", "cancelled"):
         err(f"Cannot update ECO in status '{row['status']}'")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("title", "title"),
@@ -93,34 +93,29 @@ def update_eco(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     et = getattr(args, "eco_type", None)
     if et is not None:
         if et not in VALID_ECO_TYPES:
             err(f"Invalid eco-type: {et}")
-        updates.append("eco_type = ?")
-        params.append(et)
+        data["eco_type"] = et
         changed.append("eco_type")
 
     pr = getattr(args, "priority", None)
     if pr is not None:
         if pr not in VALID_PRIORITIES:
             err(f"Invalid priority: {pr}")
-        updates.append("priority = ?")
-        params.append(pr)
+        data["priority"] = pr
         changed.append("priority")
 
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(eco_id)
-    conn.execute(
-        f"UPDATE engineering_change_order SET {', '.join(updates)} WHERE id = ?", params
-    )
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("engineering_change_order", data, {"id": eco_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "update-eco", "engineering_change_order", eco_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -147,40 +142,46 @@ def get_eco(conn, args):
 # list-ecos
 # ---------------------------------------------------------------------------
 def list_ecos(conn, args):
-    conditions, params = [], []
+    t = Table("engineering_change_order")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(company_id)
     eco_type = getattr(args, "eco_type", None)
     if eco_type:
-        conditions.append("eco_type = ?")
+        q = q.where(t.eco_type == P())
+        q_cnt = q_cnt.where(t.eco_type == P())
         params.append(eco_type)
     eco_status = getattr(args, "eco_status", None)
     if eco_status:
-        conditions.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(eco_status)
     priority = getattr(args, "priority", None)
     if priority:
-        conditions.append("priority = ?")
+        q = q.where(t.priority == P())
+        q_cnt = q_cnt.where(t.priority == P())
         params.append(priority)
     search = getattr(args, "search", None)
     if search:
-        conditions.append("(title LIKE ? OR description LIKE ? OR reason LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.title.like(like)) | (t.description.like(like)) | (t.reason.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM engineering_change_order {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM engineering_change_order {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     ecos = []
     for r in rows:
@@ -204,10 +205,10 @@ def submit_eco_for_review(conn, args):
     if row["status"] != "draft":
         err(f"Cannot submit ECO for review in status '{row['status']}'. Must be draft")
 
-    conn.execute(
-        "UPDATE engineering_change_order SET status = 'review', updated_at = datetime('now') WHERE id = ?",
-        (eco_id,),
-    )
+    sql = update_row("engineering_change_order",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("review", eco_id))
     audit(conn, SKILL, "submit-eco-for-review", "engineering_change_order", eco_id,
           new_values={"eco_status": "review"})
     conn.commit()
@@ -228,15 +229,11 @@ def approve_eco(conn, args):
         err(f"Cannot approve ECO in status '{row['status']}'. Must be in review")
 
     approved_by = getattr(args, "approved_by", None)
-    update_sql = "UPDATE engineering_change_order SET status = 'approved', updated_at = datetime('now')"
-    params = []
+    upd_data = {"status": "approved", "updated_at": LiteralValue("datetime('now')")}
     if approved_by:
-        update_sql += ", approved_by = ?"
-        params.append(approved_by)
-    update_sql += " WHERE id = ?"
-    params.append(eco_id)
-
-    conn.execute(update_sql, params)
+        upd_data["approved_by"] = approved_by
+    sql, params = dynamic_update("engineering_change_order", upd_data, {"id": eco_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "approve-eco", "engineering_change_order", eco_id,
           new_values={"eco_status": "approved", "approved_by": approved_by})
     conn.commit()
@@ -256,10 +253,10 @@ def implement_eco(conn, args):
     if row["status"] not in ("approved", "in_progress"):
         err(f"Cannot implement ECO in status '{row['status']}'. Must be approved or in_progress")
 
-    conn.execute(
-        "UPDATE engineering_change_order SET status = 'implemented', updated_at = datetime('now') WHERE id = ?",
-        (eco_id,),
-    )
+    sql = update_row("engineering_change_order",
+                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     where={"id": P()})
+    conn.execute(sql, ("implemented", eco_id))
     audit(conn, SKILL, "implement-eco", "engineering_change_order", eco_id,
           new_values={"eco_status": "implemented"})
     conn.commit()
@@ -280,13 +277,14 @@ def reject_eco(conn, args):
         err(f"Cannot reject ECO in status '{row['status']}'. Must be draft or review")
 
     notes = getattr(args, "notes", None)
-    update_sql = "UPDATE engineering_change_order SET status = 'rejected', updated_at = datetime('now')"
+    # PyPika: skipped — too complex (COALESCE + string concatenation with ||)
+    update_sql = "UPDATE \"engineering_change_order\" SET \"status\"='rejected',\"updated_at\"=datetime('now')"
     params = []
     if notes:
         # Store rejection reason in description if no dedicated field
-        update_sql += ", reason = COALESCE(reason, '') || ' [Rejected: ' || ? || ']'"
+        update_sql += ", \"reason\" = COALESCE(\"reason\", '') || ' [Rejected: ' || ? || ']'"
         params.append(notes)
-    update_sql += " WHERE id = ?"
+    update_sql += " WHERE \"id\" = ?"
     params.append(eco_id)
 
     conn.execute(update_sql, params)

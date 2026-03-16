@@ -95,13 +95,13 @@ def add_profile(conn, args):
     conn.company_id = args.company_id
     naming = get_next_name(conn, "selfservice_permission_profile")
 
-    conn.execute("""
-        INSERT INTO selfservice_permission_profile (
-            id, naming_series, name, description, target_role,
-            allowed_actions, denied_actions, record_scope, field_visibility,
-            is_active, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("selfservice_permission_profile", {
+        "id": P(), "naming_series": P(), "name": P(), "description": P(),
+        "target_role": P(), "allowed_actions": P(), "denied_actions": P(),
+        "record_scope": P(), "field_visibility": P(), "is_active": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         profile_id, naming, name,
         getattr(args, "description", None),
         target_role, allowed_actions, denied_actions, record_scope,
@@ -117,26 +117,30 @@ def add_profile(conn, args):
 # 2. list-profiles
 # ===========================================================================
 def list_profiles(conn, args):
-    where, params = ["1=1"], []
+    t = Table("selfservice_permission_profile")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "target_role", None):
-        where.append("target_role = ?")
+        q_count = q_count.where(t.target_role == P())
+        q_rows = q_rows.where(t.target_role == P())
         params.append(args.target_role)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR description LIKE ?)")
+        from erpclaw_lib.vendor.pypika.terms import LiteralValue
+        search_crit = (t.name.like(P())) | (t.description.like(P()))
+        q_count = q_count.where(search_crit)
+        q_rows = q_rows.where(search_crit)
         params.extend([f"%{args.search}%"] * 2)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM selfservice_permission_profile WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM selfservice_permission_profile WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    page_params = list(params) + [args.limit, args.offset]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), page_params).fetchall()
     items = [_parse_json_fields(row_to_dict(r), JSON_PROFILE_FIELDS) for r in rows]
     ok({
         "rows": items,
@@ -235,12 +239,12 @@ def add_permission(conn, args):
     perm_id = str(uuid.uuid4())
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO selfservice_profile_assignment (
-            id, profile_id, user_id, user_email, user_name, assigned_by,
-            assignment_status, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("selfservice_profile_assignment", {
+        "id": P(), "profile_id": P(), "user_id": P(), "user_email": P(),
+        "user_name": P(), "assigned_by": P(), "assignment_status": P(),
+        "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         perm_id, profile_id, user_id,
         getattr(args, "user_email", None),
         getattr(args, "user_name", None),
@@ -257,26 +261,28 @@ def add_permission(conn, args):
 # 6. list-permissions
 # ===========================================================================
 def list_permissions(conn, args):
-    where, params = ["1=1"], []
+    t = Table("selfservice_profile_assignment")
+    q_count = Q.from_(t).select(fn.Count("*"))
+    q_rows = Q.from_(t).select(t.star)
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q_count = q_count.where(t.company_id == P())
+        q_rows = q_rows.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "profile_id", None):
-        where.append("profile_id = ?")
+        q_count = q_count.where(t.profile_id == P())
+        q_rows = q_rows.where(t.profile_id == P())
         params.append(args.profile_id)
     if getattr(args, "user_id", None):
-        where.append("user_id = ?")
+        q_count = q_count.where(t.user_id == P())
+        q_rows = q_rows.where(t.user_id == P())
         params.append(args.user_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM selfservice_profile_assignment WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM selfservice_profile_assignment WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_count.get_sql(), params).fetchone()[0]
+    page_params = list(params) + [args.limit, args.offset]
+    q_rows = q_rows.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q_rows.get_sql(), page_params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -321,12 +327,15 @@ def validate_permission(conn, args):
         err("--action-name is required")
 
     # Find all active profiles assigned to this user
-    rows = conn.execute("""
-        SELECT p.allowed_actions, p.denied_actions, p.record_scope, p.name as profile_name
-        FROM selfservice_profile_assignment a
-        JOIN selfservice_permission_profile p ON a.profile_id = p.id
-        WHERE a.user_id = ? AND a.assignment_status = 'active' AND p.is_active = 1
-    """, (user_id,)).fetchall()
+    t_a = Table("selfservice_profile_assignment")
+    t_p = Table("selfservice_permission_profile")
+    q = (Q.from_(t_a)
+         .join(t_p).on(t_a.profile_id == t_p.id)
+         .select(t_p.allowed_actions, t_p.denied_actions, t_p.record_scope, t_p.name.as_("profile_name"))
+         .where(t_a.user_id == P())
+         .where(t_a.assignment_status == "active")
+         .where(t_p.is_active == 1))
+    rows = conn.execute(q.get_sql(), (user_id,)).fetchall()
 
     if not rows:
         ok({"user_id": user_id, "action": action_name, "permitted": False,

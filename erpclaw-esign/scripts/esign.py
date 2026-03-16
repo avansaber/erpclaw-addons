@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
 SKILL = "erpclaw-esign"
 
@@ -276,10 +277,11 @@ def send_signature_request(conn, args):
     if row["request_status"] != "draft":
         err(f"Cannot send: request is '{row['request_status']}'. Must be draft")
 
-    conn.execute(
-        "UPDATE \"esign_signature_request\" SET \"request_status\"=?,\"updated_at\"=datetime('now') WHERE \"id\"=?",
-        ("sent", req_id),
-    )
+    sql, params = dynamic_update("esign_signature_request",
+                                  data={"request_status": "sent",
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
     _add_event(conn, req_id, "sent", row["company_id"],
                notes=f"Request sent to {row['total_signers']} signer(s)")
     audit(conn, SKILL, "esign-send-signature-request", "esign_signature_request", req_id,
@@ -340,15 +342,18 @@ def sign_document(conn, args):
     else:
         new_status = "partially_signed"
 
-    completed_at_clause = ", completed_at = datetime('now')" if new_status == "completed" else ""
-
-    conn.execute(
-        f"""UPDATE esign_signature_request
-            SET signers = ?, signed_count = ?, request_status = ?,
-                updated_at = datetime('now'){completed_at_clause}
-            WHERE id = ?""",
-        (json.dumps(signers), signed_count, new_status, req_id),
-    )
+    upd_data = {
+        "signers": json.dumps(signers),
+        "signed_count": signed_count,
+        "request_status": new_status,
+        "updated_at": LiteralValue("datetime('now')"),
+    }
+    if new_status == "completed":
+        upd_data["completed_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("esign_signature_request",
+                                  data=upd_data,
+                                  where={"id": req_id})
+    conn.execute(sql, params)
 
     ip_address = getattr(args, "ip_address", None)
     user_agent = getattr(args, "user_agent", None)
@@ -404,10 +409,11 @@ def decline_signature(conn, args):
     if not found:
         err(f"Signer {signer_email} not found in request signers")
 
-    conn.execute(
-        "UPDATE esign_signature_request SET request_status = 'declined', updated_at = datetime('now') WHERE id = ?",
-        (req_id,),
-    )
+    sql, params = dynamic_update("esign_signature_request",
+                                  data={"request_status": "declined",
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
 
     notes = getattr(args, "notes", None)
     ip_address = getattr(args, "ip_address", None)
@@ -438,10 +444,11 @@ def cancel_signature_request(conn, args):
     if row["request_status"] in ("completed", "cancelled", "voided"):
         err(f"Cannot cancel: request is '{row['request_status']}'")
 
-    conn.execute(
-        "UPDATE esign_signature_request SET request_status = 'cancelled', updated_at = datetime('now') WHERE id = ?",
-        (req_id,),
-    )
+    sql, params = dynamic_update("esign_signature_request",
+                                  data={"request_status": "cancelled",
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
 
     notes = getattr(args, "notes", None)
     _add_event(conn, req_id, "cancelled", row["company_id"], notes=notes)
@@ -467,10 +474,11 @@ def void_signature_request(conn, args):
     if row["request_status"] not in ("completed", "sent", "partially_signed"):
         err(f"Cannot void: request is '{row['request_status']}'. Must be completed, sent, or partially_signed")
 
-    conn.execute(
-        "UPDATE esign_signature_request SET request_status = 'voided', updated_at = datetime('now') WHERE id = ?",
-        (req_id,),
-    )
+    sql, params = dynamic_update("esign_signature_request",
+                                  data={"request_status": "voided",
+                                        "updated_at": LiteralValue("datetime('now')")},
+                                  where={"id": req_id})
+    conn.execute(sql, params)
 
     notes = getattr(args, "notes", None)
     _add_event(conn, req_id, "voided", row["company_id"], notes=notes)
@@ -560,14 +568,12 @@ def signature_summary_report(conn, args):
         total_requests += r["cnt"]
 
     # Average completion time (completed requests only)
-    avg_row = conn.execute(
-        """SELECT AVG(
-               CAST((julianday(completed_at) - julianday(created_at)) * 24 AS REAL)
-           ) as avg_hours
-           FROM esign_signature_request
-           WHERE company_id = ? AND request_status = 'completed' AND completed_at IS NOT NULL""",
-        (company_id,),
-    ).fetchone()
+    q_avg = (Q.from_(t)
+             .select(fn.Avg(LiteralValue('CAST((julianday("completed_at") - julianday("created_at")) * 24 AS REAL)')).as_("avg_hours"))
+             .where(t.company_id == P())
+             .where(t.request_status == "completed")
+             .where(t.completed_at.isnotnull()))
+    avg_row = conn.execute(q_avg.get_sql(), (company_id,)).fetchone()
     avg_completion_hours = round(avg_row["avg_hours"], 2) if avg_row and avg_row["avg_hours"] is not None else None
 
     # Total signatures

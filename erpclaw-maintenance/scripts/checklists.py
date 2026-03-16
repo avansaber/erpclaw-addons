@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row
 
 SKILL = "erpclaw-maintenance"
 
@@ -87,11 +87,12 @@ def add_checklist_item(conn, args):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
-        """INSERT INTO maintenance_checklist_item (id, checklist_id, description,
-           is_completed, sort_order, notes, created_at)
-           VALUES (?,?,?,0,?,?,?)""",
-        (item_id, checklist_id, description, sort_order,
+    sql, _ = insert_row("maintenance_checklist_item", {
+        "id": P(), "checklist_id": P(), "description": P(),
+        "is_completed": P(), "sort_order": P(), "notes": P(), "created_at": P(),
+    })
+    conn.execute(sql,
+        (item_id, checklist_id, description, 0, sort_order,
          getattr(args, "notes", None), now),
     )
     conn.commit()
@@ -111,8 +112,9 @@ def complete_checklist_item(conn, args):
     if not item_id:
         err("--checklist-item-id is required")
 
+    ci = Table("maintenance_checklist_item")
     row = conn.execute(
-        "SELECT id, is_completed, checklist_id FROM maintenance_checklist_item WHERE id = ?",
+        Q.from_(ci).select(ci.id, ci.is_completed, ci.checklist_id).where(ci.id == P()).get_sql(),
         (item_id,),
     ).fetchone()
     if not row:
@@ -124,10 +126,11 @@ def complete_checklist_item(conn, args):
     now = datetime.now(timezone.utc).isoformat()
     completed_by = getattr(args, "completed_by", None)
 
+    # PyPika: skipped — too complex (COALESCE with column fallback in SET)
     conn.execute(
-        """UPDATE maintenance_checklist_item
-           SET is_completed = 1, completed_at = ?, completed_by = ?, notes = COALESCE(?, notes)
-           WHERE id = ?""",
+        """UPDATE "maintenance_checklist_item"
+           SET "is_completed" = 1, "completed_at" = ?, "completed_by" = ?, "notes" = COALESCE(?, "notes")
+           WHERE "id" = ?""",
         (now, completed_by, getattr(args, "notes", None), item_id),
     )
     conn.commit()

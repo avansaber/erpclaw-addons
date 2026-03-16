@@ -134,6 +134,7 @@ def update_connector(conn, args):
     params.append(_now_iso())
     params.append(cid)
 
+    # PyPika: skipped — dynamic UPDATE with variable columns
     conn.execute(
         f"UPDATE integration_connector SET {', '.join(updates)} WHERE id = ?",
         params,
@@ -167,6 +168,7 @@ def get_connector(conn, args):
 # 4. list-connectors
 # ===========================================================================
 def list_connectors(conn, args):
+    # PyPika: skipped — dynamic WHERE with LIKE search pattern
     where, params = [], []
     company_id = getattr(args, "company_id", None)
     if company_id:
@@ -207,8 +209,10 @@ def activate_connector(conn, args):
         err("Connector is already active")
 
     conn.execute(
-        "UPDATE integration_connector SET connector_status = 'active', updated_at = ? WHERE id = ?",
-        (_now_iso(), cid),
+        update_row("integration_connector",
+                   data={"connector_status": P(), "updated_at": P()},
+                   where={"id": P()}),
+        ("active", _now_iso(), cid),
     )
     audit(conn, SKILL, "integration-activate-connector", "integration_connector", cid)
     conn.commit()
@@ -226,8 +230,10 @@ def deactivate_connector(conn, args):
         err("Connector is already inactive")
 
     conn.execute(
-        "UPDATE integration_connector SET connector_status = 'inactive', updated_at = ? WHERE id = ?",
-        (_now_iso(), cid),
+        update_row("integration_connector",
+                   data={"connector_status": P(), "updated_at": P()},
+                   where={"id": P()}),
+        ("inactive", _now_iso(), cid),
     )
     audit(conn, SKILL, "integration-deactivate-connector", "integration_connector", cid)
     conn.commit()
@@ -309,12 +315,15 @@ def list_connector_credentials(conn, args):
     if not cid:
         err("--connector-id is required")
 
-    total = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
-    rows = conn.execute(
-        "SELECT id, connector_id, credential_type, credential_key, expires_at, company_id, created_at "
-        "FROM integration_credential WHERE connector_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (cid, args.limit, args.offset),
-    ).fetchall()
+    _tc = Table("integration_credential")
+    total = conn.execute(Q.from_(_tc).select(fn.Count(_tc.star)).where(_tc.connector_id == P()).get_sql(), (cid,)).fetchone()[0]
+    q = (Q.from_(_tc)
+         .select(_tc.id, _tc.connector_id, _tc.credential_type, _tc.credential_key,
+                 _tc.expires_at, _tc.company_id, _tc.created_at)
+         .where(_tc.connector_id == P())
+         .orderby(_tc.created_at, order=Order.desc)
+         .limit(P()).offset(P()))
+    rows = conn.execute(q.get_sql(), (cid, args.limit, args.offset)).fetchall()
 
     # Mask credential values in list output
     ok({"credentials": [row_to_dict(r) for r in rows], "total_count": total})
@@ -331,7 +340,8 @@ def delete_connector_credential(conn, args):
     if not row:
         err(f"Credential {cred_id} not found")
 
-    conn.execute("DELETE FROM integration_credential WHERE id = ?", (cred_id,))
+    _tc = Table("integration_credential")
+    conn.execute(Q.from_(_tc).delete().where(_tc.id == P()).get_sql(), (cred_id,))
     audit(conn, SKILL, "integration-delete-connector-credential", "integration_credential", cred_id)
     conn.commit()
     ok({"id": cred_id, "deleted": True})
@@ -374,10 +384,12 @@ def list_webhooks(conn, args):
         err("--connector-id is required")
 
     total = conn.execute(Q.from_(Table("integration_webhook")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
-    rows = conn.execute(
-        "SELECT * FROM integration_webhook WHERE connector_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (cid, args.limit, args.offset),
-    ).fetchall()
+    _tw = Table("integration_webhook")
+    q = (Q.from_(_tw).select(_tw.star)
+         .where(_tw.connector_id == P())
+         .orderby(_tw.created_at, order=Order.desc)
+         .limit(P()).offset(P()))
+    rows = conn.execute(q.get_sql(), (cid, args.limit, args.offset)).fetchall()
 
     ok({"webhooks": [row_to_dict(r) for r in rows], "total_count": total})
 
@@ -393,7 +405,8 @@ def delete_webhook(conn, args):
     if not row:
         err(f"Webhook {wh_id} not found")
 
-    conn.execute("DELETE FROM integration_webhook WHERE id = ?", (wh_id,))
+    _tw = Table("integration_webhook")
+    conn.execute(Q.from_(_tw).delete().where(_tw.id == P()).get_sql(), (wh_id,))
     audit(conn, SKILL, "integration-delete-webhook", "integration_webhook", wh_id)
     conn.commit()
     ok({"id": wh_id, "deleted": True})
@@ -410,6 +423,7 @@ def connector_health_report(conn, args):
         where = " WHERE company_id = ?"
         params = [company_id]
 
+    # PyPika: skipped — dynamic WHERE clause with optional company filter
     connectors = conn.execute(
         f"SELECT * FROM integration_connector{where} ORDER BY created_at DESC",
         params,
@@ -420,13 +434,16 @@ def connector_health_report(conn, args):
         cd = row_to_dict(c)
         cid = cd["id"]
         cred_count = conn.execute(Q.from_(Table("integration_credential")).select(fn.Count("*")).where(Field("connector_id") == P()).get_sql(), (cid,)).fetchone()[0]
+        _ts = Table("integration_sync")
         last_sync = conn.execute(
-            "SELECT * FROM integration_sync WHERE connector_id = ? ORDER BY created_at DESC LIMIT 1",
+            Q.from_(_ts).select(_ts.star).where(_ts.connector_id == P())
+            .orderby(_ts.created_at, order=Order.desc).limit(1).get_sql(),
             (cid,),
         ).fetchone()
         failed_syncs = conn.execute(
-            "SELECT COUNT(*) FROM integration_sync WHERE connector_id = ? AND sync_status = 'failed'",
-            (cid,),
+            Q.from_(_ts).select(fn.Count(_ts.star))
+            .where(_ts.connector_id == P()).where(_ts.sync_status == P()).get_sql(),
+            (cid, 'failed'),
         ).fetchone()[0]
 
         report.append({

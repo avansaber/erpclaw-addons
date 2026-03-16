@@ -15,7 +15,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -61,14 +61,14 @@ def add_policy(conn, args):
     requires_ack_raw = getattr(args, "requires_acknowledgment", None)
     requires_ack = 1 if requires_ack_raw == "1" or requires_ack_raw == 1 else 0
 
-    conn.execute("""
-        INSERT INTO policy (
-            id, naming_series, title, policy_type, version,
-            content, effective_date, review_date, owner,
-            status, requires_acknowledgment,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("policy", {
+        "id": P(), "naming_series": P(), "title": P(), "policy_type": P(),
+        "version": P(), "content": P(), "effective_date": P(),
+        "review_date": P(), "owner": P(), "status": P(),
+        "requires_acknowledgment": P(), "company_id": P(),
+        "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         policy_id, naming, title, policy_type,
         getattr(args, "version", None) or "1.0",
         getattr(args, "content", None),
@@ -94,7 +94,7 @@ def update_policy(conn, args):
     if not conn.execute(Q.from_(Table("policy")).select(Field('id')).where(Field("id") == P()).get_sql(), (policy_id,)).fetchone():
         err(f"Policy {policy_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "title": "title",
         "version": "version",
@@ -105,30 +105,27 @@ def update_policy(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     policy_type = getattr(args, "policy_type", None)
     if policy_type is not None:
         _validate_enum(policy_type, VALID_POLICY_TYPES, "policy-type")
-        updates.append("policy_type = ?")
-        params.append(policy_type)
+        data["policy_type"] = policy_type
         changed.append("policy_type")
 
     requires_ack_raw = getattr(args, "requires_acknowledgment", None)
     if requires_ack_raw is not None:
         requires_ack = 1 if requires_ack_raw == "1" or requires_ack_raw == 1 else 0
-        updates.append("requires_acknowledgment = ?")
-        params.append(requires_ack)
+        data["requires_acknowledgment"] = requires_ack
         changed.append("requires_acknowledgment")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(policy_id)
-    conn.execute(f"UPDATE policy SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("policy", data, {"id": policy_id})
+    conn.execute(sql, params)
     audit(conn, "policy", policy_id, "compliance-update-policy", None, {"updated_fields": changed})
     conn.commit()
     ok({"id": policy_id, "updated_fields": changed})
@@ -147,8 +144,9 @@ def get_policy(conn, args):
     data = row_to_dict(row)
 
     # Enrich: acknowledgment count
+    pa = Table("policy_acknowledgment")
     ack_count = conn.execute(
-        "SELECT COUNT(*) FROM policy_acknowledgment WHERE policy_id = ?", (policy_id,)
+        Q.from_(pa).select(fn.Count(pa.star)).where(pa.policy_id == P()).get_sql(), (policy_id,)
     ).fetchone()[0]
     data["acknowledgment_count"] = ack_count
     ok(data)
@@ -158,27 +156,34 @@ def get_policy(conn, args):
 # 4. list-policies
 # ---------------------------------------------------------------------------
 def list_policies(conn, args):
-    where, params = ["1=1"], []
+    t = Table("policy")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "policy_type", None):
-        where.append("policy_type = ?")
+        q = q.where(t.policy_type == P())
+        q_cnt = q_cnt.where(t.policy_type == P())
         params.append(args.policy_type)
     if getattr(args, "status", None):
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(args.status)
     if getattr(args, "search", None):
-        where.append("(title LIKE ? OR content LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.title.like(like)) | (t.content.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{args.search}%", f"%{args.search}%"])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM policy WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM policy WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -203,10 +208,10 @@ def publish_policy(conn, args):
 
     effective_date = getattr(args, "effective_date", None) or _today_iso()
     now = _now_iso()
-    conn.execute(
-        "UPDATE policy SET status = 'published', effective_date = ?, updated_at = ? WHERE id = ?",
-        (effective_date, now, policy_id)
-    )
+    sql = update_row("policy",
+                     data={"status": P(), "effective_date": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("published", effective_date, now, policy_id))
     audit(conn, "policy", policy_id, "compliance-publish-policy", None)
     conn.commit()
     ok({"id": policy_id, "policy_status": "published", "effective_date": effective_date})
@@ -226,10 +231,10 @@ def retire_policy(conn, args):
         err("Policy is already retired")
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE policy SET status = 'retired', updated_at = ? WHERE id = ?",
-        (now, policy_id)
-    )
+    sql = update_row("policy",
+                     data={"status": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("retired", now, policy_id))
     audit(conn, "policy", policy_id, "compliance-retire-policy", None)
     conn.commit()
     ok({"id": policy_id, "policy_status": "retired"})
@@ -253,13 +258,12 @@ def add_policy_acknowledgment(conn, args):
 
     ack_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO policy_acknowledgment (
-            id, policy_id, employee_name, employee_id,
-            acknowledged_date, ip_address, notes,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("policy_acknowledgment", {
+        "id": P(), "policy_id": P(), "employee_name": P(), "employee_id": P(),
+        "acknowledged_date": P(), "ip_address": P(), "notes": P(),
+        "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         ack_id, policy_id, employee_name,
         getattr(args, "employee_id", None),
         _today_iso(),
@@ -276,21 +280,24 @@ def add_policy_acknowledgment(conn, args):
 # 8. list-policy-acknowledgments
 # ---------------------------------------------------------------------------
 def list_policy_acknowledgments(conn, args):
-    where, params = ["1=1"], []
+    t = Table("policy_acknowledgment")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "policy_id", None):
-        where.append("policy_id = ?")
+        q = q.where(t.policy_id == P())
+        q_cnt = q_cnt.where(t.policy_id == P())
         params.append(args.policy_id)
     if getattr(args, "employee_id", None):
-        where.append("employee_id = ?")
+        q = q.where(t.employee_id == P())
+        q_cnt = q_cnt.where(t.employee_id == P())
         params.append(args.employee_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM policy_acknowledgment WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM policy_acknowledgment WHERE {where_sql} ORDER BY acknowledged_date DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.acknowledged_date, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,

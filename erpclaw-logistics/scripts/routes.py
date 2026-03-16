@@ -14,7 +14,8 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_route", "RTE-")
 except ImportError:
@@ -68,12 +69,12 @@ def add_route(conn, args):
     naming = get_next_name(conn, "logistics_route", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO logistics_route (
-            id, naming_series, name, origin, destination, distance,
-            estimated_hours, route_status, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_route", {
+        "id": P(), "naming_series": P(), "name": P(), "origin": P(),
+        "destination": P(), "distance": P(), "estimated_hours": P(),
+        "route_status": P(), "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         route_id, naming, name,
         getattr(args, "origin", None),
         getattr(args, "destination", None),
@@ -98,30 +99,28 @@ def update_route(conn, args):
     route_id = getattr(args, "id", None)
     _get_route(conn, route_id)
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "name": "name", "origin": "origin", "destination": "destination",
         "distance": "distance", "estimated_hours": "estimated_hours",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     route_status = getattr(args, "route_status", None)
     if route_status:
         _validate_enum(route_status, VALID_ROUTE_STATUSES, "route-status")
-        updates.append("route_status = ?")
-        params.append(route_status)
+        data["route_status"] = route_status
         changed.append("route_status")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(route_id)
-    conn.execute(f"UPDATE logistics_route SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("logistics_route", data, {"id": route_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "logistics-update-route", "logistics_route", route_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -132,26 +131,28 @@ def update_route(conn, args):
 # 3. list-routes
 # ===========================================================================
 def list_routes(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_route")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "route_status", None):
-        where.append("route_status = ?")
+        q = q.where(t.route_status == P())
+        q_cnt = q_cnt.where(t.route_status == P())
         params.append(args.route_status)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR origin LIKE ? OR destination LIKE ?)")
+        search_crit = (t.name.like(P()) | t.origin.like(P()) | t.destination.like(P()))
+        q = q.where(search_crit)
+        q_cnt = q_cnt.where(search_crit)
         params.extend([f"%{args.search}%"] * 3)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_route WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_route WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -178,12 +179,12 @@ def add_route_stop(conn, args):
     stop_id = str(uuid.uuid4())
     stop_order = int(getattr(args, "stop_order", None) or 1)
 
-    conn.execute("""
-        INSERT INTO logistics_route_stop (
-            id, route_id, stop_order, address, city, state, zip_code,
-            estimated_arrival, stop_type, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_route_stop", {
+        "id": P(), "route_id": P(), "stop_order": P(), "address": P(),
+        "city": P(), "state": P(), "zip_code": P(), "estimated_arrival": P(),
+        "stop_type": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         stop_id, route_id, stop_order,
         getattr(args, "address", None),
         getattr(args, "city", None),
@@ -207,23 +208,23 @@ def add_route_stop(conn, args):
 # ===========================================================================
 def list_route_stops(conn, args):
     route_id = getattr(args, "route_id", None)
-    where, params = ["1=1"], []
+    t = Table("logistics_route_stop")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     if route_id:
-        where.append("route_id = ?")
+        q = q.where(t.route_id == P())
+        q_cnt = q_cnt.where(t.route_id == P())
         params.append(route_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_route_stop WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_route_stop WHERE {where_sql} ORDER BY stop_order ASC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.stop_order).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -238,22 +239,33 @@ def optimize_route_report(conn, args):
     company_id = getattr(args, "company_id", None)
     _validate_company(conn, company_id)
 
+    t_route = Table("logistics_route")
     routes = conn.execute(
-        "SELECT * FROM logistics_route WHERE company_id = ? AND route_status = 'active' ORDER BY name",
+        Q.from_(t_route).select(t_route.star)
+        .where(t_route.company_id == P()).where(t_route.route_status == "active")
+        .orderby(t_route.name).get_sql(),
         (company_id,)
     ).fetchall()
 
+    t_stop = Table("logistics_route_stop")
+    t_ship = Table("logistics_shipment")
     report = []
     for r in routes:
         r_data = row_to_dict(r)
-        stops = conn.execute(Q.from_(Table("logistics_route_stop")).select(Table("logistics_route_stop").star).where(Field("route_id") == P()).orderby(Field("stop_order")).get_sql(), (r["id"],)).fetchall()
+        stops = conn.execute(
+            Q.from_(t_stop).select(t_stop.star)
+            .where(t_stop.route_id == P()).orderby(t_stop.stop_order).get_sql(),
+            (r["id"],)
+        ).fetchall()
         r_data["stops"] = [row_to_dict(s) for s in stops]
         r_data["stop_count"] = len(stops)
 
         # Count shipments using this route's origin/destination
         shipment_count = conn.execute(
-            "SELECT COUNT(*) FROM logistics_shipment "
-            "WHERE company_id = ? AND origin_city = ? AND destination_city = ?",
+            Q.from_(t_ship).select(fn.Count(t_ship.star))
+            .where(t_ship.company_id == P())
+            .where(t_ship.origin_city == P())
+            .where(t_ship.destination_city == P()).get_sql(),
             (company_id, r_data.get("origin", ""), r_data.get("destination", ""))
         ).fetchone()[0]
         r_data["matching_shipments"] = shipment_count

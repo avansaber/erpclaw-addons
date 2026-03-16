@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
 SKILL = "erpclaw-pos"
 
@@ -103,39 +104,38 @@ def update_pos_profile(conn, args):
     if not row:
         err(f"POS profile {pid} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     if getattr(args, "name", None) is not None:
-        updates.append("name = ?"); params.append(args.name); changed.append("name")
+        data["name"] = args.name; changed.append("name")
     if getattr(args, "warehouse_id", None) is not None:
-        updates.append("warehouse_id = ?"); params.append(args.warehouse_id); changed.append("warehouse_id")
+        data["warehouse_id"] = args.warehouse_id; changed.append("warehouse_id")
     if getattr(args, "price_list_id", None) is not None:
-        updates.append("price_list_id = ?"); params.append(args.price_list_id); changed.append("price_list_id")
+        data["price_list_id"] = args.price_list_id; changed.append("price_list_id")
     if getattr(args, "default_payment_method", None) is not None:
         if args.default_payment_method not in VALID_PAYMENT_METHODS:
             err(f"--default-payment-method must be one of: {', '.join(VALID_PAYMENT_METHODS)}")
-        updates.append("default_payment_method = ?"); params.append(args.default_payment_method)
+        data["default_payment_method"] = args.default_payment_method
         changed.append("default_payment_method")
     if getattr(args, "allow_discount", None) is not None:
         val = 1 if str(args.allow_discount).lower() in ("1", "true", "yes") else 0
-        updates.append("allow_discount = ?"); params.append(val); changed.append("allow_discount")
+        data["allow_discount"] = val; changed.append("allow_discount")
     if getattr(args, "max_discount_pct", None) is not None:
-        updates.append("max_discount_pct = ?")
-        params.append(str(_round(_dec(args.max_discount_pct))))
+        data["max_discount_pct"] = str(_round(_dec(args.max_discount_pct)))
         changed.append("max_discount_pct")
     if getattr(args, "auto_print_receipt", None) is not None:
         val = 1 if str(args.auto_print_receipt).lower() in ("1", "true", "yes") else 0
-        updates.append("auto_print_receipt = ?"); params.append(val); changed.append("auto_print_receipt")
+        data["auto_print_receipt"] = val; changed.append("auto_print_receipt")
     if getattr(args, "is_active", None) is not None:
         val = 1 if str(args.is_active).lower() in ("1", "true", "yes") else 0
-        updates.append("is_active = ?"); params.append(val); changed.append("is_active")
+        data["is_active"] = val; changed.append("is_active")
 
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(pid)
-    conn.execute(f"UPDATE pos_profile SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("pos_profile", data, {"id": pid})
+    conn.execute(sql, params)
 
     audit(conn, SKILL, "pos-update-pos-profile", "pos_profile", pid,
           new_values={"updated_fields": changed})
@@ -158,8 +158,10 @@ def get_pos_profile(conn, args):
     data = row_to_dict(row)
 
     # Count open sessions
+    t_sess = Table("pos_session")
     session_count = conn.execute(
-        "SELECT COUNT(*) FROM pos_session WHERE pos_profile_id = ? AND status = 'open'",
+        Q.from_(t_sess).select(fn.Count(t_sess.star))
+        .where(t_sess.pos_profile_id == P()).where(t_sess.status == "open").get_sql(),
         (pid,)).fetchone()[0]
     data["open_sessions"] = session_count
 
@@ -170,35 +172,36 @@ def get_pos_profile(conn, args):
 # list-pos-profiles
 # ---------------------------------------------------------------------------
 def list_pos_profiles(conn, args):
+    t = Table("pos_profile")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
     params = []
-    where = ["1=1"]
 
     company_id = getattr(args, "company_id", None)
     is_active = getattr(args, "is_active", None)
     search = getattr(args, "search", None)
 
     if company_id:
-        where.append("p.company_id = ?"); params.append(company_id)
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
+        params.append(company_id)
     if is_active is not None:
         val = 1 if str(is_active).lower() in ("1", "true", "yes") else 0
-        where.append("p.is_active = ?"); params.append(val)
+        q = q.where(t.is_active == P())
+        q_cnt = q_cnt.where(t.is_active == P())
+        params.append(val)
     if search:
-        where.append("p.name LIKE ?"); params.append(f"%{search}%")
+        q = q.where(t.name.like(P()))
+        q_cnt = q_cnt.where(t.name.like(P()))
+        params.append(f"%{search}%")
 
-    where_clause = " AND ".join(where)
-
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM pos_profile p WHERE {where_clause}",
-        params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
 
     limit = int(getattr(args, "limit", None) or 50)
     offset = int(getattr(args, "offset", None) or 0)
 
-    rows = conn.execute(
-        f"""SELECT p.* FROM pos_profile p
-            WHERE {where_clause}
-            ORDER BY p.name LIMIT ? OFFSET ?""",
-        params + [limit, offset]).fetchall()
+    q = q.orderby(t.name).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     ok({"profiles": [row_to_dict(r) for r in rows],
         "total": total, "limit": limit, "offset": offset,

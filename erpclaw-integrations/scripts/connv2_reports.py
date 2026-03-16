@@ -43,6 +43,7 @@ def _validate_company(conn, company_id):
 # 1. connector-usage-report
 # ===========================================================================
 def connector_usage_report(conn, args):
+    # PyPika: skipped — dynamic table iteration with CASE aggregates
     _validate_company(conn, args.company_id)
     results = []
     for table, domain in CONNECTOR_TABLES:
@@ -68,6 +69,7 @@ def connector_usage_report(conn, args):
 # 2. sync-volume-report
 # ===========================================================================
 def sync_volume_report(conn, args):
+    # PyPika: skipped — multiple aggregate queries across different tables
     _validate_company(conn, args.company_id)
 
     # Booking sync volumes
@@ -104,6 +106,7 @@ def sync_volume_report(conn, args):
 # 3. error-rate-report
 # ===========================================================================
 def error_rate_report(conn, args):
+    # PyPika: skipped — dynamic table iteration with CASE aggregates
     _validate_company(conn, args.company_id)
     results = []
     for table, domain in CONNECTOR_TABLES:
@@ -132,7 +135,8 @@ def status_action(conn, args):
     counts = {}
     for tbl in ALL_TABLES:
         try:
-            counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            _t = Table(tbl)
+            counts[tbl] = conn.execute(Q.from_(_t).select(fn.Count(_t.star)).get_sql()).fetchone()[0]
         except Exception:
             counts[tbl] = -1
     ok({

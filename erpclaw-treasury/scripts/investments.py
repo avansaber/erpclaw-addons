@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 register_prefix("investment_transaction", "ITXN-")
 
@@ -94,7 +94,7 @@ def update_investment(conn, args):
     if data["status"] != "active":
         err(f"Cannot update investment with status '{data['status']}'")
 
-    updates, params, changed = [], [], []
+    upd_data, changed = {}, []
 
     for field, attr in [
         ("name", "name"),
@@ -107,16 +107,14 @@ def update_investment(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            upd_data[field] = val
             changed.append(field)
 
     it = getattr(args, "investment_type", None)
     if it is not None:
         if it not in VALID_INVESTMENT_TYPES:
             err(f"Invalid investment-type: {it}")
-        updates.append("investment_type = ?")
-        params.append(it)
+        upd_data["investment_type"] = it
         changed.append("investment_type")
 
     for field, attr in [("principal", "principal"), ("current_value", "current_value"),
@@ -127,19 +125,15 @@ def update_investment(conn, args):
                 Decimal(val)
             except Exception:
                 err(f"Invalid {attr.replace('_', '-')}: {val}")
-            updates.append(f"{field} = ?")
-            params.append(val)
+            upd_data[field] = val
             changed.append(field)
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(inv_id)
-    conn.execute(
-        f"UPDATE investment SET {', '.join(updates)} WHERE id = ?",
-        params,
-    )
+    upd_data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("investment", upd_data, {"id": inv_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-investment", "investment", inv_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -160,8 +154,9 @@ def get_investment(conn, args):
     data = row_to_dict(row)
 
     # Include transaction count
+    it = Table("investment_transaction")
     txn_count = conn.execute(
-        "SELECT COUNT(*) FROM investment_transaction WHERE investment_id = ?",
+        Q.from_(it).select(fn.Count("*")).where(it.investment_id == P()).get_sql(),
         (inv_id,),
     ).fetchone()[0]
     data["transaction_count"] = txn_count
@@ -173,38 +168,44 @@ def get_investment(conn, args):
 # list-investments
 # ---------------------------------------------------------------------------
 def list_investments(conn, args):
-    query = "SELECT * FROM investment WHERE 1=1"
+    t = Table("investment")
     params = []
+
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
     inv_type = getattr(args, "investment_type", None)
     if inv_type:
-        query += " AND investment_type = ?"
+        q = q.where(t.investment_type == P())
+        cq = cq.where(t.investment_type == P())
         params.append(inv_type)
 
     inv_status = getattr(args, "investment_status", None)
     if inv_status:
-        query += " AND status = ?"
+        q = q.where(t.status == P())
+        cq = cq.where(t.status == P())
         params.append(inv_status)
 
     search = getattr(args, "search", None)
     if search:
-        query += " AND (name LIKE ? OR institution LIKE ?)"
+        search_crit = (t.name.like(P())) | (t.institution.like(P()))
+        q = q.where(search_crit)
+        cq = cq.where(search_crit)
         params.extend([f"%{search}%", f"%{search}%"])
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"investments": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -259,10 +260,10 @@ def add_investment_transaction(conn, args):
     else:
         new_value = current
 
-    conn.execute(
-        "UPDATE investment SET current_value = ?, updated_at = datetime('now') WHERE id = ?",
-        (str(new_value), inv_id),
-    )
+    sql = update_row("investment",
+        data={"current_value": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, (str(new_value), inv_id))
 
     audit(conn, SKILL, "treasury-add-investment-transaction", "investment_transaction", txn_id,
           new_values={"type": txn_type, "amount": amount, "investment_id": inv_id})
@@ -279,32 +280,38 @@ def add_investment_transaction(conn, args):
 # ---------------------------------------------------------------------------
 def list_investment_transactions(conn, args):
     inv_id = getattr(args, "investment_id", None)
-    query = "SELECT * FROM investment_transaction WHERE 1=1"
+    t = Table("investment_transaction")
     params = []
 
+    q = Q.from_(t).select(t.star)
+    cq = Q.from_(t).select(fn.Count("*").as_("cnt"))
+
     if inv_id:
-        query += " AND investment_id = ?"
+        q = q.where(t.investment_id == P())
+        cq = cq.where(t.investment_id == P())
         params.append(inv_id)
 
     company_id = getattr(args, "company_id", None)
     if company_id:
-        query += " AND company_id = ?"
+        q = q.where(t.company_id == P())
+        cq = cq.where(t.company_id == P())
         params.append(company_id)
 
     txn_type = getattr(args, "transaction_type", None)
     if txn_type:
-        query += " AND transaction_type = ?"
+        q = q.where(t.transaction_type == P())
+        cq = cq.where(t.transaction_type == P())
         params.append(txn_type)
 
-    count_q = query.replace("SELECT *", "SELECT COUNT(*)", 1)
-    total = conn.execute(count_q, params).fetchone()[0]
+    total = conn.execute(cq.get_sql(), params).fetchone()["cnt"]
 
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
-    query += " ORDER BY transaction_date DESC, created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    q = (q.orderby(t.transaction_date, order=Order.desc)
+          .orderby(t.created_at, order=Order.desc)
+          .limit(P()).offset(P()))
 
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
     ok({"transactions": [row_to_dict(r) for r in rows], "total_count": total})
 
 
@@ -323,10 +330,10 @@ def mature_investment(conn, args):
     if data["status"] != "active":
         err(f"Can only mature an active investment, current status: {data['status']}")
 
-    conn.execute(
-        "UPDATE investment SET status = 'matured', updated_at = datetime('now') WHERE id = ?",
-        (inv_id,),
-    )
+    sql = update_row("investment",
+        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, ("matured", inv_id))
     audit(conn, SKILL, "treasury-mature-investment", "investment", inv_id,
           old_values={"investment_status": "active"}, new_values={"investment_status": "matured"})
     conn.commit()
@@ -358,25 +365,22 @@ def redeem_investment(conn, args):
 
     # Create a redemption transaction
     txn_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO investment_transaction
-           (id, investment_id, transaction_type, transaction_date, amount,
-            reference, notes, company_id)
-           VALUES (?,?,?,date('now'),?,?,?,?)""",
-        (
-            txn_id, inv_id, "redemption", str(current_value),
-            f"Full redemption of {data['name']}",
-            f"Returns: {returns}, Return%: {return_pct}%",
-            data["company_id"],
-        ),
-    )
+    sql, _ = insert_row("investment_transaction", {
+        "id": P(), "investment_id": P(), "transaction_type": P(),
+        "transaction_date": LiteralValue("date('now')"), "amount": P(),
+        "reference": P(), "notes": P(), "company_id": P(),
+    })
+    conn.execute(sql, (
+        txn_id, inv_id, "redemption", str(current_value),
+        f"Full redemption of {data['name']}",
+        f"Returns: {returns}, Return%: {return_pct}%",
+        data["company_id"],
+    ))
 
-    conn.execute(
-        """UPDATE investment
-           SET status = 'redeemed', current_value = '0', updated_at = datetime('now')
-           WHERE id = ?""",
-        (inv_id,),
-    )
+    sql = update_row("investment",
+        data={"status": P(), "current_value": P(), "updated_at": LiteralValue("datetime('now')")},
+        where={"id": P()})
+    conn.execute(sql, ("redeemed", "0", inv_id))
 
     audit(conn, SKILL, "treasury-redeem-investment", "investment", inv_id,
           old_values={"investment_status": data["status"]},
@@ -400,12 +404,11 @@ def investment_portfolio_report(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
 
-    rows = conn.execute(
-        """SELECT * FROM investment
-           WHERE company_id = ?
-           ORDER BY investment_type, name""",
-        (args.company_id,),
-    ).fetchall()
+    t = Table("investment")
+    q = (Q.from_(t).select(t.star)
+         .where(t.company_id == P())
+         .orderby(t.investment_type).orderby(t.name))
+    rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     by_type = {}
     total_principal = Decimal("0")
@@ -462,14 +465,14 @@ def investment_maturity_alerts(conn, args):
     cutoff = (date.today() + timedelta(days=days)).isoformat()
     today = date.today().isoformat()
 
-    rows = conn.execute(
-        """SELECT * FROM investment
-           WHERE company_id = ? AND status = 'active'
-             AND maturity_date IS NOT NULL
-             AND maturity_date <= ?
-           ORDER BY maturity_date""",
-        (args.company_id, cutoff),
-    ).fetchall()
+    t = Table("investment")
+    q = (Q.from_(t).select(t.star)
+         .where(t.company_id == P())
+         .where(t.status == "active")
+         .where(t.maturity_date.isnotnull())
+         .where(t.maturity_date <= P())
+         .orderby(t.maturity_date))
+    rows = conn.execute(q.get_sql(), (args.company_id, cutoff)).fetchall()
 
     alerts = []
     for r in rows:

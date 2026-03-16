@@ -112,6 +112,7 @@ def configure_delivery_sync(conn, args):
     params.append(_now_iso())
     params.append(connector_id)
     conn.execute(
+        # PyPika: skipped — dynamic UPDATE with variable columns
         f"UPDATE connv2_delivery_connector SET {', '.join(updates)} WHERE id = ?", params
     )
     audit(conn, SKILL, "integration-configure-delivery-sync", "connv2_delivery_connector", connector_id,
@@ -166,7 +167,9 @@ def sync_menu(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_delivery_connector SET last_sync_at = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_delivery_connector",
+                   data={"last_sync_at": P(), "updated_at": P()},
+                   where={"id": P()}),
         (now, now, connector_id)
     )
     audit(conn, SKILL, "integration-sync-menu", "connv2_delivery_connector", connector_id,
@@ -194,7 +197,9 @@ def update_order_status(conn, args):
 
     now = _now_iso()
     conn.execute(
-        "UPDATE connv2_delivery_order SET order_status = ?, updated_at = ? WHERE id = ?",
+        update_row("connv2_delivery_order",
+                   data={"order_status": P(), "updated_at": P()},
+                   where={"id": P()}),
         (new_status, now, order_id)
     )
     audit(conn, SKILL, "integration-update-order-status", "connv2_delivery_order", order_id,
@@ -208,6 +213,7 @@ def update_order_status(conn, args):
 # 6. list-delivery-syncs
 # ===========================================================================
 def list_delivery_syncs(conn, args):
+    # PyPika: skipped — dynamic WHERE with LEFT JOIN
     where, params = ["1=1"], []
     if getattr(args, "company_id", None):
         where.append("o.company_id = ?")
@@ -241,6 +247,7 @@ def list_delivery_syncs(conn, args):
 # 7. delivery-revenue-report
 # ===========================================================================
 def delivery_revenue_report(conn, args):
+    # PyPika: skipped — complex aggregate JOIN with CAST report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform,
@@ -264,6 +271,7 @@ def delivery_revenue_report(conn, args):
 # 8. delivery-platform-comparison
 # ===========================================================================
 def delivery_platform_comparison(conn, args):
+    # PyPika: skipped — complex aggregate JOIN with CASE report
     _validate_company(conn, args.company_id)
     rows = conn.execute("""
         SELECT c.platform,

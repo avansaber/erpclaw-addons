@@ -13,7 +13,7 @@ from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-advmfg"
 
@@ -41,12 +41,13 @@ def add_recipe(conn, args):
     recipe_id = str(uuid.uuid4())
     ns = get_next_name(conn, "process_recipe", company_id=args.company_id)
 
-    conn.execute(
-        """INSERT INTO process_recipe
-           (id, naming_series, name, product_name, recipe_type, version,
-            batch_size, batch_unit, expected_yield, description,
-            instructions, is_active, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+    sql, _ = insert_row("process_recipe", {
+        "id": P(), "naming_series": P(), "name": P(), "product_name": P(),
+        "recipe_type": P(), "version": P(), "batch_size": P(), "batch_unit": P(),
+        "expected_yield": P(), "description": P(), "instructions": P(),
+        "is_active": P(), "company_id": P(),
+    })
+    conn.execute(sql,
         (
             recipe_id, ns, args.name, args.product_name, recipe_type,
             getattr(args, "version", None) or "1.0",
@@ -55,6 +56,7 @@ def add_recipe(conn, args):
             getattr(args, "expected_yield", None) or "100",
             getattr(args, "description", None),
             getattr(args, "instructions", None),
+            1,
             args.company_id,
         ),
     )
@@ -75,7 +77,7 @@ def update_recipe(conn, args):
     if not row:
         err(f"Recipe {recipe_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("name", "name"),
@@ -89,32 +91,27 @@ def update_recipe(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     rt = getattr(args, "recipe_type", None)
     if rt is not None:
         if rt not in VALID_RECIPE_TYPES:
             err(f"Invalid recipe-type: {rt}")
-        updates.append("recipe_type = ?")
-        params.append(rt)
+        data["recipe_type"] = rt
         changed.append("recipe_type")
 
     ia = getattr(args, "is_active", None)
     if ia is not None:
-        updates.append("is_active = ?")
-        params.append(int(ia))
+        data["is_active"] = int(ia)
         changed.append("is_active")
 
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(recipe_id)
-    conn.execute(
-        f"UPDATE process_recipe SET {', '.join(updates)} WHERE id = ?", params
-    )
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("process_recipe", data, {"id": recipe_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "update-recipe", "process_recipe", recipe_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -147,36 +144,42 @@ def get_recipe(conn, args):
 # list-recipes
 # ---------------------------------------------------------------------------
 def list_recipes(conn, args):
-    conditions, params = [], []
+    t = Table("process_recipe")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     company_id = getattr(args, "company_id", None)
     if company_id:
-        conditions.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(company_id)
     recipe_type = getattr(args, "recipe_type", None)
     if recipe_type:
-        conditions.append("recipe_type = ?")
+        q = q.where(t.recipe_type == P())
+        q_cnt = q_cnt.where(t.recipe_type == P())
         params.append(recipe_type)
     product_name = getattr(args, "product_name", None)
     if product_name:
-        conditions.append("product_name LIKE ?")
+        like = LiteralValue("?")
+        q = q.where(t.product_name.like(like))
+        q_cnt = q_cnt.where(t.product_name.like(like))
         params.append(f"%{product_name}%")
     search = getattr(args, "search", None)
     if search:
-        conditions.append("(name LIKE ? OR product_name LIKE ? OR description LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.product_name.like(like)) | (t.description.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limit = getattr(args, "limit", 50) or 50
     offset = getattr(args, "offset", 0) or 0
 
-    total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM process_recipe {where}", params
-    ).fetchone()["cnt"]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
 
-    rows = conn.execute(
-        f"SELECT * FROM process_recipe {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
 
     recipes = []
     for r in rows:
@@ -237,7 +240,7 @@ def update_recipe_ingredient(conn, args):
     if not row:
         err(f"Ingredient {ingredient_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
 
     for field, attr in [
         ("ingredient_name", "ingredient_name"),
@@ -248,29 +251,24 @@ def update_recipe_ingredient(conn, args):
     ]:
         val = getattr(args, attr, None)
         if val is not None:
-            updates.append(f"{field} = ?")
-            params.append(val)
+            data[field] = val
             changed.append(field)
 
     seq = getattr(args, "sequence", None)
     if seq is not None:
-        updates.append("sequence = ?")
-        params.append(int(seq))
+        data["sequence"] = int(seq)
         changed.append("sequence")
 
     opt = getattr(args, "is_optional", None)
     if opt is not None:
-        updates.append("is_optional = ?")
-        params.append(int(opt))
+        data["is_optional"] = int(opt)
         changed.append("is_optional")
 
     if not changed:
         err("No fields to update")
 
-    params.append(ingredient_id)
-    conn.execute(
-        f"UPDATE recipe_ingredient SET {', '.join(updates)} WHERE id = ?", params
-    )
+    sql, params = dynamic_update("recipe_ingredient", data, {"id": ingredient_id})
+    conn.execute(sql, params)
     audit(conn, SKILL, "update-recipe-ingredient", "recipe_ingredient", ingredient_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -333,12 +331,13 @@ def clone_recipe(conn, args):
         Decimal(source.get("version") or "1.0") + Decimal("0.1")
     )
 
-    conn.execute(
-        """INSERT INTO process_recipe
-           (id, naming_series, name, product_name, recipe_type, version,
-            batch_size, batch_unit, expected_yield, description,
-            instructions, is_active, company_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+    clone_sql, _ = insert_row("process_recipe", {
+        "id": P(), "naming_series": P(), "name": P(), "product_name": P(),
+        "recipe_type": P(), "version": P(), "batch_size": P(), "batch_unit": P(),
+        "expected_yield": P(), "description": P(), "instructions": P(),
+        "is_active": P(), "company_id": P(),
+    })
+    conn.execute(clone_sql,
         (
             new_id, ns,
             source["name"] + " (Clone)",
@@ -350,6 +349,7 @@ def clone_recipe(conn, args):
             source.get("expected_yield") or "100",
             source.get("description"),
             source.get("instructions"),
+            1,
             source["company_id"],
         ),
     )
@@ -415,8 +415,9 @@ def calculate_recipe_cost(conn, args):
         unit_cost = Decimal("0")
         if ing_data.get("item_id"):
             # Try to look up item valuation rate from item table
+            item_t = Table("item")
             item_row = conn.execute(
-                "SELECT valuation_rate FROM item WHERE id = ?",
+                Q.from_(item_t).select(item_t.valuation_rate).where(item_t.id == P()).get_sql(),
                 (ing_data["item_id"],),
             ).fetchone()
             if item_row and item_row["valuation_rate"]:

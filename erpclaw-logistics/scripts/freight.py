@@ -15,7 +15,8 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import create_purchase_invoice, CrossSkillError
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_carrier_invoice", "CINV-")
 except ImportError:
@@ -69,12 +70,11 @@ def add_freight_charge(conn, args):
 
     charge_id = str(uuid.uuid4())
 
-    conn.execute("""
-        INSERT INTO logistics_freight_charge (
-            id, shipment_id, charge_type, description, amount,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_freight_charge", {
+        "id": P(), "shipment_id": P(), "charge_type": P(), "description": P(),
+        "amount": P(), "company_id": P(), "created_at": P(),
+    })
+    conn.execute(sql, (
         charge_id, shipment_id, charge_type,
         getattr(args, "description", None),
         amount, company_id, _now_iso(),
@@ -92,27 +92,28 @@ def add_freight_charge(conn, args):
 # 2. list-freight-charges
 # ===========================================================================
 def list_freight_charges(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_freight_charge")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     shipment_id = getattr(args, "shipment_id", None)
     if shipment_id:
-        where.append("shipment_id = ?")
+        q = q.where(t.shipment_id == P())
+        q_cnt = q_cnt.where(t.shipment_id == P())
         params.append(shipment_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "charge_type", None):
-        where.append("charge_type = ?")
+        q = q.where(t.charge_type == P())
+        q_cnt = q_cnt.where(t.charge_type == P())
         params.append(args.charge_type)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_freight_charge WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_freight_charge WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -136,10 +137,10 @@ def allocate_freight(conn, args):
     total = sum(Decimal(c[1] or "0") for c in charges)
 
     # Update shipment shipping_cost with total freight
-    conn.execute(
-        "UPDATE logistics_shipment SET shipping_cost = ?, updated_at = datetime('now') WHERE id = ?",
-        (str(total), shipment_id)
-    )
+    sql, upd_params = dynamic_update("logistics_shipment",
+        {"shipping_cost": str(total), "updated_at": LiteralValue("datetime('now')")},
+        {"id": shipment_id})
+    conn.execute(sql, upd_params)
     audit(conn, SKILL, "logistics-allocate-freight", "logistics_shipment", shipment_id,
           new_values={"shipping_cost": str(total), "charge_count": len(charges)})
     conn.commit()
@@ -175,13 +176,12 @@ def add_carrier_invoice(conn, args):
     naming = get_next_name(conn, "logistics_carrier_invoice", company_id=company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO logistics_carrier_invoice (
-            id, naming_series, carrier_id, invoice_number, invoice_date,
-            total_amount, invoice_status, shipment_count,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("logistics_carrier_invoice", {
+        "id": P(), "naming_series": P(), "carrier_id": P(), "invoice_number": P(),
+        "invoice_date": P(), "total_amount": P(), "invoice_status": P(),
+        "shipment_count": P(), "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         invoice_id, naming, carrier_id,
         getattr(args, "invoice_number", None),
         getattr(args, "invoice_date", None),
@@ -203,26 +203,27 @@ def add_carrier_invoice(conn, args):
 # 5. list-carrier-invoices
 # ===========================================================================
 def list_carrier_invoices(conn, args):
-    where, params = ["1=1"], []
+    t = Table("logistics_carrier_invoice")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star).as_("cnt"))
+    params = []
+
     if getattr(args, "carrier_id", None):
-        where.append("carrier_id = ?")
+        q = q.where(t.carrier_id == P())
+        q_cnt = q_cnt.where(t.carrier_id == P())
         params.append(args.carrier_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "invoice_status", None):
-        where.append("invoice_status = ?")
+        q = q.where(t.invoice_status == P())
+        q_cnt = q_cnt.where(t.invoice_status == P())
         params.append(args.invoice_status)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM logistics_carrier_invoice WHERE {where_sql}", params
-    ).fetchone()[0]
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM logistics_carrier_invoice WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -309,12 +310,10 @@ def verify_carrier_invoice(conn, args):
 
     # Update carrier invoice: set status to verified and store PI link
     now = _now_iso()
-    conn.execute(
-        "UPDATE logistics_carrier_invoice "
-        "SET invoice_status = 'verified', purchase_invoice_id = ?, updated_at = ? "
-        "WHERE id = ?",
-        (purchase_invoice_id, now, invoice_id),
-    )
+    sql = update_row("logistics_carrier_invoice",
+        data={"invoice_status": P(), "purchase_invoice_id": P(), "updated_at": P()},
+        where={"id": P()})
+    conn.execute(sql, ("verified", purchase_invoice_id, now, invoice_id))
     audit(conn, SKILL, "logistics-verify-carrier-invoice", "logistics_carrier_invoice", invoice_id,
           new_values={
               "invoice_status": "verified",
@@ -341,25 +340,37 @@ def freight_cost_analysis_report(conn, args):
     _validate_company(conn, company_id)
 
     # Total freight charges by type
+    # PyPika: skipped — CAST(amount AS REAL) aggregate
     by_type = {}
+    t_fc = Table("logistics_freight_charge")
     rows = conn.execute(
-        "SELECT charge_type, COUNT(*) as cnt, SUM(CAST(amount AS REAL)) as total "
-        "FROM logistics_freight_charge WHERE company_id = ? GROUP BY charge_type",
+        Q.from_(t_fc).select(
+            t_fc.charge_type, fn.Count(t_fc.star).as_("cnt"),
+            LiteralValue("SUM(CAST(amount AS REAL))").as_("total")
+        ).where(t_fc.company_id == P()).groupby(t_fc.charge_type).get_sql(),
         (company_id,)
     ).fetchall()
     for r in rows:
         by_type[r[0]] = {"count": r[1], "total": str(round(Decimal(str(r[2] or 0)), 2))}
 
     # Total carrier invoices
+    t_ci = Table("logistics_carrier_invoice")
     invoice_total = conn.execute(
-        "SELECT COUNT(*), SUM(CAST(total_amount AS REAL)) FROM logistics_carrier_invoice "
-        "WHERE company_id = ?", (company_id,)
+        Q.from_(t_ci).select(
+            fn.Count(t_ci.star),
+            LiteralValue("SUM(CAST(total_amount AS REAL))")
+        ).where(t_ci.company_id == P()).get_sql(),
+        (company_id,)
     ).fetchone()
 
     # Total shipment shipping costs
+    t_ship = Table("logistics_shipment")
     ship_total = conn.execute(
-        "SELECT COUNT(*), SUM(CAST(shipping_cost AS REAL)) FROM logistics_shipment "
-        "WHERE company_id = ? AND shipping_cost IS NOT NULL", (company_id,)
+        Q.from_(t_ship).select(
+            fn.Count(t_ship.star),
+            LiteralValue("SUM(CAST(shipping_cost AS REAL))")
+        ).where(t_ship.company_id == P()).where(t_ship.shipping_cost.isnotnull()).get_sql(),
+        (company_id,)
     ).fetchone()
 
     ok({

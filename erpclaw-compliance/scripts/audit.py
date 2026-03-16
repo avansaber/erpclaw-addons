@@ -14,7 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
 except ImportError:
     pass
 
@@ -57,13 +57,13 @@ def add_audit_plan(conn, args):
     plan_id = str(uuid.uuid4())
     naming = get_next_name(conn, "audit_plan", company_id=args.company_id)
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO audit_plan (
-            id, naming_series, name, audit_type, scope, lead_auditor,
-            planned_start, planned_end, status, notes,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("audit_plan", {
+        "id": P(), "naming_series": P(), "name": P(), "audit_type": P(),
+        "scope": P(), "lead_auditor": P(), "planned_start": P(),
+        "planned_end": P(), "status": P(), "notes": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         plan_id, naming, name, audit_type,
         getattr(args, "scope", None),
         getattr(args, "lead_auditor", None),
@@ -88,7 +88,7 @@ def update_audit_plan(conn, args):
     if not conn.execute(Q.from_(Table("audit_plan")).select(Field('id')).where(Field("id") == P()).get_sql(), (plan_id,)).fetchone():
         err(f"Audit plan {plan_id} not found")
 
-    updates, params, changed = [], [], []
+    data, changed = {}, []
     for arg_name, col_name in {
         "name": "name",
         "scope": "scope",
@@ -99,23 +99,21 @@ def update_audit_plan(conn, args):
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     audit_type = getattr(args, "audit_type", None)
     if audit_type is not None:
         _validate_enum(audit_type, VALID_AUDIT_TYPES, "audit-type")
-        updates.append("audit_type = ?")
-        params.append(audit_type)
+        data["audit_type"] = audit_type
         changed.append("audit_type")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
-    params.append(plan_id)
-    conn.execute(f"UPDATE audit_plan SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = LiteralValue("datetime('now')")
+    sql, params = dynamic_update("audit_plan", data, {"id": plan_id})
+    conn.execute(sql, params)
     audit(conn, "audit_plan", plan_id, "compliance-update-audit-plan", None, {"updated_fields": changed})
     conn.commit()
     ok({"id": plan_id, "updated_fields": changed})
@@ -134,13 +132,16 @@ def get_audit_plan(conn, args):
     data = row_to_dict(row)
 
     # Enrich: finding counts
-    finding_counts = conn.execute("""
-        SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN remediation_status = 'open' THEN 1 ELSE 0 END) as open_count,
-            SUM(CASE WHEN finding_type = 'critical' THEN 1 ELSE 0 END) as critical_count
-        FROM audit_finding WHERE audit_plan_id = ?
-    """, (plan_id,)).fetchone()
+    from erpclaw_lib.query import Case
+    af = Table("audit_finding")
+    finding_counts = conn.execute(
+        Q.from_(af).select(
+            fn.Count(af.star).as_("total"),
+            fn.Sum(Case().when(af.remediation_status == "open", 1).else_(0)).as_("open_count"),
+            fn.Sum(Case().when(af.finding_type == "critical", 1).else_(0)).as_("critical_count"),
+        ).where(af.audit_plan_id == P()).get_sql(),
+        (plan_id,),
+    ).fetchone()
     data["finding_count"] = finding_counts[0]
     data["open_findings"] = finding_counts[1]
     data["critical_findings"] = finding_counts[2]
@@ -151,24 +152,30 @@ def get_audit_plan(conn, args):
 # 4. list-audit-plans
 # ---------------------------------------------------------------------------
 def list_audit_plans(conn, args):
-    where, params = ["1=1"], []
+    t = Table("audit_plan")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "status", None):
-        where.append("status = ?")
+        q = q.where(t.status == P())
+        q_cnt = q_cnt.where(t.status == P())
         params.append(args.status)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR scope LIKE ?)")
+        like = LiteralValue("?")
+        crit = (t.name.like(like)) | (t.scope.like(like))
+        q = q.where(crit)
+        q_cnt = q_cnt.where(crit)
         params.extend([f"%{args.search}%", f"%{args.search}%"])
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM audit_plan WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM audit_plan WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
@@ -191,10 +198,10 @@ def start_audit(conn, args):
         err(f"Cannot start audit in status '{current_status}'. Must be draft or scheduled.")
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE audit_plan SET status = 'in_progress', actual_start = ?, updated_at = ? WHERE id = ?",
-        (now, now, plan_id)
-    )
+    sql = update_row("audit_plan",
+                     data={"status": P(), "actual_start": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("in_progress", now, now, plan_id))
     audit(conn, "audit_plan", plan_id, "compliance-start-audit", None)
     conn.commit()
     ok({"id": plan_id, "plan_status": "in_progress", "actual_start": now})
@@ -215,10 +222,10 @@ def complete_audit(conn, args):
         err(f"Cannot complete audit in status '{current_status}'. Must be in_progress.")
 
     now = _now_iso()
-    conn.execute(
-        "UPDATE audit_plan SET status = 'completed', actual_end = ?, updated_at = ? WHERE id = ?",
-        (now, now, plan_id)
-    )
+    sql = update_row("audit_plan",
+                     data={"status": P(), "actual_end": P(), "updated_at": P()},
+                     where={"id": P()})
+    conn.execute(sql, ("completed", now, now, plan_id))
     audit(conn, "audit_plan", plan_id, "compliance-complete-audit", None)
     conn.commit()
     ok({"id": plan_id, "plan_status": "completed", "actual_end": now})
@@ -245,14 +252,14 @@ def add_audit_finding(conn, args):
 
     finding_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO audit_finding (
-            id, audit_plan_id, finding_type, title, description,
-            area, root_cause, recommendation, management_response,
-            remediation_due, remediation_status, assigned_to,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("audit_finding", {
+        "id": P(), "audit_plan_id": P(), "finding_type": P(), "title": P(),
+        "description": P(), "area": P(), "root_cause": P(),
+        "recommendation": P(), "management_response": P(),
+        "remediation_due": P(), "remediation_status": P(), "assigned_to": P(),
+        "company_id": P(), "created_at": P(), "updated_at": P(),
+    })
+    conn.execute(sql, (
         finding_id, audit_plan_id, finding_type, title,
         getattr(args, "description", None),
         getattr(args, "area", None),
@@ -273,27 +280,32 @@ def add_audit_finding(conn, args):
 # 8. list-audit-findings
 # ---------------------------------------------------------------------------
 def list_audit_findings(conn, args):
-    where, params = ["1=1"], []
+    t = Table("audit_finding")
+    q = Q.from_(t).select(t.star)
+    q_cnt = Q.from_(t).select(fn.Count(t.star))
+    params = []
+
     if getattr(args, "audit_plan_id", None):
-        where.append("audit_plan_id = ?")
+        q = q.where(t.audit_plan_id == P())
+        q_cnt = q_cnt.where(t.audit_plan_id == P())
         params.append(args.audit_plan_id)
     if getattr(args, "company_id", None):
-        where.append("company_id = ?")
+        q = q.where(t.company_id == P())
+        q_cnt = q_cnt.where(t.company_id == P())
         params.append(args.company_id)
     if getattr(args, "finding_type", None):
-        where.append("finding_type = ?")
+        q = q.where(t.finding_type == P())
+        q_cnt = q_cnt.where(t.finding_type == P())
         params.append(args.finding_type)
     if getattr(args, "remediation_status", None):
-        where.append("remediation_status = ?")
+        q = q.where(t.remediation_status == P())
+        q_cnt = q_cnt.where(t.remediation_status == P())
         params.append(args.remediation_status)
 
-    where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM audit_finding WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()[0]
     params.extend([args.limit, args.offset])
-    rows = conn.execute(
-        f"SELECT * FROM audit_finding WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params
-    ).fetchall()
+    q = q.orderby(t.created_at, order=Order.desc).limit(P()).offset(P())
+    rows = conn.execute(q.get_sql(), params).fetchall()
     ok({
         "rows": [row_to_dict(r) for r in rows],
         "total_count": total, "limit": args.limit, "offset": args.offset,
