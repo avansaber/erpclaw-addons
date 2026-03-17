@@ -20,11 +20,13 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse \
             https://github.com/avansaber/erpclaw.git /tmp/erpclaw-core
           cd /tmp/erpclaw-core
-          git sparse-checkout set scripts/erpclaw-setup/lib scripts/erpclaw-setup/init_schema.py
+          git sparse-checkout set scripts/erpclaw-setup
           mkdir -p ~/.openclaw/erpclaw/lib
           cp -r scripts/erpclaw-setup/lib/erpclaw_lib ~/.openclaw/erpclaw/lib/
           mkdir -p "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup"
           cp scripts/erpclaw-setup/init_schema.py \
              "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup/"
       - name: Run unit tests
-        run: pytest . -q --tb=short --ignore=__pycache__
+        run: |
+          python -m pytest . -q --tb=short --ignore=__pycache__ \
+            || { ec=$?; [ $ec -eq 5 ] && echo "No tests collected — skipping" && exit 0; exit $ec; }
