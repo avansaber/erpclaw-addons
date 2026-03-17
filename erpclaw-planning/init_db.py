@@ -13,9 +13,8 @@ DB_PATH = os.environ.get("ERPCLAW_DB_PATH", os.path.expanduser("~/.openclaw/erpc
 def init_planning_schema(db_path: str = DB_PATH) -> dict:
     """Create planning tables and indexes."""
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     tables_created = 0
     indexes_created = 0
@@ -40,8 +39,8 @@ def init_planning_schema(db_path: str = DB_PATH) -> dict:
             status              TEXT NOT NULL DEFAULT 'draft'
                                 CHECK(status IN ('draft','active','approved','locked','archived')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -67,7 +66,7 @@ def init_planning_schema(db_path: str = DB_PATH) -> dict:
             amount              TEXT NOT NULL DEFAULT '0',
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -96,8 +95,8 @@ def init_planning_schema(db_path: str = DB_PATH) -> dict:
             status              TEXT NOT NULL DEFAULT 'draft'
                                 CHECK(status IN ('draft','active','locked','archived')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -125,7 +124,7 @@ def init_planning_schema(db_path: str = DB_PATH) -> dict:
             variance_pct        TEXT DEFAULT '0',
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

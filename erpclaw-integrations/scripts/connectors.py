@@ -184,7 +184,7 @@ def list_connectors(conn, args):
         params.append(connector_status)
     search = getattr(args, "search", None)
     if search:
-        where.append("(name LIKE ? OR platform LIKE ?)")
+        where.append("(LOWER(name) LIKE LOWER(?) OR LOWER(platform) LIKE LOWER(?))")
         params.extend([f"%{search}%", f"%{search}%"])
 
     clause = (" WHERE " + " AND ".join(where)) if where else ""

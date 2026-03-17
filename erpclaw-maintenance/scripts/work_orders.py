@@ -208,7 +208,7 @@ def list_maintenance_work_orders(conn, args):
         where.append("wo.plan_id = ?")
         params.append(plan_id)
     if search:
-        where.append("(wo.description LIKE ? OR e.name LIKE ?)")
+        where.append("(LOWER(wo.description) LIKE LOWER(?) OR LOWER(e.name) LIKE LOWER(?))")
         params.extend([f"%{search}%"] * 2)
 
     where_sql = " AND ".join(where) if where else "1=1"
@@ -380,7 +380,7 @@ def complete_maintenance_work_order(conn, args):
     woi = Table("maintenance_work_order_item")
     items_cost_row = conn.execute(
         Q.from_(woi).select(
-            fn.Coalesce(fn.Sum(LiteralValue("CAST(\"total_cost\" AS REAL)")), 0)
+            fn.Coalesce(fn.Sum(LiteralValue("CAST(\"total_cost\" AS NUMERIC)")), 0)
         ).where(woi.work_order_id == P()).get_sql(),
         (wo_id,),
     ).fetchone()

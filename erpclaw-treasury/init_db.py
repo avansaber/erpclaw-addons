@@ -18,9 +18,8 @@ DB_PATH = os.environ.get(
 def init_treasury_schema(db_path: str = DB_PATH) -> dict:
     """Create treasury module tables and indexes."""
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     tables_created = 0
     indexes_created = 0
@@ -45,8 +44,8 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
             is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -62,14 +61,14 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
         CREATE TABLE IF NOT EXISTS cash_position (
             id                  TEXT PRIMARY KEY,
             naming_series       TEXT,
-            position_date       TEXT NOT NULL DEFAULT (date('now')),
+            position_date       TEXT NOT NULL DEFAULT CURRENT_DATE,
             total_cash          TEXT NOT NULL DEFAULT '0',
             total_receivables   TEXT NOT NULL DEFAULT '0',
             total_payables      TEXT NOT NULL DEFAULT '0',
             net_position        TEXT NOT NULL DEFAULT '0',
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -85,7 +84,7 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
             id                  TEXT PRIMARY KEY,
             naming_series       TEXT,
             forecast_name       TEXT NOT NULL,
-            forecast_date       TEXT NOT NULL DEFAULT (date('now')),
+            forecast_date       TEXT NOT NULL DEFAULT CURRENT_DATE,
             period_start        TEXT NOT NULL,
             period_end          TEXT NOT NULL,
             expected_inflows    TEXT NOT NULL DEFAULT '0',
@@ -95,8 +94,8 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
             forecast_type       TEXT NOT NULL DEFAULT 'short_term'
                                 CHECK(forecast_type IN ('short_term','medium_term','long_term')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -127,8 +126,8 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
                                 CHECK(status IN ('active','matured','redeemed','cancelled')),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -147,12 +146,12 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
             investment_id       TEXT NOT NULL REFERENCES investment(id) ON DELETE RESTRICT,
             transaction_type    TEXT NOT NULL DEFAULT 'purchase'
                                 CHECK(transaction_type IN ('purchase','interest','dividend','redemption','fee','transfer')),
-            transaction_date    TEXT NOT NULL DEFAULT (date('now')),
+            transaction_date    TEXT NOT NULL DEFAULT CURRENT_DATE,
             amount              TEXT NOT NULL DEFAULT '0',
             reference           TEXT,
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -171,14 +170,14 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
             from_company_id     TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
             to_company_id       TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
             amount              TEXT NOT NULL DEFAULT '0',
-            transfer_date       TEXT NOT NULL DEFAULT (date('now')),
+            transfer_date       TEXT NOT NULL DEFAULT CURRENT_DATE,
             reference           TEXT,
             reason              TEXT,
             status              TEXT NOT NULL DEFAULT 'draft'
                                 CHECK(status IN ('draft','approved','completed','cancelled')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -196,7 +195,7 @@ def init_treasury_schema(db_path: str = DB_PATH) -> dict:
         CREATE TABLE IF NOT EXISTS cash_flow_forecast (
             id              TEXT PRIMARY KEY,
             forecast_date   TEXT NOT NULL,
-            generated_at    TEXT DEFAULT (datetime('now')),
+            generated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
             horizon_days    INTEGER NOT NULL DEFAULT 30,
             starting_balance TEXT NOT NULL DEFAULT '0',
             projected_inflows TEXT,

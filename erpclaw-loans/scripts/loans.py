@@ -799,7 +799,7 @@ def handle_generate_repayment_schedule(conn, args):
         # Sum principal already paid
         paid_principal_row = conn.execute(
             Q.from_(rs).select(
-                LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS REAL)),0)").as_("paid_principal"))
+                LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
             .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
             (loan_id,)).fetchone()
         total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
@@ -836,7 +836,7 @@ def handle_generate_repayment_schedule(conn, args):
     # Recalculate total interest on the loan
     total_interest_row = conn.execute(
         Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS REAL)),0)").as_("total_interest"))
+            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
         .where(rs.loan_id == P()).get_sql(),
         (loan_id,)).fetchone()
     total_interest_str = str(round_currency(to_decimal(str(total_interest_row["total_interest"]))))
@@ -913,7 +913,7 @@ def handle_restructure_loan(conn, args):
     # Determine remaining principal
     paid_principal_row = conn.execute(
         Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS REAL)),0)").as_("paid_principal"))
+            LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
         .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
         (loan_id,)).fetchone()
     total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
@@ -976,7 +976,7 @@ def handle_restructure_loan(conn, args):
 
     total_interest_row = conn.execute(
         Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS REAL)),0)").as_("total_interest"))
+            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
         .where(rs.loan_id == P()).get_sql(),
         (loan_id,)).fetchone()
     total_interest_str = str(round_currency(

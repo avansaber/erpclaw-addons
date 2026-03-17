@@ -21,9 +21,8 @@ REQUIRED_FOUNDATION = [
 def create_selfservice_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -59,8 +58,8 @@ def create_selfservice_tables(db_path=None):
             field_visibility TEXT DEFAULT '{}',
             is_active       INTEGER NOT NULL DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -81,7 +80,7 @@ def create_selfservice_tables(db_path=None):
             assignment_status TEXT NOT NULL DEFAULT 'active'
                             CHECK(assignment_status IN ('active','revoked')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -109,8 +108,8 @@ def create_selfservice_tables(db_path=None):
             session_timeout_minutes INTEGER NOT NULL DEFAULT 60,
             is_active       INTEGER NOT NULL DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -137,7 +136,7 @@ def create_selfservice_tables(db_path=None):
             expires_at      TEXT NOT NULL,
             last_activity_at TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -165,7 +164,7 @@ def create_selfservice_tables(db_path=None):
                             CHECK(result IN ('allowed','denied','error')),
             ip_address      TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

@@ -20,7 +20,8 @@ REQUIRED_FOUNDATION = ["company", "naming_series", "audit_log"]
 
 def create_compliance_tables(db_path):
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys=ON")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # Verify ERPClaw foundation
     tables = [r[0] for r in conn.execute(
@@ -58,8 +59,8 @@ def create_compliance_tables(db_path):
                 CHECK(status IN ('draft','scheduled','in_progress','completed','cancelled')),
             notes TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_plan_company ON audit_plan(company_id);
@@ -82,8 +83,8 @@ def create_compliance_tables(db_path):
                 CHECK(remediation_status IN ('open','in_progress','remediated','verified','overdue','accepted')),
             assigned_to TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_finding_plan ON audit_finding(audit_plan_id);
@@ -112,8 +113,8 @@ def create_compliance_tables(db_path):
                 CHECK(status IN ('identified','assessed','mitigating','monitoring','closed','accepted')),
             review_date TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_risk_register_company ON risk_register(company_id);
@@ -124,14 +125,14 @@ def create_compliance_tables(db_path):
         CREATE TABLE IF NOT EXISTS risk_assessment (
             id TEXT PRIMARY KEY,
             risk_id TEXT NOT NULL REFERENCES risk_register(id) ON DELETE RESTRICT,
-            assessment_date TEXT NOT NULL DEFAULT (date('now')),
+            assessment_date TEXT NOT NULL DEFAULT CURRENT_DATE,
             assessor TEXT,
             likelihood INTEGER NOT NULL CHECK(likelihood BETWEEN 1 AND 5),
             impact INTEGER NOT NULL CHECK(impact BETWEEN 1 AND 5),
             score INTEGER,
             notes TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_risk_assessment_risk ON risk_assessment(risk_id);
@@ -148,7 +149,7 @@ def create_compliance_tables(db_path):
                 CHECK(control_type IN ('preventive','detective','corrective','compensating')),
             frequency TEXT NOT NULL DEFAULT 'quarterly'
                 CHECK(frequency IN ('continuous','daily','weekly','monthly','quarterly','semi_annual','annual')),
-            test_date TEXT NOT NULL DEFAULT (date('now')),
+            test_date TEXT NOT NULL DEFAULT CURRENT_DATE,
             tester TEXT,
             test_procedure TEXT,
             test_result TEXT NOT NULL DEFAULT 'not_tested'
@@ -158,8 +159,8 @@ def create_compliance_tables(db_path):
             remediation_plan TEXT,
             next_test_date TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_control_test_company ON control_test(company_id);
@@ -181,8 +182,8 @@ def create_compliance_tables(db_path):
             completed_date TEXT,
             notes TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_compliance_calendar_company ON compliance_calendar(company_id);
@@ -206,8 +207,8 @@ def create_compliance_tables(db_path):
                 CHECK(status IN ('draft','review','approved','published','retired')),
             requires_acknowledgment INTEGER NOT NULL DEFAULT 0 CHECK(requires_acknowledgment IN (0,1)),
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_policy_company ON policy(company_id);
@@ -219,11 +220,11 @@ def create_compliance_tables(db_path):
             policy_id TEXT NOT NULL REFERENCES policy(id) ON DELETE RESTRICT,
             employee_name TEXT NOT NULL,
             employee_id TEXT,
-            acknowledged_date TEXT NOT NULL DEFAULT (date('now')),
+            acknowledged_date TEXT NOT NULL DEFAULT CURRENT_DATE,
             ip_address TEXT,
             notes TEXT,
             company_id TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_policy_ack_policy ON policy_acknowledgment(policy_id);

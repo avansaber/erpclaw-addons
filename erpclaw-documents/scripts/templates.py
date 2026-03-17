@@ -104,7 +104,9 @@ def update_template(conn, args):
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    from datetime import datetime, timezone
+    updates.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
     params.append(tpl_id)
     conn.execute(
         f"UPDATE document_template SET {', '.join(updates)} WHERE id = ?", params
@@ -150,7 +152,7 @@ def list_templates(conn, args):
         params.append(int(is_active))
     search = getattr(args, "search", None)
     if search:
-        conditions.append("(name LIKE ? OR description LIKE ?)")
+        conditions.append("(LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?))")
         params.extend([f"%{search}%", f"%{search}%"])
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

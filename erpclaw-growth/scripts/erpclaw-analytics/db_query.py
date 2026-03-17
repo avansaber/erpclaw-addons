@@ -29,7 +29,7 @@ from erpclaw_lib.dependencies import (
 from erpclaw_lib.validation import check_input_lengths
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs
-from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
+from erpclaw_lib.vendor.pypika.terms import ValueWrapper
 from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 
 
@@ -2245,7 +2245,7 @@ _PERF_QUERIES = [
     ("gl_entry_by_company", "SELECT * FROM gl_entry WHERE company_id = ?", ["x"]),
     ("gl_entry_by_voucher", "SELECT * FROM gl_entry WHERE voucher_type = ? AND voucher_no = ?", ["x", "x"]),
     ("gl_entry_by_account_date", "SELECT * FROM gl_entry WHERE account_id = ? AND posting_date BETWEEN ? AND ?", ["x", "2026-01-01", "2026-12-31"]),
-    ("gl_aggregate_by_account", "SELECT account_id, SUM(CAST(debit AS REAL)) as d, SUM(CAST(credit AS REAL)) as c FROM gl_entry WHERE company_id = ? AND posting_date <= ? GROUP BY account_id", ["x", "2026-12-31"]),
+    ("gl_aggregate_by_account", "SELECT account_id, SUM(CAST(debit AS NUMERIC)) as d, SUM(CAST(credit AS NUMERIC)) as c FROM gl_entry WHERE company_id = ? AND posting_date <= ? GROUP BY account_id", ["x", "2026-12-31"]),
     ("account_by_company", "SELECT * FROM account WHERE company_id = ?", ["x"]),
     ("account_by_root_type", "SELECT * FROM account WHERE company_id = ? AND root_type = ?", ["x", "Asset"]),
     ("sales_invoice_list", "SELECT * FROM sales_invoice WHERE company_id = ? AND docstatus = ? ORDER BY posting_date DESC LIMIT 50", ["x", "1"]),

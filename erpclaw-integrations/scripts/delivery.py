@@ -252,9 +252,9 @@ def delivery_revenue_report(conn, args):
     rows = conn.execute("""
         SELECT c.platform,
                COUNT(o.id) as total_orders,
-               COALESCE(SUM(CAST(o.total_amount AS REAL)), 0) as gross_revenue,
-               COALESCE(SUM(CAST(o.commission AS REAL)), 0) as total_commission,
-               COALESCE(SUM(CAST(o.net_amount AS REAL)), 0) as net_revenue
+               COALESCE(SUM(CAST(o.total_amount AS NUMERIC)), 0) as gross_revenue,
+               COALESCE(SUM(CAST(o.commission AS NUMERIC)), 0) as total_commission,
+               COALESCE(SUM(CAST(o.net_amount AS NUMERIC)), 0) as net_revenue
         FROM connv2_delivery_connector c
         LEFT JOIN connv2_delivery_order o ON c.id = o.connector_id
         WHERE c.company_id = ?
@@ -279,7 +279,7 @@ def delivery_platform_comparison(conn, args):
                COUNT(o.id) as total_orders,
                SUM(CASE WHEN o.order_status = 'delivered' THEN 1 ELSE 0 END) as delivered_orders,
                SUM(CASE WHEN o.order_status = 'cancelled' THEN 1 ELSE 0 END) as cancelled_orders,
-               COALESCE(SUM(CAST(o.net_amount AS REAL)), 0) as total_net
+               COALESCE(SUM(CAST(o.net_amount AS NUMERIC)), 0) as total_net
         FROM connv2_delivery_connector c
         LEFT JOIN connv2_delivery_order o ON c.id = o.connector_id
         WHERE c.company_id = ?

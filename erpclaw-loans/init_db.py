@@ -14,7 +14,8 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 
 def create_loans_tables(db_path):
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys=ON")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # Verify foundation exists
     tables = [r[0] for r in conn.execute(
@@ -44,7 +45,7 @@ def create_loans_tables(db_path):
             repayment_method TEXT NOT NULL DEFAULT 'equal_installment'
                             CHECK(repayment_method IN ('equal_installment','equal_principal','bullet','custom')),
             repayment_periods INTEGER NOT NULL DEFAULT 12,
-            application_date TEXT NOT NULL DEFAULT (date('now')),
+            application_date TEXT NOT NULL DEFAULT CURRENT_DATE,
             purpose         TEXT,
             collateral_description TEXT,
             collateral_value TEXT NOT NULL DEFAULT '0',
@@ -52,8 +53,8 @@ def create_loans_tables(db_path):
                             CHECK(status IN ('draft','applied','approved','rejected','cancelled')),
             rejection_reason TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_loan_app_status ON loan_application(status);
@@ -87,8 +88,8 @@ def create_loans_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'draft'
                             CHECK(status IN ('draft','disbursed','partially_repaid','repaid','written_off','closed')),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_loan_status ON loan(status);
@@ -109,8 +110,8 @@ def create_loans_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','partially_paid','paid','overdue','waived')),
             payment_date    TEXT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_lrs_loan ON loan_repayment_schedule(loan_id);
@@ -121,7 +122,7 @@ def create_loans_tables(db_path):
             id              TEXT PRIMARY KEY,
             naming_series   TEXT,
             loan_id         TEXT NOT NULL REFERENCES loan(id) ON DELETE RESTRICT,
-            repayment_date  TEXT NOT NULL DEFAULT (date('now')),
+            repayment_date  TEXT NOT NULL DEFAULT CURRENT_DATE,
             principal_amount TEXT NOT NULL DEFAULT '0',
             interest_amount TEXT NOT NULL DEFAULT '0',
             penalty_amount  TEXT NOT NULL DEFAULT '0',
@@ -134,8 +135,8 @@ def create_loans_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'draft'
                             CHECK(status IN ('draft','submitted','cancelled')),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_lr_loan ON loan_repayment(loan_id);
@@ -145,7 +146,7 @@ def create_loans_tables(db_path):
         CREATE TABLE IF NOT EXISTS loan_write_off (
             id              TEXT PRIMARY KEY,
             loan_id         TEXT NOT NULL REFERENCES loan(id) ON DELETE RESTRICT,
-            write_off_date  TEXT NOT NULL DEFAULT (date('now')),
+            write_off_date  TEXT NOT NULL DEFAULT CURRENT_DATE,
             write_off_amount TEXT NOT NULL DEFAULT '0',
             outstanding_at_write_off TEXT NOT NULL DEFAULT '0',
             reason          TEXT,
@@ -154,8 +155,8 @@ def create_loans_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'draft'
                             CHECK(status IN ('draft','submitted','cancelled')),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_lwo_loan ON loan_write_off(loan_id);

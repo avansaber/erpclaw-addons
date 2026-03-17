@@ -146,7 +146,7 @@ def list_email_campaigns(conn, args):
         where.append("campaign_status = ?")
         params.append(args.campaign_status_filter)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR subject LIKE ?)")
+        where.append("(LOWER(name) LIKE LOWER(?) OR LOWER(subject) LIKE LOWER(?))")
         params.extend([f"%{args.search}%"] * 2)
 
     where_sql = " AND ".join(where)

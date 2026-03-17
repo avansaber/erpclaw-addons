@@ -16,9 +16,8 @@ DB_PATH = os.environ.get("ERPCLAW_DB_PATH", os.path.expanduser("~/.openclaw/erpc
 def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
     """Create maintenance tables and indexes."""
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     tables_created = 0
     indexes_created = 0
@@ -48,8 +47,8 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
                                 CHECK(status IN ('operational','maintenance','breakdown','decommissioned')),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -72,10 +71,10 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
                             CHECK(reading_type IN ('meter','temperature','pressure','vibration','other')),
             reading_value   TEXT NOT NULL,
             reading_unit    TEXT,
-            reading_date    TEXT NOT NULL DEFAULT (datetime('now')),
+            reading_date    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             recorded_by     TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -107,8 +106,8 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             instructions        TEXT,
             is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -131,7 +130,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             quantity    TEXT NOT NULL DEFAULT '1',
             notes       TEXT,
             company_id  TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at  TEXT DEFAULT (datetime('now'))
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -166,8 +165,8 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             status              TEXT NOT NULL DEFAULT 'draft'
                                 CHECK(status IN ('draft','scheduled','in_progress','completed','cancelled')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -194,7 +193,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             total_cost      TEXT DEFAULT '0',
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -213,7 +212,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             work_order_id   TEXT NOT NULL REFERENCES maintenance_work_order(id) ON DELETE CASCADE,
             name            TEXT NOT NULL,
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -235,7 +234,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             completed_by    TEXT,
             notes           TEXT,
             sort_order      INTEGER NOT NULL DEFAULT 0,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -251,7 +250,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             id              TEXT PRIMARY KEY,
             equipment_id    TEXT NOT NULL REFERENCES equipment(id) ON DELETE RESTRICT,
             work_order_id   TEXT REFERENCES maintenance_work_order(id),
-            start_time      TEXT NOT NULL DEFAULT (datetime('now')),
+            start_time      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             end_time        TEXT,
             duration_hours  TEXT,
             reason          TEXT NOT NULL DEFAULT 'breakdown'
@@ -259,8 +258,8 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             description     TEXT,
             impact          TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -291,8 +290,8 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','expired','cancelled')),
             assigned_to     TEXT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -317,7 +316,7 @@ def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
             work_done       TEXT,
             status          TEXT NOT NULL DEFAULT 'scheduled'
                             CHECK(status IN ('scheduled','completed','cancelled')),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

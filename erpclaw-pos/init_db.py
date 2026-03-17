@@ -14,7 +14,8 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 
 def create_pos_tables(db_path):
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys=ON")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # Verify foundation exists
     tables = [r[0] for r in conn.execute(
@@ -42,8 +43,8 @@ def create_pos_tables(db_path):
             auto_print_receipt INTEGER NOT NULL DEFAULT 0 CHECK(auto_print_receipt IN (0,1)),
             is_active       INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_pos_profile_company ON pos_profile(company_id);
@@ -60,12 +61,12 @@ def create_pos_tables(db_path):
             total_sales     TEXT NOT NULL DEFAULT '0',
             total_returns   TEXT NOT NULL DEFAULT '0',
             transaction_count INTEGER NOT NULL DEFAULT 0,
-            opened_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            opened_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             closed_at       TEXT,
             status          TEXT NOT NULL DEFAULT 'open'
                             CHECK(status IN ('open','closing','closed','reconciled')),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_pos_session_status ON pos_session(status);
@@ -90,8 +91,8 @@ def create_pos_tables(db_path):
             status          TEXT NOT NULL DEFAULT 'draft'
                             CHECK(status IN ('draft','held','submitted','voided','returned')),
             company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_pos_txn_session ON pos_transaction(pos_session_id);
@@ -111,7 +112,7 @@ def create_pos_tables(db_path):
             discount_amount TEXT NOT NULL DEFAULT '0',
             amount          TEXT NOT NULL DEFAULT '0',
             uom             TEXT NOT NULL DEFAULT 'Nos',
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_pos_txn_item_txn ON pos_transaction_item(pos_transaction_id);
@@ -125,7 +126,7 @@ def create_pos_tables(db_path):
             amount          TEXT NOT NULL DEFAULT '0',
             reference       TEXT,
             payment_entry_id TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_pos_payment_txn ON pos_payment(pos_transaction_id);

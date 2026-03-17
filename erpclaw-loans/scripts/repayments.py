@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
 
 def _dec(val):
@@ -80,12 +80,11 @@ def handle_record_repayment(conn, args):
         new_status = "repaid"
         new_outstanding = Decimal("0")
 
-    conn.execute(
-        """UPDATE loan SET total_repaid = ?, outstanding_amount = ?,
-           status = ?, updated_at = datetime('now')
-           WHERE id = ?""",
-        (str(new_repaid), str(new_outstanding), new_status, loan_id),
-    )
+    sql, params_u = dynamic_update("loan",
+        {"total_repaid": str(new_repaid), "outstanding_amount": str(new_outstanding),
+         "status": new_status, "updated_at": now()},
+        where={"id": loan_id})
+    conn.execute(sql, params_u)
 
     # Update repayment schedule — mark earliest pending installments as paid
     if principal > 0:
@@ -108,7 +107,7 @@ def handle_record_repayment(conn, args):
             conn.execute(
                 """UPDATE loan_repayment_schedule
                    SET paid_amount = CAST(
-                       CAST(REPLACE(paid_amount, ',', '') AS REAL) + ? AS TEXT),
+                       CAST(REPLACE(paid_amount, ',', '') AS NUMERIC) + ? AS TEXT),
                        outstanding = ?, status = ?, payment_date = ?
                    WHERE id = ?""",
                 (float(pay), str(new_s_outstanding), s_status, repayment_date, sid),
@@ -274,11 +273,10 @@ def handle_write_off_loan(conn, args):
          reason, bad_debt_account_id, company_id),
     )
 
-    conn.execute(
-        """UPDATE loan SET outstanding_amount = '0', status = 'written_off',
-           updated_at = datetime('now') WHERE id = ?""",
-        (loan_id,),
-    )
+    sql, params_u = dynamic_update("loan",
+        {"outstanding_amount": "0", "status": "written_off", "updated_at": now()},
+        where={"id": loan_id})
+    conn.execute(sql, params_u)
 
     try:
         from erpclaw_lib.gl_posting import post_gl_entry

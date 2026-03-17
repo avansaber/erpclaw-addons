@@ -1,0 +1,30 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pytest
+        run: pip install pytest
+      - name: Setup erpclaw_lib and init_schema
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/avansaber/erpclaw.git /tmp/erpclaw-core
+          cd /tmp/erpclaw-core
+          git sparse-checkout set scripts/erpclaw-setup/lib scripts/erpclaw-setup/init_schema.py
+          mkdir -p ~/.openclaw/erpclaw/lib
+          cp -r scripts/erpclaw-setup/lib/erpclaw_lib ~/.openclaw/erpclaw/lib/
+          mkdir -p "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup"
+          cp scripts/erpclaw-setup/init_schema.py \
+             "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup/"
+      - name: Run unit tests
+        run: pytest . -q --tb=short --ignore=__pycache__

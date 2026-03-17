@@ -153,7 +153,7 @@ def handle_status(conn, args):
     ).fetchone()
 
     total_outstanding = conn.execute(
-        "SELECT COALESCE(SUM(CAST(outstanding_amount AS REAL)), 0) as total FROM loan"
+        "SELECT COALESCE(SUM(CAST(outstanding_amount AS NUMERIC)), 0) as total FROM loan"
         " WHERE status IN ('disbursed', 'partially_repaid')"
         + (" AND company_id = ?" if company_id else ""),
         params

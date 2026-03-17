@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.response import ok, err
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order
 
 SKILL = "erpclaw-maintenance"
 
@@ -70,7 +70,7 @@ def maintenance_cost_report(conn, args):
     rows = conn.execute(
         f"""SELECT e.name as equipment_name, wo.equipment_id,
                    COUNT(wo.id) as work_order_count,
-                   SUM(CAST(COALESCE(wo.actual_cost, '0') AS REAL)) as total_cost
+                   SUM(CAST(COALESCE(wo.actual_cost, '0') AS NUMERIC)) as total_cost
             FROM maintenance_work_order wo
             LEFT JOIN equipment e ON wo.equipment_id = e.id
             WHERE {where_sql}
@@ -191,7 +191,7 @@ def downtime_report(conn, args):
     rows = conn.execute(
         f"""SELECT e.name as equipment_name, dr.equipment_id,
                    COUNT(dr.id) as incident_count,
-                   SUM(CAST(COALESCE(dr.duration_hours, '0') AS REAL)) as total_hours
+                   SUM(CAST(COALESCE(dr.duration_hours, '0') AS NUMERIC)) as total_hours
             FROM downtime_record dr
             LEFT JOIN equipment e ON dr.equipment_id = e.id
             WHERE {where_sql}
@@ -234,8 +234,8 @@ def spare_parts_usage(conn, args):
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         f"""SELECT woi.item_name,
-                   SUM(CAST(woi.quantity AS REAL)) as total_quantity,
-                   SUM(CAST(woi.total_cost AS REAL)) as total_cost,
+                   SUM(CAST(woi.quantity AS NUMERIC)) as total_quantity,
+                   SUM(CAST(woi.total_cost AS NUMERIC)) as total_cost,
                    COUNT(DISTINCT woi.work_order_id) as used_in_orders
             FROM maintenance_work_order_item woi
             {where}

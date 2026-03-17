@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
 
 SKILL = "erpclaw-maintenance"
 
@@ -205,7 +205,7 @@ def list_maintenance_plans(conn, args):
         where.append("mp.is_active = ?")
         params.append(int(is_active_val))
     if search:
-        where.append("(mp.name LIKE ? OR e.name LIKE ?)")
+        where.append("(LOWER(mp.name) LIKE LOWER(?) OR LOWER(e.name) LIKE LOWER(?))")
         params.extend([f"%{search}%"] * 2)
 
     where_sql = " AND ".join(where) if where else "1=1"

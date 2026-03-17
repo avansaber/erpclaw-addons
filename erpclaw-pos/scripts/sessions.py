@@ -15,8 +15,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
-from erpclaw_lib.vendor.pypika.terms import LiteralValue
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
 SKILL = "erpclaw-pos"
 
@@ -105,8 +104,8 @@ def get_session(conn, args):
     stats = conn.execute(
         """SELECT
              COUNT(*) as txn_count,
-             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS REAL) ELSE 0 END), 0) as live_sales,
-             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS REAL) ELSE 0 END), 0) as live_returns
+             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as live_sales,
+             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as live_returns
            FROM pos_transaction WHERE pos_session_id = ?""",
         (sid,)).fetchone()
 
@@ -192,8 +191,8 @@ def close_session(conn, args):
     stats = conn.execute(
         """SELECT
              COUNT(*) as txn_count,
-             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS REAL) ELSE 0 END), 0) as total_sales,
-             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS REAL) ELSE 0 END), 0) as total_returns
+             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as total_sales,
+             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as total_returns
            FROM pos_transaction WHERE pos_session_id = ?""",
         (sid,)).fetchone()
 
@@ -203,7 +202,7 @@ def close_session(conn, args):
 
     # Calculate cash-only sales for expected amount
     cash_stats = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as cash_total
+        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as cash_total
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status = 'submitted'
@@ -213,7 +212,7 @@ def close_session(conn, args):
 
     # Cash returns
     cash_returns = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as cash_return
+        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as cash_return
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status = 'returned'
@@ -223,7 +222,7 @@ def close_session(conn, args):
 
     # Also account for change given in cash
     change_given = conn.execute(
-        """SELECT COALESCE(SUM(CAST(change_amount AS REAL)), 0) as total_change
+        """SELECT COALESCE(SUM(CAST(change_amount AS NUMERIC)), 0) as total_change
            FROM pos_transaction
            WHERE pos_session_id = ? AND status = 'submitted'""",
         (sid,)).fetchone()
@@ -237,7 +236,7 @@ def close_session(conn, args):
         "closing_amount": str(closing), "expected_amount": str(expected),
         "difference": str(difference), "total_sales": str(total_sales),
         "total_returns": str(total_returns), "transaction_count": txn_count,
-        "closed_at": LiteralValue("datetime('now')"), "status": "closed",
+        "closed_at": now(), "status": "closed",
     }, {"id": sid})
     conn.execute(sql, upd_params)
 

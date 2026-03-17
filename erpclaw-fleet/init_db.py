@@ -21,9 +21,8 @@ REQUIRED_FOUNDATION = [
 def create_fleet_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -66,8 +65,8 @@ def create_fleet_tables(db_path=None):
                             CHECK(vehicle_status IN ('available','assigned','maintenance','retired')),
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -92,7 +91,7 @@ def create_fleet_tables(db_path=None):
                             CHECK(assignment_status IN ('active','ended')),
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -117,7 +116,7 @@ def create_fleet_tables(db_path=None):
             station         TEXT,
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -145,8 +144,8 @@ def create_fleet_tables(db_path=None):
                             CHECK(maintenance_status IN ('scheduled','in_progress','completed','cancelled')),
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

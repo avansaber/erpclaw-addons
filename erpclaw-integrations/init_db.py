@@ -24,9 +24,8 @@ REQUIRED_FOUNDATION = [
 def create_integration_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -60,8 +59,8 @@ def create_integration_tables(db_path=None):
             config_json     TEXT NOT NULL DEFAULT '{}',
             last_sync_at    TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -83,7 +82,7 @@ def create_integration_tables(db_path=None):
             credential_value TEXT NOT NULL,
             expires_at      TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -103,7 +102,7 @@ def create_integration_tables(db_path=None):
             webhook_secret  TEXT,
             is_active       INTEGER NOT NULL DEFAULT 1,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -132,7 +131,7 @@ def create_integration_tables(db_path=None):
             completed_at    TEXT,
             error_message   TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -157,7 +156,7 @@ def create_integration_tables(db_path=None):
             last_run_at     TEXT,
             next_run_at     TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -179,7 +178,7 @@ def create_integration_tables(db_path=None):
             is_required     INTEGER NOT NULL DEFAULT 0,
             default_value   TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -200,7 +199,7 @@ def create_integration_tables(db_path=None):
             remote_id       TEXT NOT NULL,
             last_synced_at  TEXT,
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(connector_id, entity_type, local_id)
         )
     """)
@@ -223,7 +222,7 @@ def create_integration_tables(db_path=None):
             rule_name       TEXT NOT NULL,
             rule_json       TEXT NOT NULL DEFAULT '{}',
             company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -243,7 +242,7 @@ def create_integration_tables(db_path=None):
             error_message   TEXT NOT NULL,
             is_resolved     INTEGER NOT NULL DEFAULT 0,
             resolution_notes TEXT,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             resolved_at     TEXT
         )
     """)
@@ -272,8 +271,8 @@ def create_integration_tables(db_path=None):
             connector_status    TEXT NOT NULL DEFAULT 'inactive'
                                 CHECK(connector_status IN ('active','inactive','error')),
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -298,7 +297,7 @@ def create_integration_tables(db_path=None):
             started_at      TEXT,
             completed_at    TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -326,8 +325,8 @@ def create_integration_tables(db_path=None):
             connector_status    TEXT NOT NULL DEFAULT 'inactive'
                                 CHECK(connector_status IN ('active','inactive','error')),
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -350,8 +349,8 @@ def create_integration_tables(db_path=None):
                                 CHECK(order_status IN ('received','confirmed','preparing','ready','picked_up','delivered','cancelled')),
             received_at         TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -380,8 +379,8 @@ def create_integration_tables(db_path=None):
             connector_status    TEXT NOT NULL DEFAULT 'inactive'
                                 CHECK(connector_status IN ('active','inactive','error')),
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -404,8 +403,8 @@ def create_integration_tables(db_path=None):
             lead_status     TEXT NOT NULL DEFAULT 'new'
                             CHECK(lead_status IN ('new','contacted','qualified','converted','lost')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -432,8 +431,8 @@ def create_integration_tables(db_path=None):
             connector_status    TEXT NOT NULL DEFAULT 'inactive'
                                 CHECK(connector_status IN ('active','inactive','error')),
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -462,8 +461,8 @@ def create_integration_tables(db_path=None):
             connector_status    TEXT NOT NULL DEFAULT 'inactive'
                                 CHECK(connector_status IN ('active','inactive','error')),
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -487,8 +486,8 @@ def create_integration_tables(db_path=None):
                             CHECK(environment IN ('sandbox','development','production')),
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now')),
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_id)
         )
     """)
@@ -508,8 +507,8 @@ def create_integration_tables(db_path=None):
             last_synced_at  TEXT,
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','disconnected','error')),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -530,7 +529,7 @@ def create_integration_tables(db_path=None):
             matched_gl_entry_id TEXT,
             match_status    TEXT NOT NULL DEFAULT 'unmatched'
                             CHECK(match_status IN ('unmatched','auto_matched','manual_matched','ignored')),
-            created_at      TEXT DEFAULT (datetime('now')),
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(plaid_linked_account_id, plaid_transaction_id)
         )
     """)
@@ -555,8 +554,8 @@ def create_integration_tables(db_path=None):
                             CHECK(mode IN ('test','live')),
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now')),
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_id)
         )
     """)
@@ -576,8 +575,8 @@ def create_integration_tables(db_path=None):
                             CHECK(status IN ('created','processing','succeeded','failed','cancelled')),
             payment_entry_id TEXT,
             metadata        TEXT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -596,7 +595,7 @@ def create_integration_tables(db_path=None):
             processed       INTEGER NOT NULL DEFAULT 0,
             processed_at    TEXT,
             error_message   TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -619,8 +618,8 @@ def create_integration_tables(db_path=None):
             prefix          TEXT DEFAULT 'erpclaw-backups/',
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now')),
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_id)
         )
     """)
@@ -639,7 +638,7 @@ def create_integration_tables(db_path=None):
             checksum        TEXT,
             status          TEXT NOT NULL DEFAULT 'completed'
                             CHECK(status IN ('uploading','completed','failed','deleted')),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

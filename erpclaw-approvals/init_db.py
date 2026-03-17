@@ -21,9 +21,8 @@ REQUIRED_FOUNDATION = [
 def create_approvals_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -50,8 +49,8 @@ def create_approvals_tables(db_path=None):
             conditions      TEXT,
             is_active       INTEGER NOT NULL DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -73,8 +72,8 @@ def create_approvals_tables(db_path=None):
                             CHECK(approval_type IN ('sequential','parallel','conditional')),
             is_required     INTEGER NOT NULL DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -99,8 +98,8 @@ def create_approvals_tables(db_path=None):
                             CHECK(request_status IN ('pending','in_progress','approved','rejected','cancelled')),
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

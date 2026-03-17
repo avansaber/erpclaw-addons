@@ -15,7 +15,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import create_purchase_invoice, CrossSkillError
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
     from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_carrier_invoice", "CINV-")
@@ -138,7 +138,7 @@ def allocate_freight(conn, args):
 
     # Update shipment shipping_cost with total freight
     sql, upd_params = dynamic_update("logistics_shipment",
-        {"shipping_cost": str(total), "updated_at": LiteralValue("datetime('now')")},
+        {"shipping_cost": str(total), "updated_at": now()},
         {"id": shipment_id})
     conn.execute(sql, upd_params)
     audit(conn, SKILL, "logistics-allocate-freight", "logistics_shipment", shipment_id,
@@ -174,7 +174,7 @@ def add_carrier_invoice(conn, args):
     invoice_id = str(uuid.uuid4())
     conn.company_id = company_id
     naming = get_next_name(conn, "logistics_carrier_invoice", company_id=company_id)
-    now = _now_iso()
+    _ts = _now_iso()
 
     sql, _ = insert_row("logistics_carrier_invoice", {
         "id": P(), "naming_series": P(), "carrier_id": P(), "invoice_number": P(),
@@ -187,7 +187,7 @@ def add_carrier_invoice(conn, args):
         getattr(args, "invoice_date", None),
         total_amount, "pending",
         int(getattr(args, "shipment_count", None) or 0),
-        company_id, now, now,
+        company_id, _ts, _ts,
     ))
     audit(conn, SKILL, "logistics-add-carrier-invoice", "logistics_carrier_invoice", invoice_id,
           new_values={"carrier_id": carrier_id, "total_amount": total_amount})
@@ -309,11 +309,11 @@ def verify_carrier_invoice(conn, args):
         err(f"Purchase invoice created but could not extract ID from response: {pi_result}")
 
     # Update carrier invoice: set status to verified and store PI link
-    now = _now_iso()
+    _ts = _now_iso()
     sql = update_row("logistics_carrier_invoice",
         data={"invoice_status": P(), "purchase_invoice_id": P(), "updated_at": P()},
         where={"id": P()})
-    conn.execute(sql, ("verified", purchase_invoice_id, now, invoice_id))
+    conn.execute(sql, ("verified", purchase_invoice_id, _ts, invoice_id))
     audit(conn, SKILL, "logistics-verify-carrier-invoice", "logistics_carrier_invoice", invoice_id,
           new_values={
               "invoice_status": "verified",
@@ -340,13 +340,13 @@ def freight_cost_analysis_report(conn, args):
     _validate_company(conn, company_id)
 
     # Total freight charges by type
-    # PyPika: skipped — CAST(amount AS REAL) aggregate
+    # PyPika: skipped — CAST(amount AS NUMERIC) aggregate
     by_type = {}
     t_fc = Table("logistics_freight_charge")
     rows = conn.execute(
         Q.from_(t_fc).select(
             t_fc.charge_type, fn.Count(t_fc.star).as_("cnt"),
-            LiteralValue("SUM(CAST(amount AS REAL))").as_("total")
+            LiteralValue("SUM(CAST(amount AS NUMERIC))").as_("total")
         ).where(t_fc.company_id == P()).groupby(t_fc.charge_type).get_sql(),
         (company_id,)
     ).fetchall()
@@ -358,7 +358,7 @@ def freight_cost_analysis_report(conn, args):
     invoice_total = conn.execute(
         Q.from_(t_ci).select(
             fn.Count(t_ci.star),
-            LiteralValue("SUM(CAST(total_amount AS REAL))")
+            LiteralValue("SUM(CAST(total_amount AS NUMERIC))")
         ).where(t_ci.company_id == P()).get_sql(),
         (company_id,)
     ).fetchone()
@@ -368,7 +368,7 @@ def freight_cost_analysis_report(conn, args):
     ship_total = conn.execute(
         Q.from_(t_ship).select(
             fn.Count(t_ship.star),
-            LiteralValue("SUM(CAST(shipping_cost AS REAL))")
+            LiteralValue("SUM(CAST(shipping_cost AS NUMERIC))")
         ).where(t_ship.company_id == P()).where(t_ship.shipping_cost.isnotnull()).get_sql(),
         (company_id,)
     ).fetchone()

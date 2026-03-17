@@ -17,8 +17,7 @@ from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
-from erpclaw_lib.vendor.pypika.terms import LiteralValue
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
 SKILL = "erpclaw-pos"
 
@@ -57,7 +56,7 @@ def _recalc_totals(conn, txn_id):
 
     sql, upd_params = dynamic_update("pos_transaction", {
         "subtotal": str(subtotal), "discount_amount": str(disc_amt),
-        "grand_total": str(grand_total), "updated_at": LiteralValue("datetime('now')"),
+        "grand_total": str(grand_total), "updated_at": now(),
     }, {"id": txn_id})
     conn.execute(sql, upd_params)
     return subtotal, disc_amt, grand_total
@@ -241,7 +240,7 @@ def apply_discount(conn, args):
         sql, upd_params = dynamic_update("pos_transaction", {
             "discount_pct": str(pct_val), "discount_amount": str(computed_amt),
             "grand_total": str(_round(subtotal - computed_amt + _dec(txn["tax_amount"]))),
-            "updated_at": LiteralValue("datetime('now')"),
+            "updated_at": now(),
         }, {"id": txn_id})
         conn.execute(sql, upd_params)
     else:
@@ -253,7 +252,7 @@ def apply_discount(conn, args):
         sql, upd_params = dynamic_update("pos_transaction", {
             "discount_pct": "0", "discount_amount": str(_round(amt_val)),
             "grand_total": str(_round(subtotal - amt_val + _dec(txn["tax_amount"]))),
-            "updated_at": LiteralValue("datetime('now')"),
+            "updated_at": now(),
         }, {"id": txn_id})
         conn.execute(sql, upd_params)
 
@@ -281,7 +280,7 @@ def hold_transaction(conn, args):
         err(f"Only draft transactions can be held (current: {txn['status']})")
 
     sql, upd_params = dynamic_update("pos_transaction",
-        {"status": "held", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+        {"status": "held", "updated_at": now()}, {"id": txn_id})
     conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-hold-transaction", "pos_transaction", txn_id)
     conn.commit()
@@ -303,7 +302,7 @@ def resume_transaction(conn, args):
         err(f"Only held transactions can be resumed (current: {txn['status']})")
 
     sql, upd_params = dynamic_update("pos_transaction",
-        {"status": "draft", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+        {"status": "draft", "updated_at": now()}, {"id": txn_id})
     conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-resume-transaction", "pos_transaction", txn_id)
     conn.commit()
@@ -350,11 +349,11 @@ def add_payment(conn, args):
     # Update paid_amount on transaction
     # PyPika: skipped — COALESCE+SUM+CAST aggregate
     total_paid = conn.execute(
-        "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total FROM pos_payment WHERE pos_transaction_id = ?",
+        "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) as total FROM pos_payment WHERE pos_transaction_id = ?",
         (txn_id,)).fetchone()
     paid = str(_round(_dec(total_paid["total"])))
     sql, upd_params = dynamic_update("pos_transaction",
-        {"paid_amount": paid, "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+        {"paid_amount": paid, "updated_at": now()}, {"id": txn_id})
     conn.execute(sql, upd_params)
 
     conn.commit()
@@ -391,7 +390,7 @@ def submit_transaction(conn, args):
     # Submit in a single transaction
     sql, upd_params = dynamic_update("pos_transaction", {
         "change_amount": str(change), "receipt_number": receipt_number,
-        "status": "submitted", "updated_at": LiteralValue("datetime('now')"),
+        "status": "submitted", "updated_at": now(),
     }, {"id": txn_id})
     conn.execute(sql, upd_params)
 
@@ -447,7 +446,7 @@ def void_transaction(conn, args):
         err("Cannot void a returned transaction")
 
     sql, upd_params = dynamic_update("pos_transaction",
-        {"status": "voided", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+        {"status": "voided", "updated_at": now()}, {"id": txn_id})
     conn.execute(sql, upd_params)
     audit(conn, SKILL, "pos-void-transaction", "pos_transaction", txn_id)
     conn.commit()
@@ -470,7 +469,7 @@ def return_transaction(conn, args):
 
     # Mark original as returned
     sql, upd_params = dynamic_update("pos_transaction",
-        {"status": "returned", "updated_at": LiteralValue("datetime('now')")}, {"id": txn_id})
+        {"status": "returned", "updated_at": now()}, {"id": txn_id})
     conn.execute(sql, upd_params)
 
     # Create negative return transaction
@@ -709,7 +708,7 @@ def session_summary(conn, args):
         """SELECT
              status,
              COUNT(*) as count,
-             COALESCE(SUM(CAST(grand_total AS REAL)), 0) as total
+             COALESCE(SUM(CAST(grand_total AS NUMERIC)), 0) as total
            FROM pos_transaction
            WHERE pos_session_id = ?
            GROUP BY status""",
@@ -728,7 +727,7 @@ def session_summary(conn, args):
     pay_stats = conn.execute(
         """SELECT pp.payment_method,
                   COUNT(*) as count,
-                  COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as total
+                  COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as total
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status IN ('submitted', 'returned')
@@ -745,8 +744,8 @@ def session_summary(conn, args):
     # Top items
     top_items = conn.execute(
         """SELECT ti.item_name, ti.item_code,
-                  SUM(CAST(ti.qty AS REAL)) as total_qty,
-                  SUM(CAST(ti.amount AS REAL)) as total_amount
+                  SUM(CAST(ti.qty AS NUMERIC)) as total_qty,
+                  SUM(CAST(ti.amount AS NUMERIC)) as total_amount
            FROM pos_transaction_item ti
            JOIN pos_transaction pt ON ti.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status = 'submitted'
@@ -794,13 +793,15 @@ def pos_status(conn, args):
     open_sessions = conn.execute(
         Q.from_(t_sess).select(fn.Count(t_sess.star))
         .where(t_sess.status == "open").get_sql()).fetchone()[0]
-    # PyPika: skipped — date() function filter
+    _today = datetime.now().strftime('%Y-%m-%d')
     today_txns = conn.execute(
-        "SELECT COUNT(*) FROM pos_transaction WHERE date(created_at) = date('now')").fetchone()[0]
+        "SELECT COUNT(*) FROM pos_transaction WHERE date(created_at) = ?",
+        (_today,)).fetchone()[0]
     today_sales = conn.execute(
-        """SELECT COALESCE(SUM(CAST(grand_total AS REAL)), 0)
+        """SELECT COALESCE(SUM(CAST(grand_total AS NUMERIC)), 0)
            FROM pos_transaction
-           WHERE date(created_at) = date('now') AND status = 'submitted'""").fetchone()[0]
+           WHERE date(created_at) = ? AND status = 'submitted'""",
+        (_today,)).fetchone()[0]
 
     ok({
         "skill": "erpclaw-pos",

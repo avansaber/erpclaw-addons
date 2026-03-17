@@ -17,7 +17,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
 
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
     from erpclaw_lib.vendor.pypika.terms import LiteralValue
     ENTITY_PREFIXES.setdefault("fleet_vehicle", "VEH-")
     ENTITY_PREFIXES.setdefault("fleet_vehicle_maintenance", "FMNT-")
@@ -86,7 +86,7 @@ def add_vehicle(conn, args):
 
     veh_id = str(uuid.uuid4())
     naming = get_next_name(conn, "fleet_vehicle", company_id=args.company_id)
-    now = _now_iso()
+    _ts = _now_iso()
 
     year_val = getattr(args, "year", None)
     if year_val is not None:
@@ -114,7 +114,7 @@ def add_vehicle(conn, args):
         getattr(args, "insurance_policy", None),
         getattr(args, "insurance_expiry", None),
         "available", getattr(args, "notes", None),
-        args.company_id, now, now,
+        args.company_id, _ts, _ts,
     ))
     audit(conn, SKILL, "fleet-add-vehicle", "fleet_vehicle", veh_id,
           new_values={"make": make, "model": model})
@@ -186,7 +186,8 @@ def update_vehicle(conn, args):
     if not updates:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
     params.append(veh_id)
     conn.execute(f"UPDATE fleet_vehicle SET {', '.join(updates)} WHERE id = ?", params)
     audit(conn, SKILL, "fleet-update-vehicle", "fleet_vehicle", veh_id,
@@ -289,7 +290,7 @@ def add_vehicle_assignment(conn, args):
     _validate_company(conn, company_id)
 
     assign_id = str(uuid.uuid4())
-    now = _now_iso()
+    _ts = _now_iso()
 
     sql, _ = insert_row("fleet_vehicle_assignment", {
         "id": P(), "vehicle_id": P(), "driver_name": P(), "driver_id": P(),
@@ -303,13 +304,13 @@ def add_vehicle_assignment(conn, args):
         getattr(args, "end_date", None),
         "active",
         getattr(args, "notes", None),
-        company_id, now,
+        company_id, _ts,
     ))
 
     # Update vehicle status to assigned
     sql, params_upd = dynamic_update("fleet_vehicle",
                                       data={"vehicle_status": "assigned",
-                                            "updated_at": LiteralValue("datetime('now')")},
+                                            "updated_at": now()},
                                       where={"id": vehicle_id})
     conn.execute(sql, params_upd)
 
@@ -356,7 +357,7 @@ def end_vehicle_assignment(conn, args):
     if active_count == 0:
         sql, params_upd = dynamic_update("fleet_vehicle",
                                           data={"vehicle_status": "available",
-                                                "updated_at": LiteralValue("datetime('now')")},
+                                                "updated_at": now()},
                                           where={"id": vehicle_id})
         conn.execute(sql, params_upd)
 
@@ -434,7 +435,7 @@ def add_fuel_log(conn, args):
     odometer_reading = getattr(args, "odometer_reading", None)
 
     log_id = str(uuid.uuid4())
-    now = _now_iso()
+    _ts = _now_iso()
 
     sql, _ = insert_row("fleet_fuel_log", {
         "id": P(), "vehicle_id": P(), "log_date": P(), "gallons": P(),
@@ -449,14 +450,14 @@ def add_fuel_log(conn, args):
         getattr(args, "fuel_type", None),
         getattr(args, "station", None),
         getattr(args, "notes", None),
-        company_id, now,
+        company_id, _ts,
     ))
 
     # Update vehicle odometer if provided
     if odometer_reading:
         sql, params_upd = dynamic_update("fleet_vehicle",
                                           data={"current_odometer": str(to_decimal(odometer_reading)),
-                                                "updated_at": LiteralValue("datetime('now')")},
+                                                "updated_at": now()},
                                           where={"id": vehicle_id})
         conn.execute(sql, params_upd)
 
@@ -527,7 +528,7 @@ def add_vehicle_maintenance(conn, args):
     cost = getattr(args, "cost", None)
     maint_id = str(uuid.uuid4())
     naming = get_next_name(conn, "fleet_vehicle_maintenance", company_id=company_id)
-    now = _now_iso()
+    _ts = _now_iso()
 
     sql, _ = insert_row("fleet_vehicle_maintenance", {
         "id": P(), "naming_series": P(), "vehicle_id": P(), "maintenance_type": P(),
@@ -544,7 +545,7 @@ def add_vehicle_maintenance(conn, args):
         getattr(args, "odometer_at_service", None),
         "scheduled",
         getattr(args, "notes", None),
-        company_id, now, now,
+        company_id, _ts, _ts,
     ))
     audit(conn, SKILL, "fleet-add-vehicle-maintenance", "fleet_vehicle_maintenance", maint_id,
           new_values={"vehicle_id": vehicle_id, "maintenance_type": maintenance_type})
@@ -574,8 +575,9 @@ def complete_vehicle_maintenance(conn, args):
         err(f"Cannot complete maintenance in status '{data['maintenance_status']}'.")
 
     completed_date = getattr(args, "completed_date", None) or _now_iso()[:10]
-    updates = ["maintenance_status = 'completed'", "completed_date = ?", "updated_at = datetime('now')"]
-    params = [completed_date]
+    _now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    updates = ["maintenance_status = 'completed'", "completed_date = ?", "updated_at = ?"]
+    params = [completed_date, _now_str]
 
     cost = getattr(args, "cost", None)
     if cost is not None:
@@ -661,13 +663,13 @@ def vehicle_cost_report(conn, args):
 
     # Subquery for maintenance cost
     maint_sub = (Q.from_(m)
-                 .select(fn.Coalesce(fn.Sum(LiteralValue('CAST("cost" AS REAL)')), 0))
+                 .select(fn.Coalesce(fn.Sum(LiteralValue('CAST("cost" AS NUMERIC)')), 0))
                  .where(m.vehicle_id == v.id))
 
     q = (Q.from_(v)
          .left_join(f).on(f.vehicle_id == v.id)
          .select(v.id, v.make, v.model, v.year, v.license_plate,
-                 fn.Coalesce(fn.Sum(LiteralValue('CAST("fleet_fuel_log"."cost" AS REAL)')), 0).as_("total_fuel_cost"),
+                 fn.Coalesce(fn.Sum(LiteralValue('CAST("fleet_fuel_log"."cost" AS NUMERIC)')), 0).as_("total_fuel_cost"),
                  LiteralValue(f"({maint_sub.get_sql()})").as_("total_maint_cost"))
          .where(v.company_id == P())
          .groupby(v.id)

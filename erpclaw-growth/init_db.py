@@ -26,9 +26,8 @@ REQUIRED_FOUNDATION = [
 def create_crmadv_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -60,8 +59,8 @@ def create_crmadv_tables(db_path=None):
                             CHECK(template_type IN ('newsletter','promotional','transactional','drip','welcome')),
             is_active       INTEGER DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -80,8 +79,8 @@ def create_crmadv_tables(db_path=None):
             filter_criteria TEXT,
             recipient_count INTEGER DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -107,8 +106,8 @@ def create_crmadv_tables(db_path=None):
             total_bounced   INTEGER DEFAULT 0,
             total_unsubscribed INTEGER DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -128,7 +127,7 @@ def create_crmadv_tables(db_path=None):
             event_timestamp TEXT,
             metadata        TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -154,8 +153,8 @@ def create_crmadv_tables(db_path=None):
             territory_status TEXT DEFAULT 'active'
                             CHECK(territory_status IN ('active','inactive')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -175,7 +174,7 @@ def create_crmadv_tables(db_path=None):
             assignment_status TEXT DEFAULT 'active'
                             CHECK(assignment_status IN ('active','ended')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -193,8 +192,8 @@ def create_crmadv_tables(db_path=None):
             actual_amount   TEXT DEFAULT '0',
             attainment_pct  TEXT DEFAULT '0',
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -223,8 +222,8 @@ def create_crmadv_tables(db_path=None):
             auto_renew      INTEGER DEFAULT 0,
             renewal_terms   TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -244,8 +243,8 @@ def create_crmadv_tables(db_path=None):
             obligation_status TEXT DEFAULT 'pending'
                             CHECK(obligation_status IN ('pending','in_progress','completed','overdue')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -271,8 +270,8 @@ def create_crmadv_tables(db_path=None):
                             CHECK(workflow_status IN ('active','inactive','paused')),
             execution_count INTEGER DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -289,7 +288,7 @@ def create_crmadv_tables(db_path=None):
             points          INTEGER NOT NULL DEFAULT 0,
             is_active       INTEGER DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -308,8 +307,8 @@ def create_crmadv_tables(db_path=None):
             sequence_status TEXT DEFAULT 'draft'
                             CHECK(sequence_status IN ('draft','active','paused','completed')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -325,7 +324,7 @@ def create_crmadv_tables(db_path=None):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS anomaly (
             id              TEXT PRIMARY KEY,
-            detected_at     TEXT DEFAULT (datetime('now')),
+            detected_at     TEXT DEFAULT CURRENT_TIMESTAMP,
             anomaly_type    TEXT NOT NULL CHECK(anomaly_type IN (
                                 'price_spike','volume_change','duplicate_possible',
                                 'margin_erosion','unusual_vendor','pattern_break',
@@ -371,7 +370,7 @@ def create_crmadv_tables(db_path=None):
             projected       TEXT,
             impact_summary  TEXT,
             confidence      TEXT,
-            created_at      TEXT DEFAULT (datetime('now')),
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
             expires_at      TEXT
         )
     """)
@@ -383,7 +382,7 @@ def create_crmadv_tables(db_path=None):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS correlation (
             id              TEXT PRIMARY KEY,
-            discovered_at   TEXT DEFAULT (datetime('now')),
+            discovered_at   TEXT DEFAULT CURRENT_TIMESTAMP,
             module_a        TEXT NOT NULL,
             module_b        TEXT NOT NULL,
             description     TEXT NOT NULL,
@@ -416,8 +415,8 @@ def create_crmadv_tables(db_path=None):
             last_applied_at TEXT,
             created_by      TEXT NOT NULL DEFAULT 'ai'
                             CHECK(created_by IN ('user','ai')),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -437,8 +436,8 @@ def create_crmadv_tables(db_path=None):
             times_triggered INTEGER NOT NULL DEFAULT 0,
             last_triggered_at TEXT,
             created_by      TEXT,
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -458,7 +457,7 @@ def create_crmadv_tables(db_path=None):
                             CHECK(status IN ('pending','decided','expired')),
             decision_made   TEXT,
             decided_at      TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -479,7 +478,7 @@ def create_crmadv_tables(db_path=None):
             idempotency_key TEXT UNIQUE,
             billing_period_id TEXT,
             processed       INTEGER NOT NULL DEFAULT 0 CHECK(processed IN (0,1)),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -493,7 +492,7 @@ def create_crmadv_tables(db_path=None):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_conversation (
             id              TEXT PRIMARY KEY,
-            timestamp       TEXT DEFAULT (datetime('now')),
+            timestamp       TEXT DEFAULT CURRENT_TIMESTAMP,
             voucher_type    TEXT,
             voucher_id      TEXT,
             user_message    TEXT,
@@ -520,7 +519,7 @@ def create_crmadv_tables(db_path=None):
             summary         TEXT,
             related_entities TEXT,
             state           TEXT,
-            last_active     TEXT DEFAULT (datetime('now')),
+            last_active     TEXT DEFAULT CURRENT_TIMESTAMP,
             priority        INTEGER NOT NULL DEFAULT 0,
             expires_at      TEXT
         )
@@ -546,7 +545,7 @@ def create_crmadv_tables(db_path=None):
             factors         TEXT,
             ai_summary      TEXT,
             expires_at      TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -564,8 +563,8 @@ def create_crmadv_tables(db_path=None):
             target_account_id   TEXT NOT NULL,
             status              TEXT NOT NULL DEFAULT 'active'
                                 CHECK(status IN ('active','disabled')),
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -585,7 +584,7 @@ def create_crmadv_tables(db_path=None):
             target_gl_entry_id      TEXT,
             status                  TEXT NOT NULL DEFAULT 'posted'
                                     CHECK(status IN ('posted','reversed')),
-            created_at              TEXT DEFAULT (datetime('now'))
+            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

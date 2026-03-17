@@ -23,9 +23,8 @@ REQUIRED_FOUNDATION = [
 def create_logistics_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -64,8 +63,8 @@ def create_logistics_tables(db_path=None):
             on_time_pct     TEXT NOT NULL DEFAULT '100',
             total_shipments INTEGER NOT NULL DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -93,7 +92,7 @@ def create_logistics_tables(db_path=None):
             effective_date  TEXT,
             expiry_date     TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -135,8 +134,8 @@ def create_logistics_tables(db_path=None):
             pod_timestamp       TEXT,
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -159,7 +158,7 @@ def create_logistics_tables(db_path=None):
             location        TEXT,
             description     TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -183,8 +182,8 @@ def create_logistics_tables(db_path=None):
             route_status    TEXT NOT NULL DEFAULT 'active'
                             CHECK(route_status IN ('active','inactive')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -208,7 +207,7 @@ def create_logistics_tables(db_path=None):
             stop_type       TEXT NOT NULL DEFAULT 'delivery'
                             CHECK(stop_type IN ('pickup','delivery','transfer')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -228,7 +227,7 @@ def create_logistics_tables(db_path=None):
             description     TEXT,
             amount          TEXT NOT NULL DEFAULT '0',
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -252,8 +251,8 @@ def create_logistics_tables(db_path=None):
             purchase_invoice_id TEXT,
             shipment_count  INTEGER NOT NULL DEFAULT 0,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

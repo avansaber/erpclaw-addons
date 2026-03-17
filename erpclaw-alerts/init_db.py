@@ -22,9 +22,8 @@ REQUIRED_FOUNDATION = [
 def create_alerts_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
     tables = [r[0] for r in conn.execute(
@@ -59,8 +58,8 @@ def create_alerts_tables(db_path=None):
             last_triggered_at   TEXT,
             trigger_count       INTEGER DEFAULT 0,
             company_id          TEXT NOT NULL,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -89,7 +88,7 @@ def create_alerts_tables(db_path=None):
             resolved_at         TEXT,
             channel_results     TEXT,
             company_id          TEXT NOT NULL,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -113,8 +112,8 @@ def create_alerts_tables(db_path=None):
             config_json         TEXT NOT NULL DEFAULT '{}',
             is_active           INTEGER DEFAULT 1,
             company_id          TEXT NOT NULL,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

@@ -51,7 +51,7 @@ def cash_reconciliation(conn, args):
 
     # Cash received from submitted transactions
     cash_in = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as total
+        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as total
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status = 'submitted'
@@ -61,7 +61,7 @@ def cash_reconciliation(conn, args):
 
     # Cash refunded from returned transactions
     cash_out = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as total
+        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as total
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status = 'returned'
@@ -71,7 +71,7 @@ def cash_reconciliation(conn, args):
 
     # Change given
     change = conn.execute(
-        """SELECT COALESCE(SUM(CAST(change_amount AS REAL)), 0) as total
+        """SELECT COALESCE(SUM(CAST(change_amount AS NUMERIC)), 0) as total
            FROM pos_transaction
            WHERE pos_session_id = ? AND status = 'submitted'""",
         (session_id,)).fetchone()
@@ -82,7 +82,7 @@ def cash_reconciliation(conn, args):
     # Non-cash totals
     non_cash = conn.execute(
         """SELECT pp.payment_method,
-                  COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as total
+                  COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as total
            FROM pos_payment pp
            JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
            WHERE pt.pos_session_id = ? AND pt.status IN ('submitted', 'returned')
@@ -128,9 +128,9 @@ def daily_report(conn, args):
     sales = conn.execute(
         f"""SELECT
               COUNT(*) as transaction_count,
-              COALESCE(SUM(CAST(pt.grand_total AS REAL)), 0) as total_sales,
-              COALESCE(SUM(CAST(pt.discount_amount AS REAL)), 0) as total_discounts,
-              COALESCE(SUM(CAST(pt.tax_amount AS REAL)), 0) as total_tax
+              COALESCE(SUM(CAST(pt.grand_total AS NUMERIC)), 0) as total_sales,
+              COALESCE(SUM(CAST(pt.discount_amount AS NUMERIC)), 0) as total_discounts,
+              COALESCE(SUM(CAST(pt.tax_amount AS NUMERIC)), 0) as total_tax
             FROM pos_transaction pt
             WHERE date(pt.created_at) = ? AND pt.status = 'submitted'{company_filter}""",
         params).fetchone()
@@ -142,7 +142,7 @@ def daily_report(conn, args):
     returns = conn.execute(
         f"""SELECT
               COUNT(*) as return_count,
-              COALESCE(SUM(CAST(ABS(CAST(pt.grand_total AS REAL)) AS REAL)), 0) as total_returns
+              COALESCE(SUM(CAST(ABS(CAST(pt.grand_total AS NUMERIC)) AS NUMERIC)), 0) as total_returns
             FROM pos_transaction pt
             WHERE date(pt.created_at) = ? AND pt.status = 'returned'{company_filter}""",
         return_params).fetchone()
@@ -154,7 +154,7 @@ def daily_report(conn, args):
     pay_breakdown = conn.execute(
         f"""SELECT pp.payment_method,
                    COUNT(*) as count,
-                   COALESCE(SUM(CAST(pp.amount AS REAL)), 0) as total
+                   COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as total
             FROM pos_payment pp
             JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
             WHERE date(pt.created_at) = ? AND pt.status = 'submitted'{company_filter}
@@ -210,7 +210,7 @@ def hourly_sales(conn, args):
         f"""SELECT
               strftime('%H', created_at) as hour,
               COUNT(*) as transaction_count,
-              COALESCE(SUM(CAST(grand_total AS REAL)), 0) as total_sales
+              COALESCE(SUM(CAST(grand_total AS NUMERIC)), 0) as total_sales
             FROM pos_transaction
             WHERE date(created_at) = ? AND status = 'submitted'{company_filter}
             GROUP BY strftime('%H', created_at)
@@ -269,8 +269,8 @@ def top_items(conn, args):
     rows = conn.execute(
         f"""SELECT
               ti.item_id, ti.item_name, ti.item_code,
-              SUM(CAST(ti.qty AS REAL)) as total_qty,
-              SUM(CAST(ti.amount AS REAL)) as total_revenue,
+              SUM(CAST(ti.qty AS NUMERIC)) as total_qty,
+              SUM(CAST(ti.amount AS NUMERIC)) as total_revenue,
               COUNT(DISTINCT ti.pos_transaction_id) as transaction_count
             FROM pos_transaction_item ti
             JOIN pos_transaction pt ON ti.pos_transaction_id = pt.id
@@ -326,8 +326,8 @@ def cashier_performance(conn, args):
               s.cashier_name,
               COUNT(DISTINCT s.id) as session_count,
               COUNT(pt.id) as transaction_count,
-              COALESCE(SUM(CAST(pt.grand_total AS REAL)), 0) as total_sales,
-              COALESCE(AVG(CAST(pt.grand_total AS REAL)), 0) as avg_transaction
+              COALESCE(SUM(CAST(pt.grand_total AS NUMERIC)), 0) as total_sales,
+              COALESCE(AVG(CAST(pt.grand_total AS NUMERIC)), 0) as avg_transaction
             FROM pos_session s
             LEFT JOIN pos_transaction pt
               ON pt.pos_session_id = s.id AND pt.status = 'submitted'

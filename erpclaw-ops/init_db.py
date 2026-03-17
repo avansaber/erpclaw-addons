@@ -17,9 +17,8 @@ DB_PATH = os.environ.get(
 def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
     """Create advanced manufacturing tables and indexes."""
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     tables_created = 0
     indexes_created = 0
@@ -35,7 +34,7 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
             operator            TEXT,
             entry_type          TEXT NOT NULL DEFAULT 'production'
                                 CHECK(entry_type IN ('production','setup','downtime','quality_check','changeover','other')),
-            start_time          TEXT NOT NULL DEFAULT (datetime('now')),
+            start_time          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             end_time            TEXT,
             duration_minutes    INTEGER,
             quantity_produced   INTEGER DEFAULT 0,
@@ -46,7 +45,7 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
                                 CHECK(machine_status IN ('running','idle','setup','breakdown','maintenance','off')),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -84,8 +83,8 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
                                 CHECK(status IN ('available','in_use','maintenance','calibration','scrapped')),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -104,13 +103,13 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
             tool_id                 TEXT NOT NULL REFERENCES tool(id) ON DELETE RESTRICT,
             work_order_id           TEXT,
             operator                TEXT,
-            usage_date              TEXT NOT NULL DEFAULT (date('now')),
+            usage_date              TEXT NOT NULL DEFAULT CURRENT_DATE,
             usage_count             INTEGER NOT NULL DEFAULT 1,
             usage_duration_minutes  INTEGER,
             condition_after         TEXT CHECK(condition_after IN ('good','worn','needs_repair','scrapped',NULL)),
             notes                   TEXT,
             company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at              TEXT DEFAULT (datetime('now'))
+            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -142,8 +141,8 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
             status              TEXT NOT NULL DEFAULT 'draft'
                                 CHECK(status IN ('draft','review','approved','in_progress','implemented','rejected','cancelled')),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -172,8 +171,8 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
             instructions        TEXT,
             is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1
@@ -198,7 +197,7 @@ def init_advmfg_schema(db_path: str = DB_PATH) -> dict:
             is_optional         INTEGER NOT NULL DEFAULT 0 CHECK(is_optional IN (0,1)),
             notes               TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     tables_created += 1

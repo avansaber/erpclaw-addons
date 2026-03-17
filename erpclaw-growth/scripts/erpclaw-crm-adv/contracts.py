@@ -148,7 +148,7 @@ def list_contracts(conn, args):
         where.append("contract_status = ?")
         params.append(args.contract_status_filter)
     if getattr(args, "search", None):
-        where.append("customer_name LIKE ?")
+        where.append("LOWER(customer_name) LIKE LOWER(?)")
         params.append(f"%{args.search}%")
 
     where_sql = " AND ".join(where)
@@ -330,8 +330,8 @@ def contract_value_report(conn, args):
     _validate_company(conn, args.company_id)
 
     total_value_row = conn.execute("""
-        SELECT COALESCE(SUM(CAST(total_value AS REAL)), 0),
-               COALESCE(SUM(CAST(annual_value AS REAL)), 0),
+        SELECT COALESCE(SUM(CAST(total_value AS NUMERIC)), 0),
+               COALESCE(SUM(CAST(annual_value AS NUMERIC)), 0),
                COUNT(*)
         FROM crmadv_contract
         WHERE company_id = ? AND contract_status NOT IN ('terminated')
@@ -339,7 +339,7 @@ def contract_value_report(conn, args):
 
     by_type = conn.execute("""
         SELECT contract_type, COUNT(*) as count,
-               COALESCE(SUM(CAST(total_value AS REAL)), 0) as type_total_value
+               COALESCE(SUM(CAST(total_value AS NUMERIC)), 0) as type_total_value
         FROM crmadv_contract
         WHERE company_id = ? AND contract_status NOT IN ('terminated')
         GROUP BY contract_type

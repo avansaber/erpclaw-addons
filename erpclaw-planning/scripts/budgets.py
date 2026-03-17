@@ -23,7 +23,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update, now
 except ImportError:
     pass
 
@@ -49,7 +49,7 @@ def add_budget_version(conn, args):
 
     budget_id = str(uuid.uuid4())
     naming = get_next_name(conn, "planning_scenario", company_id=args.company_id)
-    now = _now_iso()
+    _ts = _now_iso()
 
     sql, _ = insert_row("planning_scenario", {
         "id": P(), "naming_series": P(), "name": P(), "scenario_type": P(),
@@ -63,7 +63,7 @@ def add_budget_version(conn, args):
          getattr(args, "assumptions", None),
          getattr(args, "fiscal_year", None),
          "0", "0", "0", "draft",
-         args.company_id, now, now)
+         args.company_id, _ts, _ts)
     )
     audit(conn, SKILL_NAME, "planning-add-budget-version", "planning_scenario", budget_id)
     conn.commit()
@@ -158,7 +158,7 @@ def approve_budget(conn, args):
         err(f"Cannot approve budget in '{data['status']}' status")
 
     sql = update_row("planning_scenario",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": now()},
                      where={"id": P()})
     conn.execute(sql, ("approved", budget_id))
     audit(conn, SKILL_NAME, "planning-approve-budget", "planning_scenario", budget_id)
@@ -187,7 +187,7 @@ def lock_budget(conn, args):
         err("Cannot lock an archived budget")
 
     sql = update_row("planning_scenario",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": now()},
                      where={"id": P()})
     conn.execute(sql, ("locked", budget_id))
     audit(conn, SKILL_NAME, "planning-lock-budget", "planning_scenario", budget_id)
@@ -304,8 +304,8 @@ def budget_vs_actual(conn, args):
 
             # Sum debits and credits for this account in the period
             gl_row = conn.execute(
-                """SELECT COALESCE(SUM(CAST(debit AS REAL)), 0) as total_debit,
-                          COALESCE(SUM(CAST(credit AS REAL)), 0) as total_credit
+                """SELECT COALESCE(SUM(CAST(debit AS NUMERIC)), 0) as total_debit,
+                          COALESCE(SUM(CAST(credit AS NUMERIC)), 0) as total_credit
                    FROM gl_entry
                    WHERE account_id = ? AND posting_date >= ? AND posting_date < ?
                    AND is_cancelled = 0""",
@@ -396,8 +396,8 @@ def variance_dashboard(conn, args):
                 end_date = f"{year}-{month + 1:02d}-01"
 
             gl_row = conn.execute(
-                """SELECT COALESCE(SUM(CAST(debit AS REAL)), 0),
-                          COALESCE(SUM(CAST(credit AS REAL)), 0)
+                """SELECT COALESCE(SUM(CAST(debit AS NUMERIC)), 0),
+                          COALESCE(SUM(CAST(credit AS NUMERIC)), 0)
                    FROM gl_entry
                    WHERE account_id = ? AND posting_date >= ? AND posting_date < ?
                    AND is_cancelled = 0""",

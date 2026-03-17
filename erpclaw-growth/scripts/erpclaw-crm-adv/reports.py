@@ -79,7 +79,7 @@ def pipeline_velocity(conn, args):
         (args.company_id,)
     ).fetchone()[0]
     total_pipeline_value = conn.execute(
-        "SELECT COALESCE(SUM(CAST(total_value AS REAL)), 0) FROM crmadv_contract WHERE company_id = ? AND contract_status IN ('draft','active')",
+        "SELECT COALESCE(SUM(CAST(total_value AS NUMERIC)), 0) FROM crmadv_contract WHERE company_id = ? AND contract_status IN ('draft','active')",
         (args.company_id,)
     ).fetchone()[0]
 

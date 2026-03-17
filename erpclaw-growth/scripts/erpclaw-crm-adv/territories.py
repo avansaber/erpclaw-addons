@@ -139,7 +139,7 @@ def list_territories(conn, args):
         where.append("territory_type = ?")
         params.append(args.territory_type)
     if getattr(args, "search", None):
-        where.append("(name LIKE ? OR region LIKE ?)")
+        where.append("(LOWER(name) LIKE LOWER(?) OR LOWER(region) LIKE LOWER(?))")
         params.extend([f"%{args.search}%"] * 2)
 
     where_sql = " AND ".join(where)
@@ -356,8 +356,8 @@ def territory_comparison_report(conn, args):
         SELECT t.id, t.name, t.region, t.territory_type,
                COUNT(DISTINCT ta.id) as total_reps,
                COUNT(DISTINCT tq.id) as quota_periods,
-               COALESCE(SUM(CAST(tq.actual_amount AS REAL)), 0) as total_actual,
-               COALESCE(SUM(CAST(tq.quota_amount AS REAL)), 0) as total_quota
+               COALESCE(SUM(CAST(tq.actual_amount AS NUMERIC)), 0) as total_actual,
+               COALESCE(SUM(CAST(tq.quota_amount AS NUMERIC)), 0) as total_quota
         FROM crmadv_territory t
         LEFT JOIN crmadv_territory_assignment ta ON t.id = ta.territory_id AND ta.assignment_status = 'active'
         LEFT JOIN crmadv_territory_quota tq ON t.id = tq.territory_id
