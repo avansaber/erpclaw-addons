@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest pypika
       - name: Setup erpclaw_lib and init_schema
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
@@ -26,7 +26,30 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup"
           cp scripts/erpclaw-setup/init_schema.py \
              "${GITHUB_WORKSPACE}/../erpclaw/scripts/erpclaw-setup/"
-      - name: Run unit tests
+      - name: Run unit tests per module
         run: |
-          python -m pytest . -q --tb=short --ignore=__pycache__ \
-            || { ec=$?; [ $ec -eq 5 ] && echo "No tests collected — skipping" && exit 0; exit $ec; }
+          failed=0
+          total=0
+          for test_dir in $(find . -type d -name tests -path "*/scripts/*" | sort); do
+            module_dir=$(dirname "$test_dir")
+            module=$(basename $(dirname "$module_dir") 2>/dev/null || basename "$module_dir")
+            [ ! -d "$test_dir" ] && continue
+
+            echo "=== Testing $module ==="
+            if python -m pytest "$test_dir" -q --tb=short \
+              --rootdir="$module_dir" \
+              2>&1; then
+              echo "  $module: PASS"
+            else
+              ec=$?
+              if [ $ec -eq 5 ]; then
+                echo "  $module: no tests collected — skipping"
+              else
+                echo "  $module: FAIL (exit $ec)"
+                failed=1
+              fi
+            fi
+            total=$((total + 1))
+          done
+          echo "=== $total modules tested ==="
+          exit $failed
