@@ -2,7 +2,7 @@
 """ERPClaw Manufacturing Skill — db_query.py
 
 BOMs, work orders, job cards, production planning (MRP), and subcontracting.
-All 24 actions are routed through this single entry point.
+All 29 actions are routed through this single entry point.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -1627,27 +1627,82 @@ def transfer_materials(conn, args):
                 f"Set source_warehouse_id on the work order or provide warehouse_id in items."
             )
 
-        # Get valuation rate for this item at source warehouse
+        # --- Feature #7: Material Substitution ---
+        # Check if primary item has sufficient stock; if not, try substitutes
+        actual_item_id = item_id
+        actual_transfer_qty = transfer_qty
+        substitution_used = False
+
         try:
-            val_rate = get_valuation_rate(conn, item_id, item_source_wh)
+            primary_bal = get_stock_balance(conn, item_id, item_source_wh)
+            primary_stock = to_decimal(primary_bal["qty"]) if primary_bal else Decimal("0")
+        except (ValueError, KeyError, NotImplementedError):
+            primary_stock = Decimal("0")
+
+        if primary_stock < transfer_qty:
+            # Primary item has insufficient stock — check substitutes
+            woi_id = woi.get("id")
+            if woi_id:
+                # Look up BOM item ID from the work order item's item_id
+                # The work_order_item.item_id maps to bom_item.item_id
+                bi_sub_t = Table("bom_item")
+                bi_sub_q = (Q.from_(bi_sub_t).select(bi_sub_t.id)
+                            .where(bi_sub_t.bom_id == P())
+                            .where(bi_sub_t.item_id == P()))
+                bi_match = conn.execute(
+                    bi_sub_q.get_sql(),
+                    (wo_dict["bom_id"], item_id)
+                ).fetchone()
+
+                if bi_match:
+                    bom_item_id = bi_match["id"]
+                    # Fetch substitutes ordered by priority
+                    bis_t = Table("bom_item_substitute")
+                    bis_q = (Q.from_(bis_t).select(bis_t.star)
+                             .where(bis_t.bom_item_id == P())
+                             .orderby(bis_t.priority))
+                    subs = conn.execute(bis_q.get_sql(), (bom_item_id,)).fetchall()
+
+                    for sub_row in subs:
+                        sub = row_to_dict(sub_row)
+                        sub_item_id = sub["substitute_item_id"]
+                        conv_factor = to_decimal(sub["conversion_factor"])
+
+                        try:
+                            sub_bal = get_stock_balance(conn, sub_item_id, item_source_wh)
+                            sub_stock = to_decimal(sub_bal["qty"]) if sub_bal else Decimal("0")
+                        except (ValueError, KeyError, NotImplementedError):
+                            sub_stock = Decimal("0")
+
+                        # Adjust qty by conversion factor
+                        adjusted_qty = round_currency(transfer_qty * conv_factor)
+                        if sub_stock >= adjusted_qty:
+                            actual_item_id = sub_item_id
+                            actual_transfer_qty = adjusted_qty
+                            substitution_used = True
+                            break
+
+        # Get valuation rate for the actual item at source warehouse
+        try:
+            val_rate = get_valuation_rate(conn, actual_item_id, item_source_wh)
         except Exception:
             val_rate = Decimal("0")
         val_rate = to_decimal(str(val_rate)) if val_rate else Decimal("0")
 
         # SLE: OUT of source warehouse
         sle_entries.append({
-            "item_id": item_id,
+            "item_id": actual_item_id,
             "warehouse_id": item_source_wh,
-            "actual_qty": str(round_currency(-transfer_qty)),
+            "actual_qty": str(round_currency(-actual_transfer_qty)),
             "incoming_rate": "0",
             "fiscal_year": fiscal_year,
         })
 
         # SLE: IN to WIP warehouse
         sle_entries.append({
-            "item_id": item_id,
+            "item_id": actual_item_id,
             "warehouse_id": wip_wh,
-            "actual_qty": str(round_currency(transfer_qty)),
+            "actual_qty": str(round_currency(actual_transfer_qty)),
             "incoming_rate": str(round_currency(val_rate)),
             "fiscal_year": fiscal_year,
         })
@@ -2004,14 +2059,76 @@ def complete_work_order(conn, args):
     total_production_cost = round_currency(rm_cost + operating_cost)
     fg_rate = round_currency(total_production_cost / produced_qty) if produced_qty > 0 else Decimal("0")
 
-    # Build SLE entries: FG item INTO target warehouse
-    sle_entries = [{
-        "item_id": fg_item_id,
-        "warehouse_id": target_wh,
-        "actual_qty": str(round_currency(produced_qty)),
-        "incoming_rate": str(fg_rate),
-        "fiscal_year": fiscal_year,
-    }]
+    # --- Co-Products / By-Products (Feature #8) ---
+    # Check if the BOM has output items defined
+    bom_id = wo_dict["bom_id"]
+    boi_t = Table("bom_output_item")
+    boi_q = Q.from_(boi_t).select(boi_t.star).where(boi_t.bom_id == P())
+    bom_outputs = conn.execute(boi_q.get_sql(), (bom_id,)).fetchall()
+
+    sle_entries = []
+    by_product_count = 0
+
+    if bom_outputs:
+        # BOM has explicit output items defined — use cost allocation
+        bom_output_list = [row_to_dict(r) for r in bom_outputs]
+
+        # Get BOM base qty for scaling
+        bom_hdr_t = Table("bom")
+        bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
+        bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
+        bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
+        if bom_base_qty <= 0:
+            bom_base_qty = Decimal("1")
+
+        for bo in bom_output_list:
+            bo_item_id = bo["item_id"]
+            bo_qty_per_bom = to_decimal(bo["qty"])
+            bo_is_primary = int(bo["is_primary"])
+            bo_cost_pct = to_decimal(bo["cost_allocation_pct"])
+
+            # Scale output qty proportionally to produced_qty vs BOM base qty
+            scaled_output_qty = round_currency(
+                (bo_qty_per_bom / bom_base_qty) * produced_qty
+            )
+
+            # Allocate cost proportionally
+            allocated_cost = round_currency(
+                total_production_cost * bo_cost_pct / Decimal("100")
+            ) if bo_cost_pct > 0 else Decimal("0")
+
+            output_rate = round_currency(
+                allocated_cost / scaled_output_qty
+            ) if scaled_output_qty > 0 else Decimal("0")
+
+            if bo_is_primary:
+                # Primary product goes to target warehouse
+                sle_entries.append({
+                    "item_id": bo_item_id,
+                    "warehouse_id": target_wh,
+                    "actual_qty": str(round_currency(scaled_output_qty)),
+                    "incoming_rate": str(output_rate),
+                    "fiscal_year": fiscal_year,
+                })
+            else:
+                # By-product also goes to target warehouse
+                sle_entries.append({
+                    "item_id": bo_item_id,
+                    "warehouse_id": target_wh,
+                    "actual_qty": str(round_currency(scaled_output_qty)),
+                    "incoming_rate": str(output_rate),
+                    "fiscal_year": fiscal_year,
+                })
+                by_product_count += 1
+    else:
+        # No BOM outputs defined — original behavior: single FG item
+        sle_entries.append({
+            "item_id": fg_item_id,
+            "warehouse_id": target_wh,
+            "actual_qty": str(round_currency(produced_qty)),
+            "incoming_rate": str(fg_rate),
+            "fiscal_year": fiscal_year,
+        })
 
     # Consume raw materials from WIP warehouse (negative SLE entries)
     if wip_wh:
@@ -2120,14 +2237,18 @@ def complete_work_order(conn, args):
             (args.work_order_id,),
         )
     else:
-        # Partial completion: consume proportionally
-        ratio = float(total_produced / wo_qty)
-        conn.execute(
-            """UPDATE work_order_item
-               SET consumed_qty = CAST(ROUND(CAST(transferred_qty AS REAL) * ?, 2) AS TEXT)
-               WHERE work_order_id = ?""",
-            (ratio, args.work_order_id),
-        )
+        # Partial completion: consume proportionally (Decimal precision)
+        ratio = total_produced / wo_qty
+        items = conn.execute(
+            "SELECT id, transferred_qty FROM work_order_item WHERE work_order_id = ?",
+            (args.work_order_id,),
+        ).fetchall()
+        for item in items:
+            consumed = round_currency(to_decimal(item["transferred_qty"]) * ratio)
+            conn.execute(
+                "UPDATE work_order_item SET consumed_qty = ? WHERE id = ?",
+                (str(consumed), item["id"]),
+            )
 
     audit(conn, "erpclaw-manufacturing", "complete-work-order", "work_order", args.work_order_id,
            new_values={
@@ -2150,6 +2271,7 @@ def complete_work_order(conn, args):
         "fg_rate": str(fg_rate),
         "sle_count": len(sle_ids) if sle_ids else 0,
         "gl_count": len(gl_ids),
+        "by_product_count": by_product_count,
     })
 
 
@@ -2545,16 +2667,27 @@ def run_mrp(conn, args):
             max(Decimal("0"), required_qty - available_qty - on_order_qty)
         )
 
+        # Feature #9: Make vs Buy — look up item procurement type
+        item_t = Table("item")
+        item_proc_q = (Q.from_(item_t)
+                       .select(item_t.default_procurement_type)
+                       .where(item_t.id == P()))
+        item_row = conn.execute(item_proc_q.get_sql(), (item_id,)).fetchone()
+        procurement_type = "purchase"  # default
+        if item_row and item_row["default_procurement_type"]:
+            procurement_type = item_row["default_procurement_type"]
+
         ppm_ins_q = (Q.into(ppm_t).columns(
             "id", "production_plan_id", "item_id", "required_qty",
-            "available_qty", "on_order_qty", "shortfall_qty", "warehouse_id"
-        ).insert(P(), P(), P(), P(), P(), P(), P(), P()))
+            "available_qty", "on_order_qty", "shortfall_qty", "warehouse_id",
+            "procurement_type"
+        ).insert(P(), P(), P(), P(), P(), P(), P(), P(), P()))
         conn.execute(
             ppm_ins_q.get_sql(),
             (str(uuid.uuid4()), args.production_plan_id, item_id,
              str(round_currency(required_qty)),
              str(available_qty), str(on_order_qty),
-             str(shortfall_qty), warehouse_id),
+             str(shortfall_qty), warehouse_id, procurement_type),
         )
         material_count += 1
         if shortfall_qty > 0:
@@ -2791,7 +2924,8 @@ def generate_purchase_requests(conn, args):
     if not plan:
         err(f"Production Plan {args.production_plan_id} not found")
 
-    # Fetch all materials with shortfall > 0
+    # Fetch materials with shortfall > 0 that need purchasing
+    # Feature #9: Only include items with procurement_type 'purchase' or 'both'
     # raw SQL — arithmetic comparison (shortfall_qty + 0 > 0)
     materials = conn.execute(
         """SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
@@ -2799,6 +2933,7 @@ def generate_purchase_requests(conn, args):
            LEFT JOIN item i ON i.id = ppm.item_id
            WHERE ppm.production_plan_id = ?
              AND ppm.shortfall_qty + 0 > 0
+             AND ppm.procurement_type IN ('purchase', 'both')
            ORDER BY ppm.rowid""",
         (args.production_plan_id,),
     ).fetchall()
@@ -2816,17 +2951,48 @@ def generate_purchase_requests(conn, args):
             "on_order_qty": mat["on_order_qty"],
             "shortfall_qty": mat["shortfall_qty"],
             "warehouse_id": mat.get("warehouse_id"),
+            "procurement_type": mat.get("procurement_type", "purchase"),
+        })
+
+    # Also fetch manufacture-type items for informational purposes
+    mfg_materials = conn.execute(
+        """SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
+           FROM production_plan_material ppm
+           LEFT JOIN item i ON i.id = ppm.item_id
+           WHERE ppm.production_plan_id = ?
+             AND ppm.shortfall_qty + 0 > 0
+             AND ppm.procurement_type IN ('manufacture', 'both')
+           ORDER BY ppm.rowid""",
+        (args.production_plan_id,),
+    ).fetchall()
+
+    manufacture_items = []
+    for mat_row in mfg_materials:
+        mat = row_to_dict(mat_row)
+        manufacture_items.append({
+            "item_id": mat["item_id"],
+            "item_code": mat.get("item_code", ""),
+            "item_name": mat.get("item_name", ""),
+            "uom": mat.get("stock_uom", ""),
+            "shortfall_qty": mat["shortfall_qty"],
+            "warehouse_id": mat.get("warehouse_id"),
+            "procurement_type": mat.get("procurement_type", "manufacture"),
         })
 
     audit(conn, "erpclaw-manufacturing", "generate-purchase-requests", "production_plan",
            args.production_plan_id,
-           new_values={"shortfall_items": len(purchase_requests)})
+           new_values={
+               "purchase_items": len(purchase_requests),
+               "manufacture_items": len(manufacture_items),
+           })
     conn.commit()
 
     ok({
         "production_plan_id": args.production_plan_id,
         "purchase_requests": purchase_requests,
         "shortfall_item_count": len(purchase_requests),
+        "manufacture_items": manufacture_items,
+        "manufacture_item_count": len(manufacture_items),
     })
 
 
@@ -3016,6 +3182,259 @@ def status_action(conn, args):
 
 
 # ---------------------------------------------------------------------------
+# 25. add-bom-substitute  (Feature #7: Material Substitution)
+# ---------------------------------------------------------------------------
+
+def add_bom_substitute(conn, args):
+    """Add a substitute item for a BOM line item.
+
+    Required: --bom-item-id, --substitute-item-id
+    Optional: --conversion-factor (default "1"), --priority (default 0)
+
+    The substitute can be used in material transfers when the primary item
+    has insufficient stock.
+    """
+    if not args.bom_item_id:
+        err("--bom-item-id is required")
+    if not args.substitute_item_id:
+        err("--substitute-item-id is required")
+
+    # Validate bom_item exists
+    bi_t = Table("bom_item")
+    bi_q = Q.from_(bi_t).select(bi_t.star).where(bi_t.id == P())
+    bom_item = conn.execute(bi_q.get_sql(), (args.bom_item_id,)).fetchone()
+    if not bom_item:
+        err(f"BOM item {args.bom_item_id} not found")
+
+    # Validate substitute item exists
+    _validate_item_exists(conn, args.substitute_item_id, "Substitute item")
+
+    # Ensure substitute is different from the primary item
+    bi_dict = row_to_dict(bom_item)
+    if bi_dict["item_id"] == args.substitute_item_id:
+        err("Substitute item cannot be the same as the primary BOM item")
+
+    conversion_factor = to_decimal(args.conversion_factor or "1")
+    if conversion_factor <= 0:
+        err("--conversion-factor must be greater than 0")
+
+    priority = int(args.priority or "0")
+
+    # Check for duplicate substitute
+    bis_t = Table("bom_item_substitute")
+    dup_q = (Q.from_(bis_t).select(bis_t.id)
+             .where(bis_t.bom_item_id == P())
+             .where(bis_t.substitute_item_id == P()))
+    dup = conn.execute(dup_q.get_sql(), (args.bom_item_id, args.substitute_item_id)).fetchone()
+    if dup:
+        err(f"Substitute item {args.substitute_item_id} already exists for this BOM item")
+
+    sub_id = str(uuid.uuid4())
+    ins_q = (Q.into(bis_t).columns(
+        "id", "bom_item_id", "substitute_item_id", "conversion_factor", "priority"
+    ).insert(P(), P(), P(), P(), P()))
+    conn.execute(ins_q.get_sql(), (
+        sub_id, args.bom_item_id, args.substitute_item_id,
+        str(round_currency(conversion_factor)), priority,
+    ))
+
+    audit(conn, "erpclaw-manufacturing", "add-bom-substitute", "bom_item_substitute", sub_id,
+           new_values={
+               "bom_item_id": args.bom_item_id,
+               "substitute_item_id": args.substitute_item_id,
+               "conversion_factor": str(round_currency(conversion_factor)),
+               "priority": priority,
+           })
+    conn.commit()
+
+    ok({
+        "substitute_id": sub_id,
+        "bom_item_id": args.bom_item_id,
+        "substitute_item_id": args.substitute_item_id,
+        "conversion_factor": str(round_currency(conversion_factor)),
+        "priority": priority,
+    })
+
+
+# ---------------------------------------------------------------------------
+# 26. list-bom-substitutes  (Feature #7: Material Substitution)
+# ---------------------------------------------------------------------------
+
+def list_bom_substitutes(conn, args):
+    """List substitute items for a BOM line item.
+
+    Required: --bom-item-id
+    Returns: list of substitutes ordered by priority.
+    """
+    if not args.bom_item_id:
+        err("--bom-item-id is required")
+
+    bis_t = Table("bom_item_substitute").as_("bis")
+    i = Table("item").as_("i")
+    q = (Q.from_(bis_t)
+         .left_join(i).on(i.id == bis_t.substitute_item_id)
+         .select(bis_t.star, i.item_code, i.item_name, i.stock_uom)
+         .where(bis_t.bom_item_id == P())
+         .orderby(bis_t.priority))
+    rows = conn.execute(q.get_sql(), (args.bom_item_id,)).fetchall()
+
+    substitutes = [row_to_dict(r) for r in rows]
+    ok({
+        "bom_item_id": args.bom_item_id,
+        "substitutes": substitutes,
+        "count": len(substitutes),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 27. add-bom-output  (Feature #8: Co-Products / By-Products)
+# ---------------------------------------------------------------------------
+
+def add_bom_output(conn, args):
+    """Add an output item (co-product or by-product) to a BOM.
+
+    Required: --bom-id, --item-id, --quantity
+    Optional: --is-primary (0 or 1, default 0), --cost-allocation-pct (default "0")
+
+    For the primary finished good, is_primary=1. For by-products, is_primary=0.
+    Cost allocation percentages across all outputs should sum to 100.
+    """
+    if not args.bom_id:
+        err("--bom-id is required")
+    if not args.item_id:
+        err("--item-id is required")
+    if not args.quantity:
+        err("--quantity is required")
+
+    # Validate BOM exists
+    _validate_bom_exists(conn, args.bom_id)
+
+    # Validate item exists
+    _validate_item_exists(conn, args.item_id, "Output item")
+
+    qty = to_decimal(args.quantity)
+    if qty <= 0:
+        err("--quantity must be greater than 0")
+
+    is_primary = int(args.is_primary or "0")
+    if is_primary not in (0, 1):
+        err("--is-primary must be 0 or 1")
+
+    cost_allocation_pct = to_decimal(args.cost_allocation_pct or "0")
+    if cost_allocation_pct < 0 or cost_allocation_pct > Decimal("100"):
+        err("--cost-allocation-pct must be between 0 and 100")
+
+    # Check for duplicate output item on this BOM
+    boi_t = Table("bom_output_item")
+    dup_q = (Q.from_(boi_t).select(boi_t.id)
+             .where(boi_t.bom_id == P())
+             .where(boi_t.item_id == P()))
+    dup = conn.execute(dup_q.get_sql(), (args.bom_id, args.item_id)).fetchone()
+    if dup:
+        err(f"Output item {args.item_id} already exists on BOM {args.bom_id}")
+
+    output_id = str(uuid.uuid4())
+    ins_q = (Q.into(boi_t).columns(
+        "id", "bom_id", "item_id", "qty", "is_primary", "cost_allocation_pct"
+    ).insert(P(), P(), P(), P(), P(), P()))
+    conn.execute(ins_q.get_sql(), (
+        output_id, args.bom_id, args.item_id,
+        str(round_currency(qty)), is_primary,
+        str(round_currency(cost_allocation_pct)),
+    ))
+
+    audit(conn, "erpclaw-manufacturing", "add-bom-output", "bom_output_item", output_id,
+           new_values={
+               "bom_id": args.bom_id,
+               "item_id": args.item_id,
+               "qty": str(round_currency(qty)),
+               "is_primary": is_primary,
+               "cost_allocation_pct": str(round_currency(cost_allocation_pct)),
+           })
+    conn.commit()
+
+    ok({
+        "output_id": output_id,
+        "bom_id": args.bom_id,
+        "item_id": args.item_id,
+        "qty": str(round_currency(qty)),
+        "is_primary": is_primary,
+        "cost_allocation_pct": str(round_currency(cost_allocation_pct)),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 28. list-bom-outputs  (Feature #8: Co-Products / By-Products)
+# ---------------------------------------------------------------------------
+
+def list_bom_outputs(conn, args):
+    """List output items (co-products and by-products) for a BOM.
+
+    Required: --bom-id
+    Returns: list of output items with item details.
+    """
+    if not args.bom_id:
+        err("--bom-id is required")
+
+    boi_t = Table("bom_output_item").as_("boi")
+    i = Table("item").as_("i")
+    q = (Q.from_(boi_t)
+         .left_join(i).on(i.id == boi_t.item_id)
+         .select(boi_t.star, i.item_code, i.item_name, i.stock_uom)
+         .where(boi_t.bom_id == P())
+         .orderby(boi_t.is_primary, order=Order.desc))
+    rows = conn.execute(q.get_sql(), (args.bom_id,)).fetchall()
+
+    outputs = [row_to_dict(r) for r in rows]
+    ok({
+        "bom_id": args.bom_id,
+        "outputs": outputs,
+        "count": len(outputs),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 29. update-item-procurement-type  (Feature #9: Make vs Buy)
+# ---------------------------------------------------------------------------
+
+def update_item_procurement_type(conn, args):
+    """Update an item's default procurement type.
+
+    Required: --item-id, --procurement-type ('purchase', 'manufacture', or 'both')
+
+    Controls how MRP treats shortfalls: 'purchase' generates purchase requests,
+    'manufacture' generates work orders, 'both' suggests both options.
+    """
+    if not args.item_id:
+        err("--item-id is required")
+    if not args.procurement_type:
+        err("--procurement-type is required ('purchase', 'manufacture', or 'both')")
+
+    valid_types = ("purchase", "manufacture", "both")
+    if args.procurement_type not in valid_types:
+        err(f"--procurement-type must be one of: {', '.join(valid_types)}")
+
+    # Validate item exists
+    _validate_item_exists(conn, args.item_id)
+
+    i_t = Table("item")
+    upd_q = (Q.update(i_t)
+             .set(i_t.default_procurement_type, P())
+             .set(i_t.updated_at, LiteralValue("datetime('now')"))
+             .where(i_t.id == P()))
+    conn.execute(upd_q.get_sql(), (args.procurement_type, args.item_id))
+
+    audit(conn, "erpclaw-manufacturing", "update-item-procurement-type", "item", args.item_id,
+           new_values={"default_procurement_type": args.procurement_type})
+    conn.commit()
+
+    ok({
+        "item_id": args.item_id,
+        "default_procurement_type": args.procurement_type,
+    })
+
+
+# ---------------------------------------------------------------------------
 # ACTIONS dispatch table
 # ---------------------------------------------------------------------------
 
@@ -3043,6 +3462,11 @@ ACTIONS = {
     "generate-work-orders": generate_work_orders,
     "generate-purchase-requests": generate_purchase_requests,
     "add-subcontracting-order": add_subcontracting_order,
+    "add-bom-substitute": add_bom_substitute,
+    "list-bom-substitutes": list_bom_substitutes,
+    "add-bom-output": add_bom_output,
+    "list-bom-outputs": list_bom_outputs,
+    "update-item-procurement-type": update_item_procurement_type,
     "status": status_action,
 }
 
@@ -3114,7 +3538,20 @@ def main():
     # BOM flags
     parser.add_argument("--is-active")
     parser.add_argument("--is-default")
+    parser.add_argument("--is-primary")
     parser.add_argument("--uom")
+
+    # Material substitution (Feature #7)
+    parser.add_argument("--bom-item-id")
+    parser.add_argument("--substitute-item-id")
+    parser.add_argument("--conversion-factor")
+    parser.add_argument("--priority")
+
+    # Co-products / by-products (Feature #8)
+    parser.add_argument("--cost-allocation-pct")
+
+    # Make vs buy (Feature #9)
+    parser.add_argument("--procurement-type")
 
     # Filters
     parser.add_argument("--status")
