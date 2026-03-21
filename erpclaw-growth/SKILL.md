@@ -127,7 +127,6 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
 | `pipeline-report` | | `--stage`, `--from-date`, `--to-date` |
-| `crm-status` | | |
 
 ### CRM Advanced — Email Campaigns (12 actions)
 
@@ -199,15 +198,11 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `pipeline-velocity` | `--company-id` | `--start-date`, `--end-date` |
 | `win-loss-analysis` | `--company-id` | `--start-date`, `--end-date` |
 | `marketing-dashboard` | `--company-id` | `--start-date`, `--end-date` |
-| `crm-adv-status` | | |
 
 ### Analytics (25 actions)
 
-`status` routes to analytics by default. Domain aliases: `crm-status`, `analytics-status`, `ai-status`, `crm-adv-status`.
-
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `status` | | `--company-id` |
 | `available-metrics` | | `--company-id` |
 | `liquidity-ratios` | `--company-id`, `--as-of-date` | |
 | `profitability-ratios` | `--company-id`, `--from-date`, `--to-date` | |
@@ -232,8 +227,9 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `company-scorecard` | `--company-id` | `--as-of-date` |
 | `metric-trend` | `--company-id`, `--metric` | `--from-date`, `--to-date`, `--periodicity` |
 | `period-comparison` | `--company-id`, `--periods` (JSON) | `--metrics` (JSON) |
+| `analyze-query-performance` | `--company-id` | |
 
-### AI Engine (22 actions)
+### AI Engine (21 actions)
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
@@ -241,7 +237,7 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `list-anomalies` | | `--company-id`, `--severity`, `--status`, `--limit`, `--offset` |
 | `acknowledge-anomaly` | `--anomaly-id` | |
 | `dismiss-anomaly` | `--anomaly-id` | `--reason` |
-| `forecast-cash-flow` | `--company-id` | `--horizon-days` (default 30) |
+| `forecast-cash-flow` | `--company-id` | `--horizon-days` |
 | `get-forecast` | `--company-id` | |
 | `create-scenario` | `--company-id`, `--name` | `--assumptions` (JSON), `--scenario-type` |
 | `list-scenarios` | `--company-id` | `--limit`, `--offset` |
@@ -258,7 +254,6 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `get-conversation-context` | | `--context-id` |
 | `add-pending-decision` | `--description`, `--options` (JSON) | `--decision-type`, `--context-id` |
 | `log-audit-conversation` | `--action-name`, `--details` (JSON) | `--result` |
-| `ai-status` | | `--company-id` |
 
 ### Confirmation Requirements
 

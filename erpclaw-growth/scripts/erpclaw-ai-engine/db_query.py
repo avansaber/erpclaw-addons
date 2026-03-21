@@ -61,7 +61,7 @@ VALID_SCENARIO_TYPES = {
 
 VALID_FORECAST_SCENARIOS = {"pessimistic", "expected", "optimistic"}
 
-VALID_RULE_ACTIONS = {"block", "warn", "notify", "auto_execute", "suggest"}
+VALID_RULE_ACTION_TYPES = {"block", "warn", "notify", "auto_execute", "suggest"}
 
 VALID_CONTEXT_TYPES = {
     "active_workflow", "pending_decision", "in_progress_analysis",
@@ -293,9 +293,9 @@ def add_business_rule(conn, args):
 
     severity = args.severity or "warn"
     action_val = SEVERITY_TO_ACTION.get(severity, severity)
-    if action_val not in VALID_RULE_ACTIONS:
+    if action_val not in VALID_RULE_ACTION_TYPES:
         err(f"Invalid --severity: {severity}. "
-             f"Must be one of: {', '.join(sorted(VALID_RULE_ACTIONS))}")
+             f"Must be one of: {', '.join(sorted(VALID_RULE_ACTION_TYPES))}")
 
     parsed_condition = {}
     if args.name:

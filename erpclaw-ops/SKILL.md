@@ -125,6 +125,9 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `add-operation` / `add-workstation` | Define operations and workstations |
 | `add-routing` | Create routing with operation sequence |
 | `add-bom` / `update-bom` / `get-bom` / `list-boms` | BOM CRUD |
+| `add-bom-output` / `list-bom-outputs` | BOM co-products/by-products |
+| `add-bom-substitute` / `list-bom-substitutes` | BOM item substitutes |
+| `update-item-procurement-type` | Set item procurement (buy/make/subcontract) |
 | `explode-bom` | Flatten multi-level BOM recursively |
 | `add-work-order` / `get-work-order` / `list-work-orders` | Work order CRUD |
 | `start-work-order` / `transfer-materials` / `complete-work-order` / `cancel-work-order` | Work order lifecycle (posts SLE + GL) |
@@ -164,7 +167,7 @@ Tool lifecycle: new -> good -> worn -> needs_repair -> scrapped. ECO workflow: d
 | `add-task` / `update-task` / `list-tasks` | Task management |
 | `add-milestone` / `update-milestone` | Milestone tracking |
 | `add-timesheet` / `get-timesheet` / `list-timesheets` | Timesheet CRUD |
-| `submit-timesheet` / `bill-timesheet` | Timesheet lifecycle (Draft -> Submitted -> Billed) |
+| `submit-timesheet` / `bill-timesheet` / `create-billing-from-timesheets` | Timesheet lifecycle (Draft -> Submitted -> Billed) |
 | `project-profitability` / `gantt-data` / `resource-utilization` | Reports |
 | `status` | Projects dashboard |
 
@@ -211,7 +214,7 @@ Depreciation methods: straight_line, written_down_value, double_declining.
 
 ### Status Routing
 
-`status` routes to manufacturing by default. Domain-specific aliases: `manufacturing-status`, `advmfg-status`, `projects-status`, `assets-status`, `quality-status`, `support-status`.
+`status` routes to manufacturing by default. Domain-specific status actions are also available via the router.
 
 ### Quick Command Reference
 
