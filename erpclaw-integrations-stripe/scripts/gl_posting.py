@@ -49,6 +49,32 @@ def _today():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _resolve_cost_center_id(conn, company_id, explicit_cc_id=None):
+    """Resolve cost_center_id: use explicit value if given, else company default.
+
+    P&L accounts (expense, income) require a cost_center_id for GL validation
+    Step 6. This function auto-resolves from the company table when no explicit
+    value is provided, so users don't need to know cost center IDs.
+
+    Returns the cost_center_id string, or calls err() if none can be resolved.
+    """
+    if explicit_cc_id:
+        return explicit_cc_id
+
+    t = Table("company")
+    row = conn.execute(
+        Q.from_(t).select(t.default_cost_center_id)
+        .where(t.id == P()).get_sql(),
+        (company_id,)
+    ).fetchone()
+
+    if row and row["default_cost_center_id"]:
+        return row["default_cost_center_id"]
+
+    err("No cost_center_id provided and company has no default_cost_center_id. "
+        "Set a default cost center on the company or pass --cost-center-id.")
+
+
 def _call_silently(fn, conn, args):
     """Call an action function, suppressing stdout (ok/err output).
 
@@ -236,6 +262,10 @@ def post_charge_gl(conn, args):
     gl = _get_stripe_account_gl(conn, stripe_account_id)
     company_id = gl["company_id"]
 
+    # Auto-resolve cost_center_id for P&L accounts (expense/income)
+    explicit_cc = getattr(args, "cost_center_id", None)
+    cost_center_id = _resolve_cost_center_id(conn, company_id, explicit_cc)
+
     # Get fee from balance_transaction
     bt_table = Table("stripe_balance_transaction")
     bt = conn.execute(
@@ -260,10 +290,40 @@ def post_charge_gl(conn, args):
     customer_id, party_type = _find_customer_for_charge(
         conn, stripe_account_id, charge["customer_stripe_id"])
 
+    # ASC 606 subscription-aware credit account selection:
+    # If this charge is linked to a subscription that has an ASC 606
+    # revenue contract, ALWAYS credit Unearned Revenue (deferred),
+    # regardless of customer mapping. Revenue is recognized later
+    # via stripe-recognize-subscription-revenue.
+    is_asc606_sub = False
+    if charge["invoice_stripe_id"]:
+        inv_t = Table("stripe_invoice")
+        inv_row = conn.execute(
+            Q.from_(inv_t).select(inv_t.subscription_stripe_id)
+            .where(inv_t.stripe_account_id == P())
+            .where(inv_t.stripe_id == P())
+            .get_sql(),
+            (stripe_account_id, charge["invoice_stripe_id"])
+        ).fetchone()
+        if inv_row and inv_row["subscription_stripe_id"]:
+            sub_t = Table("stripe_subscription")
+            sub_row = conn.execute(
+                Q.from_(sub_t).select(sub_t.erpclaw_revenue_contract_id)
+                .where(sub_t.stripe_account_id == P())
+                .where(sub_t.stripe_id == P())
+                .get_sql(),
+                (stripe_account_id, inv_row["subscription_stripe_id"])
+            ).fetchone()
+            if sub_row and sub_row["erpclaw_revenue_contract_id"]:
+                is_asc606_sub = True
+
     # Determine credit account
     # Clearing account is bank type (no party needed).
     # Unearned Revenue is temporary/liability type (no party needed).
-    if customer_id:
+    if is_asc606_sub:
+        # ASC 606: always defer subscription revenue
+        credit_account = gl["unearned_revenue_account_id"]
+    elif customer_id:
         credit_account = gl["stripe_clearing_account_id"]
     else:
         credit_account = gl["unearned_revenue_account_id"]
@@ -285,7 +345,7 @@ def post_charge_gl(conn, args):
             "account_id": gl["stripe_fees_account_id"],
             "debit": str(round_currency(fee)),
             "credit": "0",
-            "cost_center_id": getattr(args, "cost_center_id", None),
+            "cost_center_id": cost_center_id,
         })
 
     # CR Revenue/Unearned (gross amount)
@@ -501,6 +561,10 @@ def post_dispute_gl(conn, args):
     posting_date = _today()
     dispute_fee = Decimal("15.00")  # Standard Stripe dispute fee
 
+    # Auto-resolve cost_center_id for P&L accounts (expense)
+    explicit_cc = getattr(args, "cost_center_id", None)
+    cost_center_id = _resolve_cost_center_id(conn, company_id, explicit_cc)
+
     status = dispute["status"]
 
     if status == "won":
@@ -544,7 +608,7 @@ def post_dispute_gl(conn, args):
                 "account_id": gl["dispute_expense_account_id"],
                 "debit": str(round_currency(total)),
                 "credit": "0",
-                "cost_center_id": getattr(args, "cost_center_id", None),
+                "cost_center_id": cost_center_id,
             },
             # CR Stripe Clearing (release the hold)
             {
@@ -600,7 +664,7 @@ def post_dispute_gl(conn, args):
                 "account_id": gl["dispute_expense_account_id"],
                 "debit": str(round_currency(total)),
                 "credit": "0",
-                "cost_center_id": getattr(args, "cost_center_id", None),
+                "cost_center_id": cost_center_id,
             },
             # CR Stripe Clearing
             {
@@ -783,6 +847,10 @@ def post_connect_fee_gl(conn, args):
     fee_amount = to_decimal(app_fee["amount"])
     posting_date = _today()
 
+    # Auto-resolve cost_center_id for P&L accounts (income)
+    explicit_cc = getattr(args, "cost_center_id", None)
+    cost_center_id = _resolve_cost_center_id(conn, company_id, explicit_cc)
+
     # Platform revenue account is required for connect fees
     platform_rev = gl.get("platform_revenue_account_id")
     if not platform_rev:
@@ -800,7 +868,7 @@ def post_connect_fee_gl(conn, args):
             "account_id": platform_rev,
             "debit": "0",
             "credit": str(round_currency(fee_amount)),
-            "cost_center_id": getattr(args, "cost_center_id", None),
+            "cost_center_id": cost_center_id,
         },
     ]
 

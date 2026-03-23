@@ -13,6 +13,8 @@ Routes all actions across domain modules:
   reconciliation (8): run-reconciliation, reconcile-payout, match-charge,
                       unmatch-charge, list-unreconciled, get-reconciliation-run,
                       list-reconciliation-runs, reconciliation-summary
+  rev_rec (4): stripe-create-rev-rec-schedule, stripe-recognize-subscription-revenue,
+               stripe-rev-rec-status, stripe-handle-subscription-change
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -51,6 +53,7 @@ from gl_posting import ACTIONS as GL_POSTING_ACTIONS
 from browse import ACTIONS as BROWSE_ACTIONS
 from connect import ACTIONS as CONNECT_ACTIONS
 from reports import ACTIONS as REPORTS_ACTIONS
+from rev_rec import ACTIONS as REV_REC_ACTIONS
 from utils import ACTIONS as UTILS_ACTIONS
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,7 @@ ACTIONS.update(GL_POSTING_ACTIONS)
 ACTIONS.update(BROWSE_ACTIONS)
 ACTIONS.update(CONNECT_ACTIONS)
 ACTIONS.update(REPORTS_ACTIONS)
+ACTIONS.update(REV_REC_ACTIONS)
 ACTIONS.update(UTILS_ACTIONS)
 
 ACTIONS["status"] = lambda conn, args: ok({
@@ -76,7 +80,7 @@ ACTIONS["status"] = lambda conn, args: ok({
     "version": "1.0.0",
     "actions_available": len([k for k in ACTIONS if k != "status"]),
     "domains": ["accounts", "sync", "customers", "gl_rules", "reconciliation",
-                "gl_posting", "browse", "connect", "reports", "utils"],
+                "gl_posting", "rev_rec", "browse", "connect", "reports", "utils"],
     "database": DEFAULT_DB_PATH,
 })
 
@@ -153,6 +157,13 @@ def main():
     parser.add_argument("--refund-stripe-id")
     parser.add_argument("--dispute-stripe-id")
     parser.add_argument("--app-fee-stripe-id")
+
+    # ── REV REC domain (ASC 606) ──────────────────────────────────
+    parser.add_argument("--subscription-stripe-id")
+    parser.add_argument("--revenue-account-id")
+    parser.add_argument("--period-date")
+    parser.add_argument("--change-type")
+    parser.add_argument("--new-plan-amount")
 
     # ── BROWSE domain ──────────────────────────────────────────────
     parser.add_argument("--customer-stripe-id")
