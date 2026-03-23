@@ -6,12 +6,15 @@
   stripe-rev-rec-status            -- report on ASC 606 status for all subscriptions
   stripe-handle-subscription-change -- handle cancel/upgrade/downgrade
 
-Uses advacct_revenue_contract, advacct_performance_obligation,
-advacct_revenue_schedule tables (owned by erpclaw-accounting-adv, READ/WRITE
-via the bridge pattern since this is a cross-module integration).
+Writes to advacct_revenue_contract, advacct_performance_obligation,
+advacct_revenue_schedule are delegated to erpclaw-accounting-adv via
+cross_skill.call_skill_action() (Article 5 compliance).  READs are direct.
 
 Imported by db_query.py (unified router).
 """
+import argparse
+import io
+import json
 import os
 import sys
 import uuid
@@ -25,6 +28,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.gl_posting import insert_gl_entries
+    from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
@@ -40,6 +44,135 @@ if _SCRIPTS_DIR not in sys.path:
 from stripe_helpers import (
     SKILL, now_iso, validate_stripe_account,
 )
+
+
+# ---------------------------------------------------------------------------
+# Cross-module delegation helpers (Article 5 compliance)
+# ---------------------------------------------------------------------------
+
+def _delegate_revenue_action(conn, action, args_dict):
+    """Delegate a write action to erpclaw-accounting-adv (the advacct table owner).
+
+    Tries call_skill_action() (subprocess) first for production.
+    Falls back to direct function import for dev/test environments where
+    the erpclaw skill is not installed at ~/clawd/skills/.
+
+    Args:
+        conn: Database connection (used for fallback path).
+        action: The erpclaw action name (e.g. 'add-revenue-contract').
+        args_dict: Dict of action parameters (Python names, no -- prefix).
+
+    Returns:
+        Parsed JSON response dict from the delegated action.
+
+    Raises:
+        SystemExit via err() on failure.
+    """
+    # Build CLI args dict with -- prefixes for call_skill_action
+    cli_args = {}
+    for key, value in args_dict.items():
+        cli_key = f"--{key.replace('_', '-')}"
+        cli_args[cli_key] = value
+
+    db_path = os.environ.get("ERPCLAW_DB_PATH")
+
+    try:
+        result = call_skill_action(
+            "erpclaw", action, args=cli_args, db_path=db_path, timeout=30,
+        )
+        return result
+    except (CrossSkillError, Exception):
+        # Fallback: call revenue.py functions directly (dev/test environment)
+        return _direct_call_revenue_action(conn, action, args_dict)
+
+
+def _direct_call_revenue_action(conn, action, args_dict):
+    """Call erpclaw-accounting-adv revenue.py functions directly (in-process).
+
+    Used as fallback when call_skill_action() cannot resolve the erpclaw skill
+    (e.g. local dev/test where ~/clawd/skills/erpclaw doesn't exist).
+
+    Captures stdout to prevent ok()/err() from corrupting the caller's output.
+    """
+    # Lazy import to avoid circular dependencies at module level
+    import importlib.util
+
+    # Find revenue.py relative to the project structure
+    revenue_path = _find_revenue_module()
+    if not revenue_path:
+        err(f"Cannot find erpclaw-accounting-adv revenue.py for action '{action}'")
+
+    spec = importlib.util.spec_from_file_location("_revenue_delegate", revenue_path)
+    revenue_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revenue_mod)
+
+    if action not in revenue_mod.ACTIONS:
+        err(f"Action '{action}' not found in erpclaw-accounting-adv revenue module")
+
+    fn = revenue_mod.ACTIONS[action]
+
+    # Build an argparse.Namespace from args_dict
+    ns = argparse.Namespace(**args_dict)
+    # Add defaults that revenue.py expects
+    if not hasattr(ns, "limit"):
+        ns.limit = 20
+    if not hasattr(ns, "offset"):
+        ns.offset = 0
+
+    # Wrap raw sqlite3.Connection in ConnectionWrapper if needed.
+    # Revenue functions set conn.company_id for naming series, which requires
+    # ConnectionWrapper (Python 3.12+ disallows arbitrary attrs on Connection).
+    import sqlite3 as _sqlite3
+    if isinstance(conn, _sqlite3.Connection):
+        from erpclaw_lib.db import ConnectionWrapper
+        wrapped_conn = ConnectionWrapper(conn)
+    else:
+        wrapped_conn = conn
+
+    # Capture stdout since revenue functions call ok() which prints and exits
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+
+    def _fake_exit(code=0):
+        raise SystemExit(code)
+
+    old_exit = sys.exit
+    try:
+        sys.stdout = buf
+        sys.exit = _fake_exit
+        fn(wrapped_conn, ns)
+    except SystemExit:
+        pass
+    finally:
+        sys.stdout = old_stdout
+        sys.exit = old_exit
+
+    output = buf.getvalue().strip()
+    if not output:
+        err(f"No output from delegated action '{action}'")
+
+    result = json.loads(output)
+    if result.get("status") == "error":
+        err(f"Delegated action '{action}' failed: {result.get('message', 'unknown')}")
+
+    return result
+
+
+def _find_revenue_module():
+    """Locate erpclaw-accounting-adv/revenue.py in the project source tree."""
+    # Check common locations relative to this file and project root
+    candidates = [
+        # From src/erpclaw-addons/erpclaw-integrations-stripe/scripts/ -> src/erpclaw/scripts/erpclaw-accounting-adv/revenue.py
+        os.path.join(os.path.dirname(_SCRIPTS_DIR), "..", "..", "erpclaw", "scripts",
+                     "erpclaw-accounting-adv", "revenue.py"),
+        # Server install path
+        os.path.expanduser("~/clawd/skills/erpclaw/scripts/erpclaw-accounting-adv/revenue.py"),
+    ]
+    for candidate in candidates:
+        path = os.path.normpath(candidate)
+        if os.path.exists(path):
+            return path
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +263,9 @@ def create_rev_rec_schedule(conn, args):
 
     For monthly subscriptions: 12 schedule entries, each = plan_amount
     For annual subscriptions: 12 schedule entries, each = plan_amount/12
+
+    Writes to advacct_* tables are delegated to erpclaw-accounting-adv
+    via cross_skill (Article 5 compliance).
     """
     stripe_account_id = getattr(args, "stripe_account_id", None)
     if not stripe_account_id:
@@ -226,62 +362,52 @@ def create_rev_rec_schedule(conn, args):
     end_dt = date(end_year, end_month, min(start_dt.day, end_day))
     end_date = end_dt.isoformat()
 
-    # 4. Create revenue contract
-    contract_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO advacct_revenue_contract (
-            id, customer_name, contract_number, start_date, end_date,
-            total_value, allocated_value, contract_status, modification_count,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        contract_id, customer_name, subscription_stripe_id,
-        start_date, end_date,
-        str(round_currency(total_value)), str(round_currency(total_value)),
-        "active", 0, company_id, now, now,
-    ))
+    # 4. Create revenue contract via erpclaw-accounting-adv (Article 5)
+    contract_result = _delegate_revenue_action(conn, "add-revenue-contract", {
+        "company_id": company_id,
+        "customer_name": customer_name,
+        "contract_number": subscription_stripe_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_value": str(round_currency(total_value)),
+    })
+    contract_id = contract_result["id"]
 
-    # 5. Create performance obligation
-    obligation_id = str(uuid.uuid4())
+    # Activate the contract (add-revenue-contract creates as draft)
+    _delegate_revenue_action(conn, "update-revenue-contract", {
+        "id": contract_id,
+        "contract_status": "active",
+        "total_value": str(round_currency(total_value)),
+    })
+
+    # 5. Create performance obligation via erpclaw-accounting-adv (Article 5)
     ob_name = f"SaaS access - {plan_interval}"
-    conn.execute("""
-        INSERT INTO advacct_performance_obligation (
-            id, contract_id, name, standalone_price, allocated_price,
-            recognition_method, recognition_basis, pct_complete,
-            obligation_status, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        obligation_id, contract_id, ob_name,
-        str(round_currency(total_value)), str(round_currency(total_value)),
-        "over_time", "time", "0",
-        "unsatisfied", company_id, now, now,
-    ))
+    obligation_result = _delegate_revenue_action(conn, "add-performance-obligation", {
+        "contract_id": contract_id,
+        "company_id": company_id,
+        "name": ob_name,
+        "standalone_price": str(round_currency(total_value)),
+        "recognition_method": "over_time",
+        "recognition_basis": "time",
+    })
+    obligation_id = obligation_result["id"]
 
-    # 6. Generate revenue schedule entries (12 months)
-    entries_created = 0
-    current_year = start_dt.year
-    current_month = start_dt.month
+    # 6. Generate revenue schedule via erpclaw-accounting-adv (Article 5)
+    _delegate_revenue_action(conn, "calculate-revenue-schedule", {
+        "obligation_id": obligation_id,
+    })
 
-    # Calculate remainder for last entry to ensure total matches exactly
-    remainder = round_currency(total_value - (monthly_amount * (schedule_months - 1)))
+    # Verify schedule entry count
+    sched_t = Table("advacct_revenue_schedule")
+    entries = conn.execute(
+        Q.from_(sched_t).select(fn.Count("*").as_("cnt"))
+        .where(sched_t.obligation_id == P())
+        .get_sql(),
+        (obligation_id,)
+    ).fetchone()
+    entries_created = entries["cnt"] if entries else 0
 
-    for i in range(schedule_months):
-        period_date = f"{current_year}-{current_month:02d}-01"
-        amount = str(remainder) if i == schedule_months - 1 else str(round_currency(monthly_amount))
-
-        conn.execute("""
-            INSERT INTO advacct_revenue_schedule (
-                id, obligation_id, period_date, amount, recognized, company_id, created_at
-            ) VALUES (?,?,?,?,?,?,?)
-        """, (str(uuid.uuid4()), obligation_id, period_date, amount, 0, company_id, now))
-        entries_created += 1
-
-        current_month += 1
-        if current_month > 12:
-            current_month = 1
-            current_year += 1
-
-    # 7. Link subscription to contract
+    # 7. Link subscription to contract (stripe_subscription is OUR table)
     conn.execute(
         "UPDATE stripe_subscription SET erpclaw_revenue_contract_id = ? WHERE id = ?",
         (contract_id, sub["id"])
@@ -316,7 +442,7 @@ def recognize_subscription_revenue(conn, args):
     For each subscription with an ASC 606 contract:
     - Find unrecognized schedule entries for the given period
     - Post GL: DR Unearned Revenue, CR Revenue
-    - Mark schedule entries as recognized
+    - Mark schedule entries as recognized via erpclaw-accounting-adv
 
     Requires --revenue-account-id (the income account for recognized revenue).
     """
@@ -375,7 +501,7 @@ def recognize_subscription_revenue(conn, args):
         sub = dict(sub_row)
         contract_id = sub["erpclaw_revenue_contract_id"]
 
-        # Find obligations for this contract
+        # Find obligations for this contract (READ is allowed)
         ob_t = Table("advacct_performance_obligation")
         obligations = conn.execute(
             Q.from_(ob_t).select(ob_t.id)
@@ -390,7 +516,7 @@ def recognize_subscription_revenue(conn, args):
         for ob_row in obligations:
             ob_id = ob_row["id"]
 
-            # Find unrecognized schedule entries for this period
+            # Find unrecognized schedule entries for this period (READ is allowed)
             sched_t = Table("advacct_revenue_schedule")
             schedules = conn.execute(
                 Q.from_(sched_t).select(sched_t.id, sched_t.amount)
@@ -400,6 +526,9 @@ def recognize_subscription_revenue(conn, args):
                 .get_sql(),
                 (ob_id, period_match, 0)
             ).fetchall()
+
+            if not schedules:
+                continue
 
             for sched in schedules:
                 sched_dict = dict(sched)
@@ -415,7 +544,7 @@ def recognize_subscription_revenue(conn, args):
                 )
 
                 # Post GL entries: DR Unearned Revenue, CR Revenue
-                entries = [
+                gl_entry_defs = [
                     {
                         "account_id": unearned_account_id,
                         "debit": str(round_currency(amount)),
@@ -430,7 +559,7 @@ def recognize_subscription_revenue(conn, args):
                 ]
 
                 gl_ids = insert_gl_entries(
-                    conn, entries,
+                    conn, gl_entry_defs,
                     voucher_type="journal_entry",
                     voucher_id=je_id,
                     posting_date=period_match,
@@ -438,11 +567,10 @@ def recognize_subscription_revenue(conn, args):
                     remarks=f"ASC 606 rev rec: {sub['stripe_id']}",
                 )
 
-                # Mark schedule entry as recognized
-                conn.execute(
-                    "UPDATE advacct_revenue_schedule SET recognized = 1 WHERE id = ?",
-                    (sched_dict["id"],)
-                )
+                # Mark schedule entry as recognized via erpclaw-accounting-adv (Article 5)
+                _delegate_revenue_action(conn, "recognize-schedule-entry", {
+                    "id": sched_dict["id"],
+                })
 
                 sub_recognized += amount
                 sub_entries += len(gl_ids)
@@ -477,6 +605,8 @@ def rev_rec_status(conn, args):
 
     Reports: subscription ID, customer, plan, total contract value,
     recognized to date, remaining deferred.
+
+    All queries are READs (allowed for any module).
     """
     stripe_account_id = getattr(args, "stripe_account_id", None)
     if not stripe_account_id:
@@ -506,7 +636,7 @@ def rev_rec_status(conn, args):
         sub = dict(sub_row)
         contract_id = sub["erpclaw_revenue_contract_id"]
 
-        # Get contract details
+        # Get contract details (READ)
         contract = conn.execute(
             "SELECT * FROM advacct_revenue_contract WHERE id = ?",
             (contract_id,)
@@ -517,7 +647,7 @@ def rev_rec_status(conn, args):
 
         contract_value = to_decimal(contract["total_value"])
 
-        # Calculate recognized and deferred from schedule
+        # Calculate recognized and deferred from schedule (READ)
         sched_rows = conn.execute("""
             SELECT
                 COALESCE(SUM(CASE WHEN rs.recognized = 1 THEN CAST(rs.amount AS NUMERIC) ELSE 0 END), 0) as recognized_amount,
@@ -564,6 +694,9 @@ def handle_subscription_change(conn, args):
 
     For cancel: mark contract as terminated, recognize remaining if service was provided.
     For upgrade/downgrade: update contract total_value, recalculate remaining schedule entries.
+
+    All writes to advacct_* tables are delegated to erpclaw-accounting-adv
+    via cross_skill (Article 5 compliance).
     """
     stripe_account_id = getattr(args, "stripe_account_id", None)
     if not stripe_account_id:
@@ -602,7 +735,7 @@ def handle_subscription_change(conn, args):
         err(f"Subscription {subscription_stripe_id} has no linked revenue contract. "
             f"Run stripe-create-rev-rec-schedule first.")
 
-    # Get contract
+    # Get contract (READ is allowed)
     contract = conn.execute(
         "SELECT * FROM advacct_revenue_contract WHERE id = ?",
         (contract_id,)
@@ -614,14 +747,13 @@ def handle_subscription_change(conn, args):
     now = now_iso()
 
     if change_type == "cancel":
-        # Mark contract as terminated
-        conn.execute("""
-            UPDATE advacct_revenue_contract
-            SET contract_status = 'terminated', updated_at = ?
-            WHERE id = ?
-        """, (now, contract_id))
+        # Mark contract as terminated via erpclaw-accounting-adv (Article 5)
+        _delegate_revenue_action(conn, "update-revenue-contract", {
+            "id": contract_id,
+            "contract_status": "terminated",
+        })
 
-        # Count remaining unrecognized entries
+        # Count remaining unrecognized entries (READ is allowed)
         remaining = conn.execute("""
             SELECT COUNT(*) as cnt, COALESCE(SUM(CAST(rs.amount AS NUMERIC)), 0) as total
             FROM advacct_revenue_schedule rs
@@ -668,43 +800,61 @@ def handle_subscription_change(conn, args):
             new_total = new_amount * Decimal("12")
             new_monthly = new_amount
 
-        # Update remaining unrecognized schedule entries with new monthly amount
-        ob_ids = conn.execute("""
-            SELECT po.id FROM advacct_performance_obligation po
-            WHERE po.contract_id = ?
-        """, (contract_id,)).fetchall()
+        # Get obligation IDs for this contract (READ is allowed)
+        ob_t = Table("advacct_performance_obligation")
+        ob_ids = conn.execute(
+            Q.from_(ob_t).select(ob_t.id)
+            .where(ob_t.contract_id == P())
+            .get_sql(),
+            (contract_id,)
+        ).fetchall()
 
+        # Count unrecognized entries before update (READ)
         entries_updated = 0
         for ob_row in ob_ids:
             ob_id = ob_row["id"]
-            # Update unrecognized entries
-            conn.execute("""
-                UPDATE advacct_revenue_schedule
-                SET amount = ?
-                WHERE obligation_id = ? AND recognized = 0
-            """, (str(round_currency(new_monthly)), ob_id))
-            entries_updated += conn.execute(
-                "SELECT changes()").fetchone()[0]
+            sched_t = Table("advacct_revenue_schedule")
+            unrec_count = conn.execute(
+                Q.from_(sched_t).select(fn.Count("*").as_("cnt"))
+                .where(sched_t.obligation_id == P())
+                .where(sched_t.recognized == P())
+                .get_sql(),
+                (ob_id, 0)
+            ).fetchone()
+            entries_updated += unrec_count["cnt"] if unrec_count else 0
 
-        # Update contract with new total value and modification count
+        # Update contract with new total value and modification count via
+        # erpclaw-accounting-adv (Article 5)
         old_mod_count = contract["modification_count"]
-        conn.execute("""
-            UPDATE advacct_revenue_contract
-            SET total_value = ?, allocated_value = ?,
-                contract_status = 'modified', modification_count = ?,
-                updated_at = ?
-            WHERE id = ?
-        """, (str(round_currency(new_total)), str(round_currency(new_total)),
-              old_mod_count + 1, now, contract_id))
 
-        # Update obligation allocated_price
+        # Use modify-contract to increment modification_count and set status
+        _delegate_revenue_action(conn, "modify-contract", {
+            "id": contract_id,
+        })
+
+        # Update total_value
+        _delegate_revenue_action(conn, "update-revenue-contract", {
+            "id": contract_id,
+            "total_value": str(round_currency(new_total)),
+        })
+
+        # Update obligation prices and schedule entries via
+        # erpclaw-accounting-adv (Article 5)
         for ob_row in ob_ids:
-            conn.execute("""
-                UPDATE advacct_performance_obligation
-                SET standalone_price = ?, allocated_price = ?, updated_at = ?
-                WHERE id = ?
-            """, (str(round_currency(new_total)), str(round_currency(new_total)),
-                  now, ob_row["id"]))
+            ob_id = ob_row["id"]
+
+            # Update obligation standalone/allocated price
+            _delegate_revenue_action(conn, "update-performance-obligation", {
+                "id": ob_id,
+                "standalone_price": str(round_currency(new_total)),
+                "allocated_price": str(round_currency(new_total)),
+            })
+
+            # Update unrecognized schedule entries with new monthly amount
+            _delegate_revenue_action(conn, "update-schedule-amounts", {
+                "obligation_id": ob_id,
+                "amount": str(round_currency(new_monthly)),
+            })
 
         audit(conn, SKILL, "stripe-handle-subscription-change",
               "stripe_subscription", sub["id"],

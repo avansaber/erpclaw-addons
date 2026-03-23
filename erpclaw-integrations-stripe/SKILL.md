@@ -1,7 +1,7 @@
 ---
 name: erpclaw-integrations-stripe
 version: 1.0.0
-description: Deep Stripe integration -- 62 actions across 9 domains. Account management, transaction sync, customer mapping, GL posting with rule engine, payout reconciliation, Connect platform fees, webhook processing, and financial reports.
+description: Deep Stripe integration -- 67 actions across 10 domains. Account management, transaction sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports.
 author: avansaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -10,7 +10,7 @@ category: integrations
 requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
-tags: [erpclaw, stripe, payments, gateway, charges, refunds, disputes, payouts, subscriptions, webhooks, connect, reconciliation, gl-posting, mrr]
+tags: [erpclaw, stripe, payments, gateway, charges, refunds, disputes, payouts, subscriptions, webhooks, connect, reconciliation, gl-posting, mrr, asc606, revenue-recognition]
 scripts:
   - scripts/db_query.py
 metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action stripe-status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH","STRIPE_API_KEY"]},"os":["darwin","linux"]}}
@@ -46,7 +46,7 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 --action stripe-revenue-report --stripe-account-id {id}
 ```
 
-## All 62 Actions
+## All 67 Actions
 
 ### Account Management (6 actions)
 | Action | Description |
@@ -135,6 +135,15 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 | `stripe-list-application-fees` | List application fees |
 | `stripe-list-transfers` | List transfers |
 | `stripe-connect-fee-summary` | Connect fee summary |
+
+### Revenue Recognition / ASC 606 (5 actions)
+| Action | Description |
+|--------|-------------|
+| `stripe-create-rev-rec-schedule` | Create ASC 606 revenue contract from Stripe subscription |
+| `stripe-recognize-subscription-revenue` | Batch recognize deferred revenue for period |
+| `stripe-rev-rec-status` | Revenue recognition status across subscriptions |
+| `stripe-handle-subscription-change` | Handle subscription upgrade/downgrade/cancel |
+| `stripe-rev-rec-summary` | Revenue recognition summary report |
 
 ### Reports (10 actions)
 | Action | Description |
