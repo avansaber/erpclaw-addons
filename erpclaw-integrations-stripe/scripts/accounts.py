@@ -358,24 +358,25 @@ def test_connection(conn, args):
     stripe.api_key = api_key
 
     try:
-        account_info = stripe.Account.retrieve()
-        # Update stripe_account_id from Stripe's response
-        stripe_acct_id_remote = account_info.get("id", "")
+        # Use Balance.retrieve() — works with restricted keys (rk_test_/rk_live_)
+        # from the ERPClaw Accounting Stripe App. Account.retrieve() requires
+        # rak_account_read which restricted app keys typically lack.
+        balance_info = stripe.Balance.retrieve()
         now = now_iso()
 
         sql, params = dynamic_update("stripe_account", {
-            "stripe_account_id": stripe_acct_id_remote,
             "updated_at": now,
         }, {"id": stripe_account_id})
         conn.execute(sql, params)
         conn.commit()
 
+        available = balance_info.get("available", [])
+        pending = balance_info.get("pending", [])
+
         ok({
             "connection": "success",
-            "stripe_account_id": stripe_acct_id_remote,
-            "business_profile": account_info.get("business_profile", {}),
-            "charges_enabled": account_info.get("charges_enabled"),
-            "payouts_enabled": account_info.get("payouts_enabled"),
+            "available_balance": [{"amount": b["amount"], "currency": b["currency"]} for b in available],
+            "pending_balance": [{"amount": b["amount"], "currency": b["currency"]} for b in pending],
             "mode": row["mode"],
         })
     except stripe.error.AuthenticationError:
@@ -386,7 +387,7 @@ def test_connection(conn, args):
         }, {"id": stripe_account_id})
         conn.execute(sql, params)
         conn.commit()
-        err("Stripe authentication failed. Check your API key.")
+        err("Stripe authentication failed. Check your restricted API key (rk_test_ or rk_live_).")
     except stripe.error.APIConnectionError:
         err("Could not connect to Stripe API. Check network connectivity.")
     except Exception as e:

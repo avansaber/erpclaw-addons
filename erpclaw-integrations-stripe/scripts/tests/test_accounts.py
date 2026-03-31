@@ -361,11 +361,9 @@ class TestTestConnection:
 
         # Mock the stripe module
         mock_stripe = MagicMock()
-        mock_stripe.Account.retrieve.return_value = {
-            "id": "acct_1234567890",
-            "business_profile": {"name": "Test Business"},
-            "charges_enabled": True,
-            "payouts_enabled": True,
+        mock_stripe.Balance.retrieve.return_value = {
+            "available": [{"amount": 50000, "currency": "usd"}],
+            "pending": [{"amount": 1200, "currency": "usd"}],
         }
         mock_stripe.error = MagicMock()
         mock_stripe.error.AuthenticationError = Exception
@@ -378,8 +376,7 @@ class TestTestConnection:
 
         assert is_ok(result)
         assert result["connection"] == "success"
-        assert result["stripe_account_id"] == "acct_1234567890"
-        assert result["charges_enabled"] is True
+        assert result["available_balance"][0]["amount"] == 50000
 
     def test_connection_not_found(self, conn, company_id):
         """Test connection with nonexistent account should fail."""
