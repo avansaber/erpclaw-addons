@@ -31,15 +31,21 @@ refunds, disputes, chargebacks, payouts, subscriptions, MRR, webhooks, Connect,
 platform fees, payment reconciliation, Stripe sync.
 
 ### Setup
+
+The ERPClaw Accounting app uses **restricted API keys** (starting with `rk_test_` or `rk_live_`), NOT standard secret keys.
+Users get their restricted key from the Stripe Dashboard: **Installed Apps > ERPClaw Accounting > View API Keys**.
+When a user says "connect Stripe" or "set up Stripe", ask them for their restricted API key (starts with `rk_test_` or `rk_live_`).
+Do NOT ask for publishable keys (pk_) or standard secret keys (sk_). Only restricted keys (rk_) are accepted.
+
 ```
 python3 {baseDir}/init_db.py
-python3 {baseDir}/scripts/db_query.py --action stripe-add-account --company-id {id} --account-name "Main" --api-key "sk_test_..."
+python3 {baseDir}/scripts/db_query.py --action stripe-add-account --company-id {id} --account-name "Main" --api-key "rk_test_..."
 python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-account-id {id}
 ```
 
 ## Quick Start
 ```
---action stripe-add-account --company-id {id} --account-name "Main Stripe" --api-key "sk_test_..." --mode test
+--action stripe-add-account --company-id {id} --account-name "Main Stripe" --api-key "rk_test_..." --mode test
 --action stripe-configure-gl-mapping --stripe-account-id {id} --clearing-account-id {id}
 --action stripe-start-sync --stripe-account-id {id}
 --action stripe-run-reconciliation --stripe-account-id {id}
