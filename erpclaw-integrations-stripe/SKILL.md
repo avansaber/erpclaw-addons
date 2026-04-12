@@ -32,9 +32,15 @@ platform fees, payment reconciliation, Stripe sync.
 
 ### Setup
 
+The ERPClaw Accounting app is published on the Stripe App Marketplace. Users must install it before connecting.
+
+**Step 1 — Install the app:**
+When a user says "connect Stripe" or "set up Stripe", first ask: "Have you installed the ERPClaw Accounting app from the Stripe Marketplace?"
+If not, direct them to install it: **https://marketplace.stripe.com/apps/erpclaw-accounting**
+
+**Step 2 — Get the restricted key:**
+After installing, the user retrieves their key from the Stripe Dashboard: **Installed Apps > ERPClaw Accounting > View API Keys**.
 The ERPClaw Accounting app uses **restricted API keys** (starting with `rk_test_` or `rk_live_`), NOT standard secret keys.
-Users get their restricted key from the Stripe Dashboard: **Installed Apps > ERPClaw Accounting > View API Keys**.
-When a user says "connect Stripe" or "set up Stripe", ask them for their restricted API key (starts with `rk_test_` or `rk_live_`).
 Do NOT ask for publishable keys (pk_) or standard secret keys (sk_). Only restricted keys (rk_) are accepted.
 
 ```
