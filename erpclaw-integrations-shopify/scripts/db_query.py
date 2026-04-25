@@ -3,7 +3,7 @@
 
 Deep Shopify integration for full-cycle e-commerce order sync and
 payout reconciliation.
-Routes all actions across 8 domain modules:
+Routes 66 actions across 15 domain modules:
   accounts (6): add, update, get, list, configure-gl, test-connection
   sync (10): sync-orders, sync-products, sync-customers, sync-payouts,
              sync-disputes, start-full-sync, get-sync-job, list-sync-jobs,
@@ -24,6 +24,13 @@ Routes all actions across 8 domain modules:
   reports (7): revenue-summary, fee-summary, refund-summary,
                payout-detail-report, product-revenue-report,
                customer-revenue-report, status
+  connect (1): shopify-connect (redeem pairing code)
+  disconnect (1): shopify-disconnect
+  status_push (1): shopify-push-status (HMAC to Worker)
+  dispatcher (1): shopify-dispatch-command
+  daemon (2): install-daemon, uninstall-daemon
+  gdpr (1): shopify-handle-gdpr (customers/data_request, customers/redact, shop/redact)
+  flush (1): shopify-flush-pending-events
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -61,6 +68,13 @@ from gl_posting import ACTIONS as GL_POSTING_ACTIONS  # noqa: E402
 from reconciliation import ACTIONS as RECONCILIATION_ACTIONS  # noqa: E402
 from browse import ACTIONS as BROWSE_ACTIONS  # noqa: E402
 from reports import ACTIONS as REPORTS_ACTIONS  # noqa: E402
+from connect import CONNECT_ACTIONS  # noqa: E402
+from disconnect import DISCONNECT_ACTIONS  # noqa: E402
+from status_push import STATUS_PUSH_ACTIONS  # noqa: E402
+from dispatcher import DISPATCHER_ACTIONS  # noqa: E402
+from daemon import DAEMON_ACTIONS  # noqa: E402
+from gdpr import GDPR_ACTIONS  # noqa: E402
+from flush import FLUSH_ACTIONS  # noqa: E402
 
 # Merge all domain actions into one router
 SKILL = "erpclaw-integrations-shopify"
@@ -75,13 +89,21 @@ ACTIONS.update(GL_POSTING_ACTIONS)
 ACTIONS.update(RECONCILIATION_ACTIONS)
 ACTIONS.update(BROWSE_ACTIONS)
 ACTIONS.update(REPORTS_ACTIONS)
+ACTIONS.update(CONNECT_ACTIONS)
+ACTIONS.update(DISCONNECT_ACTIONS)
+ACTIONS.update(STATUS_PUSH_ACTIONS)
+ACTIONS.update(DISPATCHER_ACTIONS)
+ACTIONS.update(DAEMON_ACTIONS)
+ACTIONS.update(GDPR_ACTIONS)
+ACTIONS.update(FLUSH_ACTIONS)
 
 ACTIONS["status"] = lambda conn, args: ok({
     "skill": SKILL,
-    "version": "1.0.0",
+    "version": "1.1.0",
     "actions_available": len([k for k in ACTIONS if k != "status"]),
     "domains": ["accounts", "sync", "mapping", "gl_rules", "gl_posting",
-                "reconciliation", "browse", "reports"],
+                "reconciliation", "browse", "reports", "connect", "disconnect",
+                "status_push", "dispatcher", "daemon", "gdpr", "flush"],
     "database": DEFAULT_DB_PATH,
 })
 
@@ -103,6 +125,16 @@ def main():
     parser.add_argument("--shopify-account-id")
     parser.add_argument("--shop-domain")
     parser.add_argument("--shop-name")
+
+    # CONNECT / DISCONNECT / STATUS_PUSH domain
+    parser.add_argument("--pairing-code")
+    parser.add_argument("--worker-url")
+    parser.add_argument("--erpclaw-url")
+    parser.add_argument("--command-json")
+
+    # GDPR domain
+    parser.add_argument("--topic")
+    parser.add_argument("--payload")
     parser.add_argument("--access-token")
     parser.add_argument("--api-version")
     parser.add_argument("--currency")

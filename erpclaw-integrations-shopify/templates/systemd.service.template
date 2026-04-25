@@ -1,0 +1,12 @@
+[Unit]
+Description=ERPClaw Shopify status push
+Documentation=https://erpclaw.ai/docs/shopify
+
+[Service]
+Type=oneshot
+ExecStart={{PYTHON}} {{DB_QUERY}} --action shopify-push-status
+StandardOutput=append:{{LOG_PATH}}
+StandardError=append:{{LOG_PATH}}
+
+[Install]
+WantedBy=default.target

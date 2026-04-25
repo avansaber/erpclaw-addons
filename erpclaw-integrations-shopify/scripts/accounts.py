@@ -162,9 +162,52 @@ def add_account(conn, args):
 
     # Optional fields
     shop_name = getattr(args, "shop_name", None) or shop_domain.split(".")[0]
-    api_version = getattr(args, "api_version", None) or "2026-01"
+    api_version = getattr(args, "api_version", None) or "2026-04"
     currency = getattr(args, "currency", None) or "USD"
 
+    result = _add_account_core(
+        conn,
+        company_id=company_id,
+        shop_domain=shop_domain,
+        shop_name=shop_name,
+        encrypted_token=encrypted_token,
+        api_version=api_version,
+        currency=currency,
+        pairing_method="custom_app",
+    )
+    ok({
+        "id": result["id"],
+        "shop_domain": shop_domain,
+        "shop_name": shop_name,
+        "account_status": "active",
+        "access_token": mask_token(access_token),
+        "gl_accounts_created": result["gl_accounts_created"],
+        "gl_mapping": result["gl_mapping"],
+    })
+
+
+def _add_account_core(
+    conn,
+    *,
+    company_id,
+    shop_domain,
+    shop_name,
+    encrypted_token,
+    api_version="2026-04",
+    currency="USD",
+    pairing_method="custom_app",
+    hmac_secret_enc=None,
+    status_mode=None,
+    erpclaw_url_override=None,
+):
+    """Shared core of shopify-add-account and shopify-connect.
+
+    Auto-creates 14 GL accounts, inserts the shopify_account row with the
+    v1.1 columns set when provided, writes an audit entry, commits.
+
+    Returns: {'id': acct_id, 'gl_mapping': dict, 'gl_accounts_created': int}
+    Does NOT print or sys.exit; caller is responsible for responding.
+    """
     now = now_iso()
     acct_id = str(uuid.uuid4())
 
@@ -187,56 +230,62 @@ def add_account(conn, args):
         gl_mapping[gl_def["mapping_field"]] = gl_id
 
     # -- Insert the shopify_account row --
-    sql, _ = insert_row("shopify_account", {
-        "id": P(), "company_id": P(), "shop_domain": P(), "shop_name": P(),
-        "access_token_enc": P(), "api_version": P(), "currency": P(),
-        "status": P(),
-        "clearing_account_id": P(), "revenue_account_id": P(),
-        "shipping_revenue_account_id": P(), "tax_payable_account_id": P(),
-        "cogs_account_id": P(), "inventory_account_id": P(),
-        "fee_account_id": P(), "discount_account_id": P(),
-        "refund_account_id": P(), "chargeback_account_id": P(),
-        "chargeback_fee_account_id": P(),
-        "gift_card_liability_account_id": P(),
-        "reserve_account_id": P(), "bank_account_id": P(),
-        "discount_method": P(), "auto_post_gl": P(), "track_cogs": P(),
-        "created_at": P(), "updated_at": P(),
-    })
-    conn.execute(sql, (
-        acct_id, company_id, shop_domain, shop_name,
-        encrypted_token, api_version, currency,
-        "active",
-        gl_mapping["clearing_account_id"],
-        gl_mapping["revenue_account_id"],
-        gl_mapping["shipping_revenue_account_id"],
-        gl_mapping["tax_payable_account_id"],
-        gl_mapping["cogs_account_id"],
-        gl_mapping["inventory_account_id"],
-        gl_mapping["fee_account_id"],
-        gl_mapping["discount_account_id"],
-        gl_mapping["refund_account_id"],
-        gl_mapping["chargeback_account_id"],
-        gl_mapping["chargeback_fee_account_id"],
-        gl_mapping["gift_card_liability_account_id"],
-        gl_mapping["reserve_account_id"],
-        gl_mapping["bank_account_id"],
-        "net", 0, 0,
-        now, now,
-    ))
+    row = {
+        "id": acct_id,
+        "company_id": company_id,
+        "shop_domain": shop_domain,
+        "shop_name": shop_name,
+        "access_token_enc": encrypted_token,
+        "api_version": api_version,
+        "currency": currency,
+        "status": "active",
+        "clearing_account_id": gl_mapping["clearing_account_id"],
+        "revenue_account_id": gl_mapping["revenue_account_id"],
+        "shipping_revenue_account_id": gl_mapping["shipping_revenue_account_id"],
+        "tax_payable_account_id": gl_mapping["tax_payable_account_id"],
+        "cogs_account_id": gl_mapping["cogs_account_id"],
+        "inventory_account_id": gl_mapping["inventory_account_id"],
+        "fee_account_id": gl_mapping["fee_account_id"],
+        "discount_account_id": gl_mapping["discount_account_id"],
+        "refund_account_id": gl_mapping["refund_account_id"],
+        "chargeback_account_id": gl_mapping["chargeback_account_id"],
+        "chargeback_fee_account_id": gl_mapping["chargeback_fee_account_id"],
+        "gift_card_liability_account_id": gl_mapping["gift_card_liability_account_id"],
+        "reserve_account_id": gl_mapping["reserve_account_id"],
+        "bank_account_id": gl_mapping["bank_account_id"],
+        "discount_method": "net",
+        "auto_post_gl": 0,
+        "track_cogs": 0,
+        "pairing_method": pairing_method,
+        "created_at": now,
+        "updated_at": now,
+    }
+    # Optional v1.1 columns: only included if non-null so init_db.py older
+    # installs (pre-migration) don't break.
+    if hmac_secret_enc is not None:
+        row["hmac_secret_enc"] = hmac_secret_enc
+    if status_mode is not None:
+        row["status_mode"] = status_mode
+    if erpclaw_url_override is not None:
+        row["erpclaw_url_override"] = erpclaw_url_override
+
+    columns = list(row.keys())
+    placeholders = ", ".join("?" for _ in columns)
+    column_list = ", ".join(columns)
+    conn.execute(
+        f"INSERT INTO shopify_account ({column_list}) VALUES ({placeholders})",
+        tuple(row[c] for c in columns),
+    )
 
     audit(conn, SKILL, "shopify-add-account", "shopify_account", acct_id,
           new_values={"shop_domain": shop_domain, "shop_name": shop_name})
     conn.commit()
 
-    ok({
+    return {
         "id": acct_id,
-        "shop_domain": shop_domain,
-        "shop_name": shop_name,
-        "account_status": "active",
-        "access_token": mask_token(access_token),
+        "gl_mapping": gl_mapping,
         "gl_accounts_created": len(gl_mapping),
-        "gl_mapping": {k: v for k, v in gl_mapping.items()},
-    })
+    }
 
 
 # ---------------------------------------------------------------------------

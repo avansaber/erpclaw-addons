@@ -27,7 +27,7 @@ MODULE_DIR = os.path.dirname(TESTS_DIR)                    # erpclaw-ai-engine/
 SCRIPTS_DIR = os.path.dirname(MODULE_DIR)                  # scripts/
 ROOT_DIR = os.path.dirname(SCRIPTS_DIR)                    # erpclaw-growth/
 ADDONS_DIR = os.path.dirname(ROOT_DIR)                     # erpclaw-addons/
-SRC_DIR = os.path.dirname(ADDONS_DIR)                      # src/
+SRC_DIR = os.path.dirname(ADDONS_DIR)                      # source/
 
 # Foundation schema init
 SETUP_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")

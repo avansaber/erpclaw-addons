@@ -153,6 +153,33 @@ class TestPostChargeGL:
         # GL entries should still be balanced
         _assert_gl_balanced(conn, result["payment_entry_id"])
 
+    def test_post_charge_gl_auto_resolve_cost_center(self, conn, db_path):
+        """When cost_center_id is not passed, auto-resolve from company default."""
+        env = build_gl_ready_env(conn)
+        seed_charge(conn, env["stripe_account_id"], env["company_id"],
+                    stripe_id="ch_test_auto_cc", amount="100.00")
+        seed_balance_transaction(conn, env["stripe_account_id"], env["company_id"],
+                                 stripe_id="txn_auto_cc", source_id="ch_test_auto_cc",
+                                 amount="100.00", fee="3.20", net="96.80")
+
+        # No cost_center_id passed — should auto-resolve from company default
+        result = call_action(ACTIONS["stripe-post-charge-gl"], conn, ns(
+            stripe_account_id=env["stripe_account_id"],
+            charge_stripe_id="ch_test_auto_cc",
+        ))
+        assert is_ok(result), f"Expected ok but got: {result}"
+        assert result["fee"] == "3.20"
+
+        # Verify fee GL entry has the auto-resolved cost_center_id
+        entries = _gl_entries_for_voucher(conn, result["payment_entry_id"])
+        fee_entries = [e for e in entries
+                       if e["account_id"] == env["fees_id"]
+                       and Decimal(e["debit"]) > 0]
+        assert len(fee_entries) == 1
+        assert fee_entries[0]["cost_center_id"] == env["cost_center_id"]
+
+        _assert_gl_balanced(conn, result["payment_entry_id"])
+
     def test_post_charge_gl_without_customer(self, conn, db_path):
         """Charge without customer mapping should CR Unearned Revenue."""
         env = build_gl_ready_env(conn)
@@ -370,6 +397,25 @@ class TestBulkPostGL:
         assert result["charges_posted"] == 2
         assert result["payouts_posted"] == 1
         assert result["total_posted"] >= 3
+
+    def test_bulk_post_gl_auto_resolve_cost_center(self, conn, db_path):
+        """Bulk post without explicit cost_center_id should auto-resolve from company."""
+        env = build_gl_ready_env(conn)
+
+        seed_charge(conn, env["stripe_account_id"], env["company_id"],
+                    stripe_id="ch_bulk_auto", amount="100.00")
+        seed_balance_transaction(conn, env["stripe_account_id"], env["company_id"],
+                                 stripe_id="txn_bauto", source_id="ch_bulk_auto",
+                                 amount="100.00", fee="3.20", net="96.80")
+
+        # No cost_center_id passed
+        result = call_action(ACTIONS["stripe-bulk-post-gl"], conn, ns(
+            stripe_account_id=env["stripe_account_id"],
+            date_from=None, date_to=None,
+        ))
+        assert is_ok(result), f"Expected ok: {result}"
+        assert result["charges_posted"] == 1
+        assert len(result.get("errors", [])) == 0
 
     def test_bulk_post_gl_skips_already_posted(self, conn, db_path):
         """Bulk post should skip charges that already have a payment_entry_id."""

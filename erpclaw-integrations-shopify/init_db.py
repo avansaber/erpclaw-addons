@@ -60,7 +60,7 @@ def create_shopify_tables(db_path=None):
             shop_domain                 TEXT NOT NULL,
             shop_name                   TEXT,
             access_token_enc            TEXT NOT NULL,
-            api_version                 TEXT NOT NULL DEFAULT '2026-01',
+            api_version                 TEXT NOT NULL DEFAULT '2026-04',
             currency                    TEXT NOT NULL DEFAULT 'USD',
             status                      TEXT NOT NULL DEFAULT 'active'
                                         CHECK(status IN ('active','paused','error','disabled')),
@@ -434,6 +434,14 @@ def create_shopify_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_shpfy_sync_company ON shopify_sync_job(company_id)")
     indexes_created += 4
 
+    # -- Migration: v1.1 columns added for App Store pairing flow --------
+    # Idempotent. Safe to run on fresh install (columns added during
+    # CREATE TABLE above are skipped here) and on v1.0.0 upgrades
+    # (adds the columns if missing). Also invoked lazily from
+    # scripts/connect.py so an existing install gets migrated on first
+    # shopify-connect call even if the user never re-ran init_db.py.
+    migrations_applied = apply_shopify_account_migrations_v1_1(conn)
+
     conn.commit()
     conn.close()
 
@@ -441,7 +449,41 @@ def create_shopify_tables(db_path=None):
         "database": db_path,
         "tables": tables_created,
         "indexes": indexes_created,
+        "migrations_applied": migrations_applied,
     }
+
+
+def apply_shopify_account_migrations_v1_1(conn):
+    """Add 6 columns to shopify_account for the v1.1 OAuth pairing flow.
+
+    Columns:
+      pairing_method         TEXT   'oauth' | 'custom_app'
+      hmac_secret_enc        TEXT   per-shop HMAC secret, XOR-encrypted
+      last_status_push_at    TEXT   ISO-8601; when the daemon last pushed
+      disconnect_state       TEXT   nullable; set to 'pending' during disconnect
+      status_mode            TEXT   'active' | 'scheduled' | 'on-demand'
+      erpclaw_url_override   TEXT   user-provided public URL for embedded UI deep-link
+
+    Safe to invoke multiple times; checks PRAGMA table_info first. Returns
+    the number of columns actually added on this invocation.
+    """
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(shopify_account)").fetchall()
+    }
+    migrations = [
+        ("pairing_method",       "TEXT"),
+        ("hmac_secret_enc",      "TEXT"),
+        ("last_status_push_at",  "TEXT"),
+        ("disconnect_state",     "TEXT"),
+        ("status_mode",          "TEXT"),
+        ("erpclaw_url_override", "TEXT"),
+    ]
+    added = 0
+    for col_name, col_type in migrations:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE shopify_account ADD COLUMN {col_name} {col_type}")
+            added += 1
+    return added
 
 
 if __name__ == "__main__":
@@ -450,3 +492,5 @@ if __name__ == "__main__":
     print(f"{DISPLAY_NAME} schema created in {result['database']}")
     print(f"  Tables: {result['tables']}")
     print(f"  Indexes: {result['indexes']}")
+    if result.get("migrations_applied"):
+        print(f"  v1.1 migrations applied: {result['migrations_applied']} columns")

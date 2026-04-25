@@ -22,7 +22,7 @@ from stripe_helpers import encrypt_key, decrypt_key, mask_key
 # ---------------------------------------------------------------------------
 # Helper to add a stripe account via the action (reusable across tests)
 # ---------------------------------------------------------------------------
-def _add_stripe_account(conn, company_id, name="Test Stripe", key="rk_test_abc123xyz789def456"):
+def _add_stripe_account(conn, company_id, name="Test Stripe", key="rk_FIXTURE_test_abc123xyz789def456"):
     """Add a Stripe account and return the result dict."""
     return call_action(ACTIONS["stripe-add-account"], conn, ns(
         company_id=company_id,
@@ -51,7 +51,7 @@ class TestAddAccount:
 
     def test_add_account_encrypts_key(self, conn, company_id):
         """The stored API key must be encrypted, not plaintext."""
-        raw_key = "rk_test_abc123xyz789def456"
+        raw_key = "rk_FIXTURE_test_abc123xyz789def456"
         result = _add_stripe_account(conn, company_id, key=raw_key)
         assert is_ok(result)
 
@@ -102,7 +102,7 @@ class TestAddAccount:
 
     def test_add_account_masked_key_in_response(self, conn, company_id):
         """The response should contain a masked key, not the raw key."""
-        raw_key = "rk_test_abc123xyz789def456"
+        raw_key = "rk_FIXTURE_test_abc123xyz789def456"
         result = _add_stripe_account(conn, company_id, key=raw_key)
         assert is_ok(result)
         assert result["api_key"] == mask_key(raw_key)

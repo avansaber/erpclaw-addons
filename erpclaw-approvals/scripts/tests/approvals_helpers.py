@@ -26,7 +26,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULE_DIR = os.path.dirname(TESTS_DIR)                    # scripts/
 ROOT_DIR = os.path.dirname(MODULE_DIR)                     # erpclaw-approvals/
 ADDONS_DIR = os.path.dirname(ROOT_DIR)                     # erpclaw-addons/
-SRC_DIR = os.path.dirname(ADDONS_DIR)                      # src/
+SRC_DIR = os.path.dirname(ADDONS_DIR)                      # source/
 
 # Foundation schema init
 SETUP_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")

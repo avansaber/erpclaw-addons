@@ -119,7 +119,7 @@ def graphql_request(shop_domain, access_token, query, variables=None):
     """
     import requests
 
-    url = f"https://{shop_domain}/admin/api/2026-01/graphql.json"
+    url = f"https://{shop_domain}/admin/api/2026-04/graphql.json"
     headers = {
         "X-Shopify-Access-Token": access_token,
         "Content-Type": "application/json",

@@ -1,0 +1,12 @@
+[Unit]
+Description=ERPClaw Shopify status push (every 15 minutes)
+
+[Timer]
+# Fire 2 minutes after boot, then every 15 minutes.
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=erpclaw-shopify-push.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

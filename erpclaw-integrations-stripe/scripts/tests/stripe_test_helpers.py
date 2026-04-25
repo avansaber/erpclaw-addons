@@ -24,7 +24,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.dirname(TESTS_DIR)                     # scripts/
 MODULE_DIR = os.path.dirname(SCRIPTS_DIR)                     # erpclaw-integrations-stripe/
 ADDONS_DIR = os.path.dirname(MODULE_DIR)                      # erpclaw-addons/
-SRC_DIR = os.path.dirname(ADDONS_DIR)                         # src/
+SRC_DIR = os.path.dirname(ADDONS_DIR)                         # source/
 
 # Foundation schema init
 SETUP_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")
@@ -489,6 +489,13 @@ def build_gl_ready_env(conn) -> dict:
 
     env["fiscal_year_id"] = fy_id
     env["cost_center_id"] = cc_id
+
+    # Set the cost center as the company default so auto-resolve works
+    conn.execute(
+        "UPDATE company SET default_cost_center_id = ? WHERE id = ?",
+        (cc_id, cid)
+    )
+    conn.commit()
 
     # Read GL account IDs from stripe_account
     row = conn.execute(
