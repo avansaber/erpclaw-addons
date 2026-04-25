@@ -583,7 +583,11 @@ def _sync_payouts(conn, client, acct_id, company_id, sync_job_id):
             client["shop_domain"], client["access_token"],
             _PAYOUTS_QUERY, variables,
         )
-        payments_acct = data.get("shopifyPaymentsAccount", {})
+        # `shopifyPaymentsAccount` is null when the merchant hasn't enabled
+        # Shopify Payments on this shop (typical for test/dev stores).
+        # The default-arg form .get(k, {}) only kicks in when k is missing;
+        # for an explicit null value Python returns None, so guard explicitly.
+        payments_acct = data.get("shopifyPaymentsAccount") or {}
         payouts_data = payments_acct.get("payouts", {})
         edges = payouts_data.get("edges", [])
 
@@ -660,7 +664,11 @@ def _sync_disputes(conn, client, acct_id, company_id, sync_job_id):
             client["shop_domain"], client["access_token"],
             _DISPUTES_QUERY, variables,
         )
-        payments_acct = data.get("shopifyPaymentsAccount", {})
+        # `shopifyPaymentsAccount` is null when the merchant hasn't enabled
+        # Shopify Payments on this shop (typical for test/dev stores).
+        # The default-arg form .get(k, {}) only kicks in when k is missing;
+        # for an explicit null value Python returns None, so guard explicitly.
+        payments_acct = data.get("shopifyPaymentsAccount") or {}
         disputes_data = payments_acct.get("disputes", {})
         edges = disputes_data.get("edges", [])
 
