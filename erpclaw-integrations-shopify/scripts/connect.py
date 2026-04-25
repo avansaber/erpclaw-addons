@@ -153,6 +153,11 @@ def shopify_connect(conn, args):
     # Resolve which company this shop attaches to.
     company_id, _ = _resolve_company(conn, getattr(args, "company_id", None))
 
+    # Note: we cannot check `shopify_account` for an existing row yet
+    # because we don't know the shop_domain until the Worker hands it
+    # back via /pair/:code. We DO know we'll burn this pairing code on
+    # the call, so any failure after this point requires a fresh code.
+
     # Fetch the pair payload from the Worker.
     try:
         status, body = _fetch_pair(worker_url, pairing_code)
@@ -194,15 +199,47 @@ def shopify_connect(conn, args):
 
     shop_name = shop_domain.split(".", 1)[0]
 
+    # If a stale row exists for this shop (e.g., a prior install whose
+    # token died), upsert: update the access_token + hmac_secret + scopes
+    # in place rather than refusing. This means a fresh pairing code can
+    # always heal a dead-token install without forcing the merchant to
+    # run shopify-disconnect (which itself may fail if the dead token
+    # can't authenticate the OAuth revoke call).
     existing = conn.execute(
-        "SELECT id, shop_domain FROM shopify_account WHERE shop_domain = ?",
+        "SELECT id FROM shopify_account WHERE shop_domain = ?",
         (shop_domain,),
     ).fetchone()
     if existing:
-        err(
-            f"{shop_domain} is already connected to this ERPClaw",
-            suggestion="run shopify-disconnect first if you want to re-pair",
+        conn.execute(
+            "UPDATE shopify_account SET "
+            "access_token_enc = ?, hmac_secret_enc = ?, "
+            "pairing_method = 'oauth', status = 'active', "
+            "status_mode = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (
+                encrypt_token(access_token),
+                encrypt_token(hmac_secret),
+                status_mode,
+                existing["id"],
+            ),
         )
+        conn.commit()
+        ok({
+            "id": existing["id"],
+            "shop_domain": shop_domain,
+            "shop_name": shop_name,
+            "pairing_method": "oauth",
+            "status_mode": status_mode,
+            "scopes": scopes,
+            "gl_accounts_created": 0,
+            "message": (
+                "re-paired existing shop: refreshed access token and "
+                "HMAC secret. GL accounts and prior sync history were "
+                "preserved."
+            ),
+            "status": "ok",
+        })
+        return
 
     result = _add_account_core(
         conn,

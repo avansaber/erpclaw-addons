@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 LIB_PATH = os.path.expanduser("~/.openclaw/erpclaw/lib")
 if LIB_PATH not in sys.path:
@@ -36,6 +37,15 @@ from erpclaw_lib.response import err, ok
 
 
 VALID_TOPICS = {"customers/data_request", "customers/redact", "shop/redact", "app/uninstalled"}
+
+# Shopify webhook delivery is async and can arrive AFTER the merchant
+# has reinstalled the app. We saw this live: a queued app/uninstalled
+# from a prior uninstall disabled a freshly paired account minutes after
+# install. Refuse to disable a shopify_account whose row was created or
+# updated inside this window. If the merchant truly uninstalled, the
+# next status push will fail to authenticate (token revoked by Shopify
+# on uninstall) and surface the issue cleanly.
+RECENT_INSTALL_GRACE_SECONDS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -213,11 +223,79 @@ def _handle_shop_redact(conn, shop, payload):
     }
 
 
+def _parse_account_ts(value):
+    """Parse a shopify_account.created_at / updated_at into epoch seconds.
+
+    SQLite's CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS' in UTC. The
+    OAuth flow may also write an ISO-8601 'YYYY-MM-DDTHH:MM:SSZ' value.
+    Returns None if the value is missing or unparseable; callers treat
+    that as 'cannot prove freshness, do not skip'.
+    """
+    if not value:
+        return None
+    raw = str(value).strip()
+    # Normalise to something datetime.fromisoformat can chew on.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    if "T" not in raw and " " in raw:
+        raw = raw.replace(" ", "T", 1)
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def _handle_app_uninstalled(conn, shop, payload):
     """Treat app/uninstalled as a soft signal: flag the account so the
     daemon stops pushing status. shop/redact 48h later will do the
     hard delete.
+
+    Concurrency guard: Shopify webhook delivery is async. If the
+    merchant uninstalled and reinstalled within minutes, a queued
+    app/uninstalled from the FIRST uninstall can arrive after the
+    fresh pair completes, and would otherwise disable the new account.
+    Skip the disable when the shopify_account row was created or
+    updated inside RECENT_INSTALL_GRACE_SECONDS. We compare against
+    the webhook delivery timestamp when the payload provides one,
+    otherwise against now().
     """
+    row = conn.execute(
+        "SELECT id, status, created_at, updated_at "
+        "FROM shopify_account WHERE shop_domain = ?",
+        (shop,),
+    ).fetchone()
+    if not row:
+        _write_audit("app/uninstalled", shop, {"flagged": 0, "note": "no account"})
+        return {"flagged": 0}
+
+    # Webhook payload may carry a top-level 'updated_at' or 'event_time'
+    # set by Shopify when the uninstall actually happened. Prefer that
+    # over wall-clock now() so we compare apples to apples.
+    webhook_ts = None
+    if isinstance(payload, dict):
+        for key in ("updated_at", "event_time", "occurred_at", "created_at"):
+            webhook_ts = _parse_account_ts(payload.get(key))
+            if webhook_ts is not None:
+                break
+    reference_ts = webhook_ts if webhook_ts is not None else time.time()
+
+    account_ts = _parse_account_ts(row["updated_at"]) or _parse_account_ts(row["created_at"])
+    if account_ts is not None and (reference_ts - account_ts) < RECENT_INSTALL_GRACE_SECONDS:
+        # Stale webhook from a prior uninstall arrived after a fresh
+        # reinstall. Audit and refuse to flip status.
+        detail = {
+            "flagged": 0,
+            "skipped": "fresh install",
+            "account_updated_at": row["updated_at"],
+            "reference_ts": reference_ts,
+            "grace_seconds": RECENT_INSTALL_GRACE_SECONDS,
+        }
+        _write_audit("app/uninstalled", shop, detail)
+        return {"flagged": 0, "skipped": "fresh install"}
+
     cur = conn.execute(
         "UPDATE shopify_account SET disconnect_state = 'app-uninstalled', status = 'disabled' "
         "WHERE shop_domain = ?",

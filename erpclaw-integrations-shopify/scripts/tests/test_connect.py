@@ -134,7 +134,15 @@ def test_explicit_company_id_selects_second_company(db_path, conn, connect_modul
     assert row["company_id"] == second
 
 
-def test_duplicate_shop_rejected(db_path, conn, connect_module):
+def test_duplicate_shop_upserts_token(db_path, conn, connect_module):
+    """Re-pairing the same shop must heal a dead-token install in place.
+
+    Prior behavior was to reject with "already connected" but that meant
+    a merchant whose token died had to run shopify-disconnect (which
+    itself fails when the token is dead and Shopify rejects the revoke
+    call). New behavior: upsert the access_token + hmac_secret, keep the
+    same shopify_account row (and any prior sync history + GL accounts).
+    """
     build_env(conn)
     with patch.object(connect_module, "_fetch_pair", return_value=_mock_pair_response()):
         with patch.object(connect_module, "_detect_long_lived_process", _mock_long_lived_false):
@@ -144,16 +152,32 @@ def test_duplicate_shop_rejected(db_path, conn, connect_module):
                 _Args(pairing_code="ABC-XYZ"),
             )
     assert is_ok(first)
+    first_id = first["id"]
 
-    with patch.object(connect_module, "_fetch_pair", return_value=_mock_pair_response(code="DEF-GHI")):
+    # Second pairing on the same shop with a fresh code + new fixture
+    # token. Should succeed (upsert), reuse the same row id, and rotate
+    # the stored access_token.
+    with patch.object(
+        connect_module,
+        "_fetch_pair",
+        return_value=_mock_pair_response(code="DEF-GHI"),
+    ):
         with patch.object(connect_module, "_detect_long_lived_process", _mock_long_lived_false):
             second = call_action(
                 connect_module.shopify_connect,
                 conn,
                 _Args(pairing_code="DEF-GHI"),
             )
-    assert is_error(second)
-    assert "already connected" in second["message"]
+    assert is_ok(second), second
+    assert second["id"] == first_id, "must reuse the same shopify_account row"
+    assert "re-paired existing shop" in second["message"]
+
+    # Verify only one row exists for this shop after the upsert.
+    rows = conn.execute(
+        "SELECT id FROM shopify_account WHERE shop_domain = ?",
+        ("demo.myshopify.com",),
+    ).fetchall()
+    assert len(rows) == 1
 
 
 def _http_error(code, body_obj):

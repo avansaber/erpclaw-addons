@@ -210,10 +210,27 @@ def test_shop_redact_noop_when_shop_not_found(db_path, conn, gdpr_module):
 # app/uninstalled
 # ---------------------------------------------------------------------------
 
+def _backdate_account(conn, account_id, seconds_ago):
+    """Push shopify_account.created_at + updated_at into the past so the
+    fresh-install grace window doesn't shield it.
+    """
+    import datetime as _dt
+    ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds_ago)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn.execute(
+        "UPDATE shopify_account SET created_at = ?, updated_at = ? WHERE id = ?",
+        (ts, ts, account_id),
+    )
+    conn.commit()
+
+
 def test_app_uninstalled_flags_account(db_path, conn, gdpr_module):
     env = build_env(conn)
     shop = "demo.myshopify.com"
     acct = _seed_oauth_account(conn, env["company_id"], shop)
+    # Backdate beyond the 5-min grace so the disable proceeds.
+    _backdate_account(conn, acct, 3600)
 
     result = call_action(
         gdpr_module.shopify_handle_gdpr,
@@ -222,6 +239,58 @@ def test_app_uninstalled_flags_account(db_path, conn, gdpr_module):
     )
     assert is_ok(result)
     assert result["flagged"] == 1
+    row = conn.execute(
+        "SELECT status, disconnect_state FROM shopify_account WHERE id = ?",
+        (acct,),
+    ).fetchone()
+    assert row["status"] == "disabled"
+    assert row["disconnect_state"] == "app-uninstalled"
+
+
+def test_app_uninstalled_skips_disable_for_fresh_install(db_path, conn, gdpr_module):
+    """Stale app/uninstalled webhooks must not disable a freshly paired
+    account. Repro of the live ZAV-9KH incident: queued GDPR command
+    from a prior uninstall fires after the merchant has reinstalled.
+    """
+    env = build_env(conn)
+    shop = "demo.myshopify.com"
+    acct = _seed_oauth_account(conn, env["company_id"], shop)
+    # Account was just created; updated_at is now(), inside the grace.
+
+    result = call_action(
+        gdpr_module.shopify_handle_gdpr,
+        conn,
+        _Args(topic="app/uninstalled", shop_domain=shop),
+    )
+    assert is_ok(result)
+    assert result["flagged"] == 0
+    assert result.get("skipped") == "fresh install"
+
+    row = conn.execute(
+        "SELECT status, disconnect_state FROM shopify_account WHERE id = ?",
+        (acct,),
+    ).fetchone()
+    assert row["status"] == "active"
+    assert row["disconnect_state"] is None or row["disconnect_state"] != "app-uninstalled"
+
+
+def test_app_uninstalled_disables_old_install(db_path, conn, gdpr_module):
+    """A genuine uninstall on an account that has been live for an hour
+    must still flip status to disabled.
+    """
+    env = build_env(conn)
+    shop = "demo.myshopify.com"
+    acct = _seed_oauth_account(conn, env["company_id"], shop)
+    _backdate_account(conn, acct, 3600)
+
+    result = call_action(
+        gdpr_module.shopify_handle_gdpr,
+        conn,
+        _Args(topic="app/uninstalled", shop_domain=shop),
+    )
+    assert is_ok(result)
+    assert result["flagged"] == 1
+
     row = conn.execute(
         "SELECT status, disconnect_state FROM shopify_account WHERE id = ?",
         (acct,),

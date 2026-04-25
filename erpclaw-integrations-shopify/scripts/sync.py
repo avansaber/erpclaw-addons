@@ -224,8 +224,12 @@ query($cursor: String) {
           summary {
             chargesGross { amount }
             chargesFee { amount }
-            refundsGross { amount }
             refundsFee { amount }
+            # NOTE: `refundsGross` was removed from ShopifyPaymentsPayoutSummary
+            # in API 2026-04; the gross refund amount is no longer exposed
+            # at the payout-summary level. The `refunds_gross` column on
+            # `shopify_payout` stays at its '0' default until Shopify
+            # surfaces an equivalent field again.
             adjustmentsGross { amount }
             adjustmentsFee { amount }
             reservedFundsGross { amount }
@@ -623,7 +627,8 @@ def _sync_payouts(conn, client, acct_id, company_id, sync_job_id):
                 str(gross), str(fee), str(net),
                 str(_safe_money(summary.get("chargesGross"))),
                 str(_safe_money(summary.get("chargesFee"))),
-                str(_safe_money(summary.get("refundsGross"))),
+                # refundsGross removed in API 2026-04; column stays at 0.
+                "0",
                 str(_safe_money(summary.get("refundsFee"))),
                 str(_safe_money(summary.get("adjustmentsGross"))),
                 str(_safe_money(summary.get("adjustmentsFee"))),
