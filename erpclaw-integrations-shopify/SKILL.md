@@ -1,6 +1,6 @@
 ---
 name: erpclaw-integrations-shopify
-version: 1.1.2
+version: 1.1.3
 description: Deep Shopify integration -- 66 actions across 15 domains. Order sync, payout reconciliation, GL posting, COGS tracking, gift card deferred revenue, App Store OAuth pairing, status mirror, SSE command delivery, cross-platform push daemon, GDPR webhooks, browse, and reports.
 author: avansaber
 homepage: https://github.com/avansaber/erpclaw-addons

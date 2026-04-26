@@ -99,7 +99,7 @@ ACTIONS.update(FLUSH_ACTIONS)
 
 ACTIONS["status"] = lambda conn, args: ok({
     "skill": SKILL,
-    "version": "1.1.2",
+    "version": "1.1.3",
     "actions_available": len([k for k in ACTIONS if k != "status"]),
     "domains": ["accounts", "sync", "mapping", "gl_rules", "gl_posting",
                 "reconciliation", "browse", "reports", "connect", "disconnect",

@@ -21,6 +21,11 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+
+
+def _utc_iso_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 LIB_PATH = os.path.expanduser("~/.openclaw/erpclaw/lib")
 if LIB_PATH not in sys.path:
@@ -105,8 +110,19 @@ def shopify_disconnect(conn, args):
     #    uninstalled so the token is effectively dead either way.
     revoked_ok, revoke_detail = _revoke_access_token(shop_domain, access_token)
 
-    # 2. Delete the shopify_account row. Preserves GL entries by design.
-    conn.execute("DELETE FROM shopify_account WHERE id = ?", (account_id,))
+    # 2. Soft-delete the shopify_account row (set status='disabled' +
+    #    clear access token + clear HMAC secret). DELETE breaks FK from
+    #    shopify_sync_job and other history tables; preserving the row
+    #    keeps the audit trail and sync history. Status filter on
+    #    push_all + sync actions excludes 'disabled' accounts. Schema
+    #    CHECK constrains status to ('active','paused','error','disabled')
+    #    so we use 'disabled' as the disconnected sentinel. Fixes §18.10.
+    conn.execute(
+        "UPDATE shopify_account SET status = 'disabled', "
+        "access_token_enc = '', hmac_secret_enc = NULL, "
+        "updated_at = ? WHERE id = ?",
+        (_utc_iso_now(), account_id),
+    )
     conn.commit()
 
     # 3. Reference-count the daemon: uninstall only if this was the last.

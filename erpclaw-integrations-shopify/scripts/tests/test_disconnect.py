@@ -90,12 +90,15 @@ def test_happy_path_removes_row_and_uninstalls_daemon(db_path, conn, disconnect_
     assert res["daemon"] == {"uninstalled": True}
     assert res["token_revoked"] is True
 
-    # shopify_account row is gone
+    # Row is soft-deleted (status='disabled'); preserves FK history (§18.10 fix).
     row = conn.execute(
-        "SELECT id FROM shopify_account WHERE id = ?",
+        "SELECT id, status, access_token_enc, hmac_secret_enc FROM shopify_account WHERE id = ?",
         (acct_id,),
     ).fetchone()
-    assert row is None
+    assert row is not None, "shopify_account row should be soft-deleted, not removed"
+    assert row["status"] == "disabled"
+    assert row["access_token_enc"] == ""
+    assert row["hmac_secret_enc"] is None
 
 
 def test_keeps_daemon_when_other_accounts_remain(db_path, conn, disconnect_module):
@@ -131,9 +134,49 @@ def test_revoke_failure_is_non_fatal(db_path, conn, disconnect_module):
     assert is_ok(res)
     assert res["token_revoked"] is False
     assert "URLError" in res["token_revoke_detail"]
-    # Row is still removed locally even if revoke failed.
+    # Row is still soft-deleted locally even if revoke failed (§18.10 fix).
     row = conn.execute(
-        "SELECT id FROM shopify_account WHERE id = ?",
+        "SELECT id, status FROM shopify_account WHERE id = ?",
         (acct_id,),
     ).fetchone()
-    assert row is None
+    assert row is not None
+    assert row["status"] == "disabled"
+
+
+def test_disconnect_with_existing_sync_jobs_does_not_violate_fk(db_path, conn, disconnect_module):
+    """§18.10 regression: disconnect must NOT raise IntegrityError when
+    shopify_sync_job rows still reference the shopify_account. Soft-delete
+    preserves the FK relationship + audit trail."""
+    import uuid
+    env = build_env(conn)
+    acct_id = env["shopify_account_id"]
+
+    # Seed a shopify_sync_job row that FK-references the account.
+    conn.execute(
+        "INSERT INTO shopify_sync_job "
+        "(id, shopify_account_id, sync_type, status, started_at, company_id) "
+        "VALUES (?, ?, 'full', 'completed', '2026-04-26T12:00:00Z', ?)",
+        (str(uuid.uuid4()), acct_id, env["company_id"]),
+    )
+    conn.commit()
+
+    with patch.object(disconnect_module, "_revoke_access_token", return_value=(True, "status 200")):
+        with patch.object(disconnect_module, "_uninstall_daemon_best_effort", return_value={"uninstalled": True}):
+            res = call_action(
+                disconnect_module.shopify_disconnect,
+                conn,
+                _Args(shopify_account_id=acct_id),
+            )
+
+    # Did not raise; succeeded.
+    assert is_ok(res)
+    # Account row is soft-deleted but still present.
+    row = conn.execute("SELECT status FROM shopify_account WHERE id = ?", (acct_id,)).fetchone()
+    assert row is not None
+    assert row["status"] == "disabled"
+    # Sync job history is still accessible (FK preserved).
+    job_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM shopify_sync_job WHERE shopify_account_id = ?",
+        (acct_id,),
+    ).fetchone()["n"]
+    assert job_count == 1, "shopify_sync_job history should be preserved through disconnect"

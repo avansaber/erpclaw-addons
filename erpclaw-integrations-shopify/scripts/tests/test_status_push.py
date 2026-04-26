@@ -197,6 +197,48 @@ def test_errors_from_worker_surface_cleanly(db_path, conn, sp_module):
     assert result["results"][0]["code"] == "ERR_UNKNOWN_SHOP"
 
 
+def test_dispatcher_exception_does_not_lose_partial_acks(db_path, conn, sp_module):
+    """§18.11 regression: when a dispatcher raises mid-loop, the prior
+    successful dispatches still get acked, the failing command is acked
+    too (so it stops re-dispatching forever), and push_all does not
+    crash."""
+    env = build_env(conn)
+    _seed_oauth_account(conn, env["company_id"])
+
+    def flaky_dispatcher(conn, shop, cmd):  # noqa: ARG001
+        if cmd["id"] == "cmd_b":
+            raise RuntimeError("simulated downstream failure")
+        return {"dispatched": True, "action": cmd["type"]}
+
+    def fake_post(worker_url, shop, hmac_secret, body):  # noqa: ARG001
+        return 200, {
+            "ok": True,
+            "data": {
+                "pending_commands": [
+                    {"id": "cmd_a", "type": "sync-now", "payload": {}, "created_at": "T"},
+                    {"id": "cmd_b", "type": "disconnect", "payload": {}, "created_at": "T"},
+                    {"id": "cmd_c", "type": "sync-now", "payload": {}, "created_at": "T"},
+                ],
+                "server_time": "T",
+            },
+        }
+
+    ack_ids_by_shop = {}
+    with patch.object(sp_module, "_post_status", side_effect=fake_post):
+        results = sp_module.push_all(conn, dispatcher=flaky_dispatcher, ack_ids_by_shop=ack_ids_by_shop)
+
+    # push_all should not crash; one shop result returned.
+    assert len(results) == 1
+    # All three command ids must be acked (cmd_a + cmd_c real successes,
+    # cmd_b is acked anyway so the queue clears instead of looping forever).
+    assert ack_ids_by_shop["demo.myshopify.com"] == ["cmd_a", "cmd_b", "cmd_c"]
+    # The dispatch_results should record cmd_b as errored but acked.
+    cmd_b_result = next(r for r in results[0]["dispatched"] if r["id"] == "cmd_b")
+    assert cmd_b_result["dispatched"] is True
+    assert "simulated downstream failure" in cmd_b_result["error"]
+    assert "infinite retry" in cmd_b_result.get("ack_reason", "")
+
+
 # ---------------------------------------------------------------------------
 # Signing helper
 # ---------------------------------------------------------------------------

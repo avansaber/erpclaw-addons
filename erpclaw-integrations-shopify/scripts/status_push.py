@@ -248,18 +248,31 @@ def _push_one(conn, account_row, worker_url, ack_ids_by_shop, dispatcher):
     conn.commit()
 
     pending_commands = parsed.get("data", {}).get("pending_commands", [])
+    # Bind dispatched_ids to the shop's slot in the shared dict BEFORE
+    # the dispatcher loop runs, so any partial dispatches are preserved
+    # if a single dispatcher raises mid-loop. Replace rather than
+    # accumulate; each push cycle sends + flushes its own dispatch acks.
+    # Fixes §18.11: previously a local list that was lost on exception.
     dispatched_ids = []
+    ack_ids_by_shop[shop] = dispatched_ids
     dispatch_results = []
     for cmd in pending_commands:
-        result = dispatcher(conn, shop, cmd)
-        dispatch_results.append({"id": cmd.get("id"), "type": cmd.get("type"), **result})
+        cmd_id = cmd.get("id")
+        try:
+            result = dispatcher(conn, shop, cmd)
+        except Exception as exc:  # noqa: BLE001 -- isolate each command's failure from the rest of the loop
+            dispatch_results.append({
+                "id": cmd_id,
+                "type": cmd.get("type"),
+                "dispatched": True,  # ack the failed command so it stops re-queuing forever
+                "error": repr(exc),
+                "ack_reason": "dispatcher exception; acked to prevent infinite retry",
+            })
+            dispatched_ids.append(cmd_id)
+            continue
+        dispatch_results.append({"id": cmd_id, "type": cmd.get("type"), **result})
         if result.get("dispatched"):
-            dispatched_ids.append(cmd.get("id"))
-    # Stash the ack list so the NEXT push cycle can include them.
-    if dispatched_ids:
-        ack_ids_by_shop.setdefault(shop, [])
-        # Replace rather than accumulate; we send + flush per cycle.
-        ack_ids_by_shop[shop] = dispatched_ids
+            dispatched_ids.append(cmd_id)
 
     return {
         "shop": shop,
