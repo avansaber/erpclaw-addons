@@ -145,11 +145,17 @@ def _find_customer_for_charge(conn, stripe_account_id, customer_stripe_id):
 
 def _create_payment_entry(conn, company_id, payment_type, posting_date,
                           paid_from, paid_to, amount, party_type=None,
-                          party_id=None, reference_number=None, is_return=0):
+                          party_id=None, reference_number=None, is_return=0,
+                          currency="USD"):
     """Insert a payment_entry row and return its ID.
 
     The Stripe module creates payment entries directly as the voucher
     document for GL posting.
+
+    `currency` is the transaction currency (ISO 4217). Per the simplified
+    multi-currency rule (2026-04-27), invoice currency must equal payment
+    currency, so we book in the transaction currency directly with
+    exchange_rate=1. No conversion is performed by ERPClaw.
     """
     pe_id = str(uuid.uuid4())
     now = now_iso()
@@ -169,7 +175,7 @@ def _create_payment_entry(conn, company_id, payment_type, posting_date,
         party_type, party_id,
         paid_from, paid_to,
         str(round_currency(amount)), str(round_currency(amount)),
-        "USD", "1",
+        (currency or "USD").upper(), "1",
         reference_number, posting_date,
         "submitted", str(round_currency(amount)),
         company_id, now, now,
@@ -178,11 +184,14 @@ def _create_payment_entry(conn, company_id, payment_type, posting_date,
 
 
 def _create_journal_entry(conn, company_id, posting_date, total_amount,
-                          entry_type="journal", remark=None):
+                          entry_type="journal", remark=None, currency="USD"):
     """Insert a journal_entry row and return its ID.
 
     The Stripe module creates journal entries directly as the voucher
     document for GL posting (disputes, connect fees).
+
+    `currency` is the transaction currency (ISO 4217). exchange_rate is
+    always "1": ERPClaw books in transaction currency, never converts.
     """
     je_id = str(uuid.uuid4())
     now = now_iso()
@@ -197,7 +206,7 @@ def _create_journal_entry(conn, company_id, posting_date, total_amount,
     conn.execute(sql, (
         je_id, posting_date, entry_type,
         str(round_currency(total_amount)), str(round_currency(total_amount)),
-        "USD", "1", remark or "",
+        (currency or "USD").upper(), "1", remark or "",
         "submitted", company_id,
         now, now,
     ))
@@ -284,6 +293,10 @@ def post_charge_gl(conn, args):
         fee = Decimal("0")
         net = gross
 
+    # Transaction currency: book GL in the same currency the charge happened in.
+    # ERPClaw does not convert (invoice currency must equal payment currency).
+    txn_currency = (charge["currency"] or "USD").upper()
+
     posting_date = _today()
 
     # Find mapped customer
@@ -337,6 +350,8 @@ def post_charge_gl(conn, args):
             "account_id": gl["stripe_clearing_account_id"],
             "debit": str(round_currency(net)),
             "credit": "0",
+            "currency": txn_currency,
+            "exchange_rate": "1",
         })
 
     # DR Stripe Fees (fee amount) — expense account, needs cost_center_id
@@ -346,6 +361,8 @@ def post_charge_gl(conn, args):
             "debit": str(round_currency(fee)),
             "credit": "0",
             "cost_center_id": cost_center_id,
+            "currency": txn_currency,
+            "exchange_rate": "1",
         })
 
     # CR Revenue/Unearned (gross amount)
@@ -353,6 +370,8 @@ def post_charge_gl(conn, args):
         "account_id": credit_account,
         "debit": "0",
         "credit": str(round_currency(gross)),
+        "currency": txn_currency,
+        "exchange_rate": "1",
     })
 
     # Create payment_entry as the voucher
@@ -364,6 +383,7 @@ def post_charge_gl(conn, args):
         party_type=party_type,
         party_id=customer_id,
         reference_number=charge_stripe_id,
+        currency=txn_currency,
     )
 
     # Post GL entries via the sanctioned API
@@ -437,6 +457,7 @@ def post_refund_gl(conn, args):
     gl = _get_stripe_account_gl(conn, stripe_account_id)
     company_id = gl["company_id"]
     refund_amount = to_decimal(refund["amount"])
+    txn_currency = (refund["currency"] or "USD").upper()
     posting_date = _today()
 
     # Look up original charge to find customer
@@ -467,12 +488,16 @@ def post_refund_gl(conn, args):
             "account_id": debit_account,
             "debit": str(round_currency(refund_amount)),
             "credit": "0",
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
         # CR Stripe Clearing (refund amount)
         {
             "account_id": gl["stripe_clearing_account_id"],
             "debit": "0",
             "credit": str(round_currency(refund_amount)),
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
     ]
 
@@ -485,6 +510,7 @@ def post_refund_gl(conn, args):
         party_id=customer_id,
         reference_number=refund_stripe_id,
         is_return=1,
+        currency=txn_currency,
     )
 
     gl_ids = insert_gl_entries(
@@ -558,6 +584,7 @@ def post_dispute_gl(conn, args):
     gl = _get_stripe_account_gl(conn, stripe_account_id)
     company_id = gl["company_id"]
     dispute_amount = to_decimal(dispute["amount"])
+    txn_currency = (dispute["currency"] or "USD").upper()
     posting_date = _today()
     dispute_fee = Decimal("15.00")  # Standard Stripe dispute fee
 
@@ -609,18 +636,23 @@ def post_dispute_gl(conn, args):
                 "debit": str(round_currency(total)),
                 "credit": "0",
                 "cost_center_id": cost_center_id,
+                "currency": txn_currency,
+                "exchange_rate": "1",
             },
             # CR Stripe Clearing (release the hold)
             {
                 "account_id": gl["stripe_clearing_account_id"],
                 "debit": "0",
                 "credit": str(round_currency(total)),
+                "currency": txn_currency,
+                "exchange_rate": "1",
             },
         ]
 
         je_id = _create_journal_entry(
             conn, company_id, posting_date, total,
             remark=f"Stripe dispute lost {dispute_stripe_id}",
+            currency=txn_currency,
         )
 
         gl_ids = insert_gl_entries(
@@ -665,18 +697,23 @@ def post_dispute_gl(conn, args):
                 "debit": str(round_currency(total)),
                 "credit": "0",
                 "cost_center_id": cost_center_id,
+                "currency": txn_currency,
+                "exchange_rate": "1",
             },
             # CR Stripe Clearing
             {
                 "account_id": gl["stripe_clearing_account_id"],
                 "debit": "0",
                 "credit": str(round_currency(total)),
+                "currency": txn_currency,
+                "exchange_rate": "1",
             },
         ]
 
         je_id = _create_journal_entry(
             conn, company_id, posting_date, total,
             remark=f"Stripe dispute {dispute_stripe_id} (amount + $15 fee)",
+            currency=txn_currency,
         )
 
         gl_ids = insert_gl_entries(
@@ -747,6 +784,7 @@ def post_payout_gl(conn, args):
     gl = _get_stripe_account_gl(conn, stripe_account_id)
     company_id = gl["company_id"]
     payout_amount = to_decimal(payout["amount"])
+    txn_currency = (payout["currency"] or "USD").upper()
     posting_date = _today()
 
     entries = [
@@ -755,12 +793,16 @@ def post_payout_gl(conn, args):
             "account_id": gl["stripe_payout_account_id"],
             "debit": str(round_currency(payout_amount)),
             "credit": "0",
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
         # CR Stripe Clearing
         {
             "account_id": gl["stripe_clearing_account_id"],
             "debit": "0",
             "credit": str(round_currency(payout_amount)),
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
     ]
 
@@ -770,6 +812,7 @@ def post_payout_gl(conn, args):
         paid_to=gl["stripe_payout_account_id"],
         amount=payout_amount,
         reference_number=payout_stripe_id,
+        currency=txn_currency,
     )
 
     gl_ids = insert_gl_entries(
@@ -845,6 +888,7 @@ def post_connect_fee_gl(conn, args):
     gl = _get_stripe_account_gl(conn, stripe_account_id)
     company_id = gl["company_id"]
     fee_amount = to_decimal(app_fee["amount"])
+    txn_currency = (app_fee["currency"] or "USD").upper()
     posting_date = _today()
 
     # Auto-resolve cost_center_id for P&L accounts (income)
@@ -862,6 +906,8 @@ def post_connect_fee_gl(conn, args):
             "account_id": gl["stripe_clearing_account_id"],
             "debit": str(round_currency(fee_amount)),
             "credit": "0",
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
         # CR Platform Revenue
         {
@@ -869,12 +915,15 @@ def post_connect_fee_gl(conn, args):
             "debit": "0",
             "credit": str(round_currency(fee_amount)),
             "cost_center_id": cost_center_id,
+            "currency": txn_currency,
+            "exchange_rate": "1",
         },
     ]
 
     je_id = _create_journal_entry(
         conn, company_id, posting_date, fee_amount,
         remark=f"Stripe Connect fee {app_fee_stripe_id}",
+        currency=txn_currency,
     )
 
     gl_ids = insert_gl_entries(

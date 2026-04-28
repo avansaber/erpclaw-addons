@@ -264,7 +264,7 @@ def seed_cost_center(conn, company_id: str, name="Main") -> str:
 def seed_charge(conn, stripe_account_id: str, company_id: str,
                 stripe_id: str = "ch_test_001", amount: str = "100.00",
                 status: str = "succeeded", customer_stripe_id: str = "",
-                erpclaw_payment_entry_id=None) -> str:
+                erpclaw_payment_entry_id=None, currency: str = "USD") -> str:
     """Insert a stripe_charge record and return its internal ID."""
     cid = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -274,9 +274,10 @@ def seed_charge(conn, stripe_account_id: str, company_id: str,
              customer_stripe_id, status, amount_refunded, disputed,
              erpclaw_payment_entry_id,
              company_id, created_stripe, created_at)
-           VALUES (?, ?, ?, ?, 'USD', ?, ?, '0', 0, ?, ?, ?, datetime('now'))""",
-        (cid, stripe_id, stripe_account_id, amount, customer_stripe_id,
-         status, erpclaw_payment_entry_id, company_id, now)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '0', 0, ?, ?, ?, datetime('now'))""",
+        (cid, stripe_id, stripe_account_id, amount, currency.upper(),
+         customer_stripe_id, status, erpclaw_payment_entry_id,
+         company_id, now)
     )
     conn.commit()
     return cid
@@ -287,7 +288,8 @@ def seed_balance_transaction(conn, stripe_account_id: str, company_id: str,
                              source_id: str = "ch_test_001",
                              amount: str = "100.00", fee: str = "3.20",
                              net: str = "96.80", bt_type: str = "charge",
-                             payout_id: str = None, reconciled: int = 0) -> str:
+                             payout_id: str = None, reconciled: int = 0,
+                             currency: str = "USD") -> str:
     """Insert a stripe_balance_transaction and return its internal ID."""
     bid = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -297,10 +299,11 @@ def seed_balance_transaction(conn, stripe_account_id: str, company_id: str,
              amount, fee, net, currency, status,
              payout_id, reconciled, company_id,
              created_stripe, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'USD', 'available',
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'available',
                    ?, ?, ?, ?, datetime('now'))""",
         (bid, stripe_id, stripe_account_id, bt_type, source_id,
-         amount, fee, net, payout_id, reconciled, company_id, now)
+         amount, fee, net, currency.upper(),
+         payout_id, reconciled, company_id, now)
     )
     conn.commit()
     return bid
@@ -309,7 +312,7 @@ def seed_balance_transaction(conn, stripe_account_id: str, company_id: str,
 def seed_refund(conn, stripe_account_id: str, company_id: str,
                 stripe_id: str = "re_test_001", charge_stripe_id: str = "ch_test_001",
                 amount: str = "50.00", status: str = "succeeded",
-                erpclaw_payment_entry_id=None) -> str:
+                erpclaw_payment_entry_id=None, currency: str = "USD") -> str:
     """Insert a stripe_refund and return its internal ID."""
     rid = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -318,9 +321,10 @@ def seed_refund(conn, stripe_account_id: str, company_id: str,
             (id, stripe_id, stripe_account_id, charge_stripe_id,
              amount, currency, status, erpclaw_payment_entry_id,
              company_id, created_stripe, created_at)
-           VALUES (?, ?, ?, ?, ?, 'USD', ?, ?, ?, ?, datetime('now'))""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
         (rid, stripe_id, stripe_account_id, charge_stripe_id,
-         amount, status, erpclaw_payment_entry_id, company_id, now)
+         amount, currency.upper(), status, erpclaw_payment_entry_id,
+         company_id, now)
     )
     conn.commit()
     return rid
@@ -329,7 +333,7 @@ def seed_refund(conn, stripe_account_id: str, company_id: str,
 def seed_dispute(conn, stripe_account_id: str, company_id: str,
                  stripe_id: str = "dp_test_001", charge_stripe_id: str = "ch_test_001",
                  amount: str = "100.00", status: str = "needs_response",
-                 erpclaw_journal_entry_id=None) -> str:
+                 erpclaw_journal_entry_id=None, currency: str = "USD") -> str:
     """Insert a stripe_dispute and return its internal ID."""
     did = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -338,9 +342,10 @@ def seed_dispute(conn, stripe_account_id: str, company_id: str,
             (id, stripe_id, stripe_account_id, charge_stripe_id,
              amount, currency, status, erpclaw_journal_entry_id,
              company_id, created_stripe, created_at)
-           VALUES (?, ?, ?, ?, ?, 'USD', ?, ?, ?, ?, datetime('now'))""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
         (did, stripe_id, stripe_account_id, charge_stripe_id,
-         amount, status, erpclaw_journal_entry_id, company_id, now)
+         amount, currency.upper(), status, erpclaw_journal_entry_id,
+         company_id, now)
     )
     conn.commit()
     return did
@@ -348,7 +353,8 @@ def seed_dispute(conn, stripe_account_id: str, company_id: str,
 
 def seed_payout(conn, stripe_account_id: str, company_id: str,
                 stripe_id: str = "po_test_001", amount: str = "500.00",
-                status: str = "paid", erpclaw_payment_entry_id=None) -> str:
+                status: str = "paid", erpclaw_payment_entry_id=None,
+                currency: str = "USD") -> str:
     """Insert a stripe_payout and return its internal ID."""
     pid = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -357,9 +363,9 @@ def seed_payout(conn, stripe_account_id: str, company_id: str,
             (id, stripe_id, stripe_account_id, amount, currency,
              status, reconciled, erpclaw_payment_entry_id,
              company_id, created_stripe, created_at)
-           VALUES (?, ?, ?, ?, 'USD', ?, 0, ?, ?, ?, datetime('now'))""",
-        (pid, stripe_id, stripe_account_id, amount, status,
-         erpclaw_payment_entry_id, company_id, now)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, datetime('now'))""",
+        (pid, stripe_id, stripe_account_id, amount, currency.upper(),
+         status, erpclaw_payment_entry_id, company_id, now)
     )
     conn.commit()
     return pid
@@ -367,7 +373,8 @@ def seed_payout(conn, stripe_account_id: str, company_id: str,
 
 def seed_application_fee(conn, stripe_account_id: str, company_id: str,
                          stripe_id: str = "fee_test_001", amount: str = "10.00",
-                         erpclaw_journal_entry_id=None) -> str:
+                         erpclaw_journal_entry_id=None,
+                         currency: str = "USD") -> str:
     """Insert a stripe_application_fee and return its internal ID."""
     fid = _uuid()
     now = "2026-03-15T12:00:00Z"
@@ -376,8 +383,8 @@ def seed_application_fee(conn, stripe_account_id: str, company_id: str,
             (id, stripe_id, stripe_account_id, amount, currency,
              refunded_amount, erpclaw_journal_entry_id,
              company_id, created_stripe, created_at)
-           VALUES (?, ?, ?, ?, 'USD', '0', ?, ?, ?, datetime('now'))""",
-        (fid, stripe_id, stripe_account_id, amount,
+           VALUES (?, ?, ?, ?, ?, '0', ?, ?, ?, datetime('now'))""",
+        (fid, stripe_id, stripe_account_id, amount, currency.upper(),
          erpclaw_journal_entry_id, company_id, now)
     )
     conn.commit()

@@ -224,8 +224,13 @@ def _get_stripe_account_gl(conn, stripe_account_id):
 
 
 def _create_journal_entry(conn, company_id, posting_date, total_amount,
-                          entry_type="journal", remark=None):
-    """Insert a journal_entry row and return its ID."""
+                          entry_type="journal", remark=None, currency="USD"):
+    """Insert a journal_entry row and return its ID.
+
+    `currency` is the transaction currency for the JE (ISO 4217). Defaults
+    to USD for backward compatibility. exchange_rate is always "1": ERPClaw
+    books in transaction currency and never converts.
+    """
     je_id = str(uuid.uuid4())
     now = now_iso()
 
@@ -239,7 +244,7 @@ def _create_journal_entry(conn, company_id, posting_date, total_amount,
     conn.execute(sql, (
         je_id, posting_date, entry_type,
         str(round_currency(total_amount)), str(round_currency(total_amount)),
-        "USD", "1", remark or "",
+        (currency or "USD").upper(), "1", remark or "",
         "submitted", company_id,
         now, now,
     ))
@@ -485,7 +490,8 @@ def recognize_subscription_revenue(conn, args):
     sub_t = Table("stripe_subscription")
     subs = conn.execute(
         Q.from_(sub_t).select(
-            sub_t.id, sub_t.stripe_id, sub_t.erpclaw_revenue_contract_id
+            sub_t.id, sub_t.stripe_id, sub_t.erpclaw_revenue_contract_id,
+            sub_t.currency
         )
         .where(sub_t.stripe_account_id == P())
         .where(sub_t.erpclaw_revenue_contract_id.isnotnull())
@@ -500,6 +506,9 @@ def recognize_subscription_revenue(conn, args):
     for sub_row in subs:
         sub = dict(sub_row)
         contract_id = sub["erpclaw_revenue_contract_id"]
+        # Subscription's transaction currency. ERPClaw books rev rec in
+        # the subscription's currency directly (no conversion).
+        sub_currency = (sub.get("currency") or "USD").upper()
 
         # Find obligations for this contract (READ is allowed)
         ob_t = Table("advacct_performance_obligation")
@@ -541,6 +550,7 @@ def recognize_subscription_revenue(conn, args):
                 je_id = _create_journal_entry(
                     conn, company_id, period_match, amount,
                     remark=f"ASC 606 revenue recognition - {sub['stripe_id']} - {period_match}",
+                    currency=sub_currency,
                 )
 
                 # Post GL entries: DR Unearned Revenue, CR Revenue
@@ -549,12 +559,16 @@ def recognize_subscription_revenue(conn, args):
                         "account_id": unearned_account_id,
                         "debit": str(round_currency(amount)),
                         "credit": "0",
+                        "currency": sub_currency,
+                        "exchange_rate": "1",
                     },
                     {
                         "account_id": revenue_account_id,
                         "debit": "0",
                         "credit": str(round_currency(amount)),
                         "cost_center_id": cost_center_id,
+                        "currency": sub_currency,
+                        "exchange_rate": "1",
                     },
                 ]
 
