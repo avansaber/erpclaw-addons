@@ -17,22 +17,6 @@ database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [manufacturing, projects, assets, quality, support, bom, work-orders, mrp, timesheets, depreciation, inspections, sla, shop-floor, tools, eco, recipes, oee]
 metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/erpclaw-manufacturing/db_query.py --action status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
-cron:
-  - expression: "0 6 1 * *"
-    timezone: "America/Chicago"
-    description: "Monthly depreciation run (1st of each month)"
-    message: "Using erpclaw-ops, run the run-depreciation action for last month and report the total depreciation posted."
-    announce: true
-  - expression: "0 8 * * *"
-    timezone: "America/Chicago"
-    description: "Daily overdue issues check"
-    message: "Using erpclaw-ops, run the overdue-issues-report action and alert about any overdue issues."
-    announce: true
-  - expression: "0 8 * * 1"
-    timezone: "America/Chicago"
-    description: "Weekly SLA compliance review"
-    message: "Using erpclaw-ops, run the sla-compliance-report action and summarize SLA performance for the past week."
-    announce: true
 ---
 
 # erpclaw-ops

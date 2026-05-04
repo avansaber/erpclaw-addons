@@ -16,12 +16,6 @@ database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [crm, analytics, ai, leads, opportunities, campaigns, territories, contracts, automation, kpi, forecasting, anomaly-detection, scoring, email-marketing, lead-scoring, nurture]
 metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
-cron:
-  - expression: "0 6 * * 1"
-    timezone: "America/Chicago"
-    description: "Weekly anomaly detection sweep"
-    message: "Using erpclaw-growth, run the detect-anomalies action and report any new anomalies found."
-    announce: true
 ---
 
 # erpclaw-growth
