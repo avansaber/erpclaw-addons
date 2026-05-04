@@ -88,15 +88,28 @@ def add_account(conn, args):
     if not account_name:
         err("--account-name is required")
 
-    api_key = getattr(args, "api_key", None)
+    # Resolve the Stripe API key from the encrypted credentials store.
+    # Users must run `erpclaw set-credential --integration stripe` first
+    # (see CHANGELOG v4.1.0). Direct CLI keys are no longer accepted —
+    # this avoids leaking the key into shell history / process argv.
+    try:
+        from erpclaw_lib.credentials import get_credential
+    except ImportError:
+        err("erpclaw_lib.credentials is unavailable; foundation v4.1.0+ required")
+    api_key = get_credential("stripe")
     if not api_key:
-        err("--api-key is required (Stripe restricted key)")
+        err(
+            "Stripe credential not found. Set it first with:  "
+            "erpclaw set-credential --integration stripe --from-stdin  "
+            "(then paste the key, hit Enter, Ctrl-D)"
+        )
 
     mode = getattr(args, "mode", "test")
     validate_enum(mode, VALID_MODES, "mode")
 
-    # Encrypt the API key before storage
-    encrypted_key = encrypt_key(api_key)
+    # Note: api_key is held in-process only; never stored in the addon's
+    # stripe_account table. Foundation manages the persistent credential.
+    encrypted_key = None  # legacy column; left empty post-v4.1.0
 
     # Optional fields
     webhook_secret = getattr(args, "webhook_secret", None)
@@ -188,9 +201,9 @@ def update_account(conn, args):
     if account_name is not None:
         data["account_name"] = account_name
 
-    api_key = getattr(args, "api_key", None)
-    if api_key is not None:
-        data["restricted_key_enc"] = encrypt_key(api_key)
+    # Stripe credentials are managed via foundation `set-credential` action.
+    # Direct CLI api_key updates are rejected — `erpclaw set-credential
+    # --integration stripe --from-stdin` is the only path.
 
     mode = getattr(args, "mode", None)
     if mode is not None:

@@ -1,6 +1,6 @@
 ---
 name: erpclaw-integrations-stripe
-version: 1.0.0
+version: 2.0.0
 description: Deep Stripe integration -- 67 actions across 10 domains. Account management, transaction sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports.
 author: avansaber
 homepage: https://github.com/avansaber/erpclaw-addons

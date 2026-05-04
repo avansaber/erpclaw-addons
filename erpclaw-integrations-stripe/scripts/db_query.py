@@ -104,7 +104,8 @@ def main():
     # ── ACCOUNTS domain ──────────────────────────────────────────
     parser.add_argument("--stripe-account-id")
     parser.add_argument("--account-name")
-    parser.add_argument("--api-key")
+    # NOTE: --api-key was removed in v4.1.0. Use `set-credential` instead
+    # (see foundation CHANGELOG). Argument intentionally absent.
     parser.add_argument("--mode")
     parser.add_argument("--webhook-secret")
     parser.add_argument("--is-connect-platform", type=int)
