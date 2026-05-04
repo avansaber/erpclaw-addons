@@ -1,7 +1,7 @@
 ---
 name: erpclaw-os-engine
-version: 1.0.0
-description: ERPClaw OS Engine -- the optional self-improvement layer for ERPClaw. Module generation from natural language, in-module feature injection, sandboxed execution, deploy pipeline, DGM evolution, gap detection, semantic checks, compliance weather, heartbeat analysis. 31 actions, all `os-` prefixed. Dev-time / power-user tooling. Foundation skill `erpclaw` is required (>= v4.0.0).
+version: 1.0.1
+description: Developer tooling for authoring ERPClaw vertical modules and inspecting OS-level health. Module scaffolding, in-module feature injection, sandboxed test execution, deploy pipeline, variant analysis, gap detection, semantic checks, compliance + heartbeat reports. 31 actions, all `os-` prefixed. Sandbox-first generation; user approval required before deploy. Optional addon, not installed by default. Foundation skill `erpclaw` is required (>= v4.0.0).
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
