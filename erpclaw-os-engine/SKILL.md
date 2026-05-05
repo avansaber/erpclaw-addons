@@ -163,4 +163,4 @@ python3 scripts/db_query.py --action os-setup-web-dashboard \
 - Code: https://github.com/avansaber/erpclaw-addons (subdir `erpclaw-os-engine`)
 - Foundation skill: https://github.com/avansaber/erpclaw
 - Documentation: https://www.erpclaw.ai/docs/
-- License: MIT
+- License: GPL v3
