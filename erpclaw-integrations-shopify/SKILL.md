@@ -24,6 +24,8 @@ refunds via GraphQL Admin API, maps products by SKU, matches customers by name, 
 Shopify Payments payouts with fee breakdowns, processes webhooks, supports 14 GL account
 mappings, configurable GL routing rules, full reconciliation, browse/search, and reports.
 
+> **Companion code:** the Shopify App Store listing + Cloudflare Worker (OAuth + pairing + GDPR webhooks) lives at `apps/shopify/`. This SKILL is the runtime that processes Shopify data on the merchant's machine; `apps/shopify/` is the OAuth bridge + UI on Cloudflare.
+
 ## v1.1: two ways to connect a Shopify store
 
 **OAuth pairing (recommended, App Store flow)** — merchant installs the "ERPClaw

@@ -798,7 +798,7 @@ def _module_name_from_path(file_path: str) -> str:
     """Derive a module name from a file path.
 
     e.g. /source/erpclaw/scripts/erpclaw-selling/db_query.py -> "erpclaw-selling"
-         /source/groomingclaw/scripts/grooming.py -> "groomingclaw"
+         /source/healthclaw/scripts/health.py -> "healthclaw"
     """
     parts = file_path.replace("\\", "/").split("/")
     # Walk backwards looking for a directory name that looks like a module

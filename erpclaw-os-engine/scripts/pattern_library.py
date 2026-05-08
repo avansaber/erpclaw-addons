@@ -64,7 +64,7 @@ PATTERNS = {
     "invoice_delegation": {
         "name": "Invoice Delegation",
         "description": "Create invoice via cross_skill (never direct GL)",
-        "source_modules": ["groomingclaw", "tattooclaw", "storageclaw"],
+        "source_modules": ["healthclaw", "hospitalityclaw", "automotiveclaw"],
         "schema_fields": [],
         "actions": ["create-invoice"],
         "requires_gl": True,  # but delegated, not direct
@@ -72,7 +72,7 @@ PATTERNS = {
     "compliance_tracking": {
         "name": "Compliance/Licensing",
         "description": "Track certifications, inspections, compliance records",
-        "source_modules": ["legalclaw", "tattooclaw", "constructclaw"],
+        "source_modules": ["legalclaw", "constructclaw", "healthclaw"],
         "schema_fields": [
             "id TEXT PRIMARY KEY",
             "company_id TEXT NOT NULL REFERENCES company(id)",
@@ -89,7 +89,7 @@ PATTERNS = {
     "prepaid_package": {
         "name": "Prepaid Package/Credit",
         "description": "Prepaid sessions or credits with usage tracking",
-        "source_modules": ["groomingclaw", "erpclaw-billing"],
+        "source_modules": ["hospitalityclaw", "erpclaw-billing"],
         "schema_fields": [
             "id TEXT PRIMARY KEY",
             "company_id TEXT NOT NULL REFERENCES company(id)",
@@ -106,7 +106,7 @@ PATTERNS = {
     "recurring_billing": {
         "name": "Recurring Monthly Billing",
         "description": "Monthly billing with late fees and delinquency",
-        "source_modules": ["storageclaw", "propertyclaw"],
+        "source_modules": ["propertyclaw", "hospitalityclaw"],
         "schema_fields": [
             "id TEXT PRIMARY KEY",
             "company_id TEXT NOT NULL REFERENCES company(id)",
@@ -160,7 +160,7 @@ PATTERNS = {
     "recurring_template": {
         "name": "Recurring Template",
         "description": "Recurring document generation from template. Defines frequency and schedule for auto-generating documents (invoices, bills, etc.).",
-        "source_modules": ["erpclaw-billing", "storageclaw"],
+        "source_modules": ["erpclaw-billing", "propertyclaw"],
         "schema_fields": [
             "id TEXT PRIMARY KEY",
             "company_id TEXT NOT NULL REFERENCES company(id)",

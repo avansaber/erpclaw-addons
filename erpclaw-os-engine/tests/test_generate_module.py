@@ -46,7 +46,7 @@ SRC_ROOT = os.path.join(_PROJECT_ROOT, "source")
 # Common entity definitions used across tests
 # ---------------------------------------------------------------------------
 
-GROOMING_ENTITIES = [
+SAMPLE_ENTITIES = [
     {
         "name": "pet",
         "pattern": "crud_entity",
@@ -395,15 +395,15 @@ class TestTermToPatternIntegrity:
 
 class TestInputValidation:
     def test_valid_inputs(self):
-        errors = _validate_inputs("testclaw", "test", GROOMING_ENTITIES)
+        errors = _validate_inputs("testclaw", "test", SAMPLE_ENTITIES)
         assert errors == []
 
     def test_empty_module_name(self):
-        errors = _validate_inputs("", "test", GROOMING_ENTITIES)
+        errors = _validate_inputs("", "test", SAMPLE_ENTITIES)
         assert any("module_name" in e for e in errors)
 
     def test_empty_prefix(self):
-        errors = _validate_inputs("testclaw", "", GROOMING_ENTITIES)
+        errors = _validate_inputs("testclaw", "", SAMPLE_ENTITIES)
         assert any("prefix" in e for e in errors)
 
     def test_no_entities(self):
@@ -424,11 +424,11 @@ class TestInputValidation:
         assert any("Unknown pattern" in e for e in errors)
 
     def test_invalid_prefix_format(self):
-        errors = _validate_inputs("testclaw", "Test-Bad", GROOMING_ENTITIES)
+        errors = _validate_inputs("testclaw", "Test-Bad", SAMPLE_ENTITIES)
         assert any("Prefix" in e for e in errors)
 
     def test_prefix_starting_with_number(self):
-        errors = _validate_inputs("testclaw", "1test", GROOMING_ENTITIES)
+        errors = _validate_inputs("testclaw", "1test", SAMPLE_ENTITIES)
         assert any("Prefix" in e for e in errors)
 
 
@@ -437,15 +437,15 @@ class TestInputValidation:
 # ---------------------------------------------------------------------------
 
 class TestGenerateModule:
-    def test_generate_grooming_module(self, tmp_path):
-        """Generate a grooming module with 3 entities (pet, appointment, service_type).
+    def test_generate_sample_module(self, tmp_path):
+        """Generate a sample module with 3 entities (pet, appointment, service_type).
         Verify: files created, correct prefix, correct table names."""
-        output_dir = str(tmp_path / "groomingclaw")
+        output_dir = str(tmp_path / "exampleclaw")
         result = generate_module(
-            module_name="groomingclaw",
-            prefix="groom",
-            business_description="Pet grooming salon management with appointments, pet profiles, and service catalogs.",
-            entities=GROOMING_ENTITIES,
+            module_name="exampleclaw",
+            prefix="example",
+            business_description="A small business with appointments, customer profiles, and service catalogs.",
+            entities=SAMPLE_ENTITIES,
             output_dir=output_dir,
         )
         assert result["entities"] == 3

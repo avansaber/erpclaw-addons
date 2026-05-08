@@ -24,6 +24,8 @@ maps Stripe customers to ERP customers, posts GL entries with configurable rules
 reconciles payouts, tracks Connect platform fees, processes webhooks, and generates
 financial reports (revenue, MRR, fees, disputes).
 
+> **Companion code:** the Stripe App Marketplace listing + Cloudflare Worker that bridges Stripe to this skill lives at `apps/stripe/`. This SKILL is the runtime that processes Stripe data on the user's machine; `apps/stripe/` is the discovery/OAuth surface on Cloudflare.
+
 ### Skill Activation Triggers
 
 Activate when user mentions: Stripe, payment gateway, payment processor, charges,

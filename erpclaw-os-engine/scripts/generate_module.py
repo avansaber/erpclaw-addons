@@ -1303,11 +1303,11 @@ def generate_module(
     """Generate a complete ERPClaw module from structured input.
 
     Args:
-        module_name: e.g., "groomingclaw"
-        prefix: e.g., "groom"
+        module_name: e.g., "exampleclaw"
+        prefix: e.g., "example"
         business_description: natural language description
         entities: list of entity definitions with pattern assignments
-                  [{"name": "pet", "fields": [...], "pattern": "crud_entity"}, ...]
+                  [{"name": "widget", "fields": [...], "pattern": "crud_entity"}, ...]
         output_dir: where to write files (default: source/{module_name}/)
         src_root: project source/ root for validation
 
