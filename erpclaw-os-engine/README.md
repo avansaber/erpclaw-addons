@@ -30,7 +30,7 @@ The OS engine includes the following safety mechanisms:
 1. **Constitution validator (18 articles).** Every generated module is checked against 18 financial-correctness laws covering naming conventions, data types, GL immutability, transaction atomicity, and audit trail requirements. A module that fails any article is rejected at generation time and never proceeds to the sandbox.
 2. **Sandboxed execution.** Modules that pass the constitution run inside `sandbox.py` against an isolated test database, with full GL invariant checks on the sandbox DB.
 3. **AST + `.bak` backup on in-place edits.** `os-add-feature-to-module` always creates a `.bak` backup before mutating an existing file, validates syntax via `ast.parse` after, and refuses to modify files in `SAFETY_EXCLUDED_FILES`.
-4. **Adversarial audit.** `os-run-audit` runs a dedicated set of adversarial test cases against new modules.
+4. **Robustness audit.** `os-run-audit` runs a dedicated set of boundary-condition test cases against new modules.
 5. **Explicit user approval before deploy.** `os-deploy-module` requires the user-approved flag and is on the foundation's "always confirm" list. A module that passes all mechanical checks still does not deploy automatically — the user reviews the diff and approves the deploy.
 
 The mechanical checks are designed to fail fast (rejecting non-compliant modules without consuming reviewer time). They are not a substitute for human review of business logic, domain edge cases, or UX decisions; those still require manual sign-off.
@@ -46,7 +46,7 @@ The mechanical checks are designed to fail fast (rejecting non-compliant modules
 | Compliance + health | `os-compliance-weather-status`, `os-heartbeat-analyze`, `os-heartbeat-report`, `os-heartbeat-suggest` |
 | Improvement loop | `os-log-improvement`, `os-list-improvements`, `os-review-improvement` |
 | Gap analysis + research | `os-detect-gaps`, `os-suggest-modules`, `os-research-business-rule`, `os-get-implementation-guide` |
-| Adversarial audit | `os-run-audit` |
+| Robustness audit | `os-run-audit` |
 | Semantic checks | `os-semantic-check`, `os-semantic-rules-list` |
 | Web dashboard provisioning | `os-setup-web-dashboard` |
 | Status | `os-status` |
@@ -57,7 +57,7 @@ All actions use the `os-` prefix to avoid namespace collision with foundation ac
 
 Foundation `erpclaw` keeps the runtime-essential parts of the OS:
 
-- **12-step GL invariant validation** (`erpclaw_lib.gl_invariants.check_gl_invariants`) — runs on every submit
+- **GL invariant validation** (`erpclaw_lib.gl_invariants.check_gl_invariants`) — runs on every submit
 - Constitutional articles + `validate-module` action (read-only check, available without the addon)
 - Schema migration (`schema-plan`, `schema-apply`, `schema-rollback`, `schema-drift`)
 - `dependency_resolver.py` for cross-module install ordering
@@ -95,7 +95,7 @@ python3 scripts/db_query.py --action os-deploy-module \
   --module-name myindustry --target sandbox
 ```
 
-Run the adversarial audit:
+Run the robustness audit:
 
 ```bash
 python3 scripts/db_query.py --action os-run-audit \

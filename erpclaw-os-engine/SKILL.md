@@ -10,7 +10,7 @@ category: expansion
 requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
-tags: [erpclaw, ai-native, os, self-improving, module-generation, code-generation, sandbox, dgm, deploy, compliance, heartbeat, gap-detection, semantic-check]
+tags: [erpclaw, ai-native, os, self-improving, module-generation, code-generation, sandbox, variant-analysis, deploy, compliance, heartbeat, gap-detection, semantic-check]
 scripts:
   - scripts/db_query.py
 metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action os-status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
@@ -18,7 +18,7 @@ metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db
 
 # ERPClaw OS Engine
 
-The optional self-improvement layer for ERPClaw. Module generation, deploy pipeline, evolutionary improvement (Darwin-Gödel Machine), and the meta-tooling that lets ERPClaw extend itself.
+The optional self-improvement layer for ERPClaw. Module generation, deploy pipeline, evolutionary variant analysis, and the meta-tooling that lets ERPClaw extend itself.
 
 ## When to install
 
@@ -34,7 +34,7 @@ You **don't** need this addon for normal day-to-day ERP use (invoicing, accounti
 
 The foundation skill (`erpclaw`) keeps the runtime-essential parts of the OS:
 
-- **12-step GL invariant validation** (`erpclaw_lib.gl_invariants.check_gl_invariants`) — runs on every submit
+- **GL invariant validation** (`erpclaw_lib.gl_invariants.check_gl_invariants`) — runs on every submit
 - Constitutional articles and `validate-module` action
 - Schema migration (`schema-plan`, `schema-apply`, `schema-rollback`, `schema-drift`)
 - `dependency_resolver.py` for cross-module install ordering
@@ -46,11 +46,11 @@ The foundation skill (`erpclaw`) keeps the runtime-essential parts of the OS:
 | Module generation | `os-generate-module`, `os-configure-module`, `os-list-industries`, `os-classify-operation` |
 | In-module features | `os-add-feature-to-module`, `os-check-feature-completeness`, `os-list-feature-matrix` |
 | Deploy pipeline | `os-deploy-module`, `os-deploy-audit-log`, `os-install-suite` |
-| Evolutionary improvement | `os-dgm-run-variant`, `os-dgm-list-variants`, `os-dgm-select-best` |
+| Variant analysis | `os-dgm-run-variant`, `os-dgm-list-variants`, `os-dgm-select-best` |
 | Compliance + health | `os-compliance-weather-status`, `os-heartbeat-analyze`, `os-heartbeat-report`, `os-heartbeat-suggest` |
 | Improvement loop | `os-log-improvement`, `os-list-improvements`, `os-review-improvement` |
 | Gap analysis + research | `os-detect-gaps`, `os-suggest-modules`, `os-research-business-rule`, `os-get-implementation-guide` |
-| Adversarial audit | `os-run-audit` |
+| Robustness audit | `os-run-audit` |
 | Semantic checks | `os-semantic-check`, `os-semantic-rules-list` |
 | Web dashboard provisioning | `os-setup-web-dashboard` |
 | Status | `os-status` |
@@ -84,7 +84,7 @@ The OS engine includes the following safety mechanisms (preserved from when this
 - **Constitution validation** — every generated module is validated against 18 constitutional articles before deploy
 - **Sandboxed execution** — newly-generated modules run inside `sandbox.py` first, with full GL invariant checks on the sandbox DB
 - **`.bak` backups** — `os-add-feature-to-module` always creates a `.bak` backup before mutating an existing file, validates syntax via `ast.parse` after, and refuses to modify files in `SAFETY_EXCLUDED_FILES`
-- **Adversarial audit** — `os-run-audit` runs adversarial test cases against new modules
+- **Robustness audit** — `os-run-audit` runs boundary-condition test cases against new modules
 
 These gates are not weaker for being in an addon. The addon is opt-in to bound the security surface for foundation users; if you install it, the same constitutional validation applies.
 
@@ -122,7 +122,7 @@ python3 scripts/db_query.py --action os-check-feature-completeness \
   --src-root source/erpclaw-addons/myindustry
 ```
 
-### Run adversarial audit on a generated module
+### Run robustness audit on a generated module
 
 ```bash
 python3 scripts/db_query.py --action os-run-audit \
@@ -131,16 +131,16 @@ python3 scripts/db_query.py --action os-run-audit \
 
 ## Tier 3: Advanced
 
-### DGM (Darwin-Gödel Machine) evolution
+### Variant analysis
 
-The DGM engine runs variants of generated modules against a fitness landscape and selects the best. See `dgm_engine.py` and `variant_manager.py`.
+The variant engine runs variants of generated modules against a fitness landscape and selects the best. See `dgm_engine.py` and `variant_manager.py`.
 
 ```bash
 python3 scripts/db_query.py --action os-dgm-run-variant \
   --module-name myindustry --variant-id v1
 ```
 
-### Compliance weather + heartbeat
+### Compliance posture + heartbeat
 
 Periodic system health snapshots:
 

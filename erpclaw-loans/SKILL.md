@@ -72,4 +72,4 @@ Loan management for term loans, demand loans, staff loans, and credit lines.
 - **Disbursement:** Debit Loan Receivable, Credit Bank/Cash
 - **Repayment:** Debit Bank/Cash, Credit Loan Receivable (principal) + Interest Income (interest)
 - **Write-off:** Debit Bad Debt Expense, Credit Loan Receivable
-- All GL postings use `erpclaw_lib.gl_posting.post_gl_entry()` with full 12-step validation
+- All GL postings use `erpclaw_lib.gl_posting.post_gl_entry()` with full GL invariant validation
