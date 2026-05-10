@@ -15,11 +15,17 @@ from datetime import datetime, timedelta
 
 import pytest
 
-# Add erpclaw-os directory to path
+# Add erpclaw-os-engine scripts directory to path.
+# v4.0.0 split (b4918b3) moved scripts to scripts/ subdir.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OS_DIR = os.path.dirname(SCRIPT_DIR)
+OS_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "scripts")
 if OS_DIR not in sys.path:
     sys.path.insert(0, OS_DIR)
+# Foundation read-only inspect layer for dependency_resolver, etc.
+FOUNDATION_OS_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "..", "..", "erpclaw", "scripts", "erpclaw-os")
+FOUNDATION_OS_DIR = os.path.abspath(FOUNDATION_OS_DIR)
+if FOUNDATION_OS_DIR not in sys.path:
+    sys.path.insert(0, FOUNDATION_OS_DIR)
 
 # Add shared lib to path
 sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
@@ -43,8 +49,16 @@ from gap_detector import (
 )
 
 # Path to the real module_registry.json
-REGISTRY_PATH = os.path.join(
-    os.path.dirname(OS_DIR), "module_registry.json"
+# Post-v4.0.0 split: registry lives in foundation (source/erpclaw/scripts/),
+# not next to the os-engine addon. Tests must point here explicitly because
+# gap_detector's default REGISTRY_PATH (relative to its own scripts/ dir)
+# does not resolve to the real registry from the source tree.
+REGISTRY_PATH = os.path.abspath(
+    os.path.join(
+        os.path.dirname(SCRIPT_DIR),  # erpclaw-os-engine/
+        "..", "..",                   # erpclaw-addons/, source/
+        "erpclaw", "scripts", "module_registry.json",
+    )
 )
 
 

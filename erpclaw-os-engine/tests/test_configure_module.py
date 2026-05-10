@@ -19,12 +19,13 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _TESTS_DIR = Path(__file__).resolve().parent
-_ERPCLAW_OS_DIR = _TESTS_DIR.parent
-_SCRIPTS_DIR = _ERPCLAW_OS_DIR.parent       # erpclaw/scripts/
-_ERPCLAW_DIR = _SCRIPTS_DIR.parent           # erpclaw/
-_SRC_DIR = _ERPCLAW_DIR.parent               # source/
-_PROJECT_ROOT = _SRC_DIR.parent              # project root
-_SETUP_DIR = _SCRIPTS_DIR / "erpclaw-setup"
+# v4.0.0 split: scripts moved from erpclaw-os-engine/ to erpclaw-os-engine/scripts/
+_ERPCLAW_OS_DIR = _TESTS_DIR.parent / "scripts"  # addon scripts (configure_module, etc.)
+_ERPCLAW_OS_ROOT = _TESTS_DIR.parent              # erpclaw-os-engine/
+_ADDONS_DIR = _ERPCLAW_OS_ROOT.parent             # erpclaw-addons/
+_SRC_DIR = _ADDONS_DIR.parent                     # source/
+_PROJECT_ROOT = _SRC_DIR.parent                   # project root
+_SETUP_DIR = _SRC_DIR / "erpclaw" / "scripts" / "erpclaw-setup"
 _INIT_SCHEMA_PATH = _SETUP_DIR / "init_schema.py"
 
 # Ensure erpclaw_lib is importable
@@ -49,7 +50,7 @@ INDUSTRY_CONFIGS = _industry_mod.INDUSTRY_CONFIGS
 list_industries = _industry_mod.list_industries
 
 # Load module_registry.json for validation
-_REGISTRY_PATH = _SCRIPTS_DIR / "module_registry.json"
+_REGISTRY_PATH = _SRC_DIR / "erpclaw" / "scripts" / "module_registry.json"
 
 
 # ---------------------------------------------------------------------------

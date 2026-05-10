@@ -23,11 +23,14 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _TESTS_DIR = Path(__file__).resolve().parent
-_ERPCLAW_OS_DIR = _TESTS_DIR.parent
-_SCRIPTS_DIR = _ERPCLAW_OS_DIR.parent  # erpclaw/scripts/
-_ERPCLAW_DIR = _SCRIPTS_DIR.parent     # erpclaw/
-_SRC_DIR = _ERPCLAW_DIR.parent         # source/
-_PROJECT_ROOT = _SRC_DIR.parent        # project root
+# v4.0.0 split (commit b4918b3): scripts moved from erpclaw-os-engine/
+# to erpclaw-os-engine/scripts/. _ERPCLAW_OS_DIR now points at the
+# scripts subdir where gl_invariant_checker.py and sandbox.py live.
+_ERPCLAW_OS_DIR = _TESTS_DIR.parent / "scripts"
+_ERPCLAW_OS_ROOT = _TESTS_DIR.parent           # erpclaw-os-engine/
+_ADDONS_DIR = _ERPCLAW_OS_ROOT.parent          # erpclaw-addons/
+_SRC_DIR = _ADDONS_DIR.parent                  # source/
+_PROJECT_ROOT = _SRC_DIR.parent                # project root
 
 # Ensure erpclaw_lib is importable
 _ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
@@ -36,14 +39,18 @@ if _ERPCLAW_LIB not in sys.path:
 
 from erpclaw_lib.db import setup_pragmas
 
-# Import gl_invariant_checker via importlib (directory has hyphen: erpclaw-os)
-_gl_checker_path = str(_ERPCLAW_OS_DIR / "gl_invariant_checker.py")
+# gl_invariant_checker.py lives in the FOUNDATION read-only inspect
+# layer (source/erpclaw/scripts/erpclaw-os/) per the v4.0.0 split,
+# not in the addon. See .claude/rules/source_layout.md "OS engine —
+# dual-layer split".
+_FOUNDATION_OS_DIR = _SRC_DIR / "erpclaw" / "scripts" / "erpclaw-os"
+_gl_checker_path = str(_FOUNDATION_OS_DIR / "gl_invariant_checker.py")
 _gl_spec = importlib.util.spec_from_file_location("gl_invariant_checker", _gl_checker_path)
 _gl_mod = importlib.util.module_from_spec(_gl_spec)
 _gl_spec.loader.exec_module(_gl_mod)
 check_gl_invariants = _gl_mod.check_gl_invariants
 
-# Import sandbox module via importlib (directory has hyphen: erpclaw-os)
+# sandbox.py lives in the addon (source/erpclaw-addons/erpclaw-os-engine/scripts/).
 _sandbox_path = str(_ERPCLAW_OS_DIR / "sandbox.py")
 _spec = importlib.util.spec_from_file_location("sandbox_mod", _sandbox_path)
 _sandbox_mod = importlib.util.module_from_spec(_spec)

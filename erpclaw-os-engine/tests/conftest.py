@@ -5,9 +5,12 @@ import textwrap
 
 import pytest
 
-# Make the erpclaw-os package importable
+# Make the erpclaw-os-engine scripts importable.
+# v4.0.0 split (commit b4918b3) moved every script from
+# erpclaw-os-engine/*.py to erpclaw-os-engine/scripts/*.py;
+# tests now have to import from the scripts/ subdir.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-OS_DIR = os.path.dirname(TESTS_DIR)
+OS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "scripts")
 if OS_DIR not in sys.path:
     sys.path.insert(0, OS_DIR)
 

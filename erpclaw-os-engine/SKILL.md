@@ -1,7 +1,7 @@
 ---
 name: erpclaw-os-engine
-version: 1.0.1
-description: Developer tooling for authoring ERPClaw vertical modules and inspecting OS-level health. Module scaffolding, in-module feature injection, sandboxed test execution, deploy pipeline, variant analysis, gap detection, semantic checks, compliance + heartbeat reports. 31 actions, all `os-` prefixed. Sandbox-first generation; user approval required before deploy. Optional addon, not installed by default. Foundation skill `erpclaw` is required (>= v4.0.0).
+version: 1.0.2
+description: Developer tooling for authoring ERPClaw vertical modules and inspecting OS-level health. Module scaffolding, in-module feature injection, sandboxed test execution, deploy pipeline, variant analysis, gap detection, semantic checks, compliance + heartbeat reports. 33 actions, all os-prefixed. Sandbox-first generation; user approval required before deploy. Optional addon, not installed by default. Foundation skill erpclaw is required (>= v4.0.0).
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -32,11 +32,11 @@ You **don't** need this addon for normal day-to-day ERP use (invoicing, accounti
 
 ## What ERPClaw foundation keeps
 
-The foundation skill (`erpclaw`) keeps the runtime-essential parts of the OS:
+The foundation skill (erpclaw) keeps the runtime-essential parts of the OS:
 
 - **GL invariant validation** (`erpclaw_lib.gl_invariants.check_gl_invariants`) — runs on every submit
-- Constitutional articles and `validate-module` action
-- Schema migration (`schema-plan`, `schema-apply`, `schema-rollback`, `schema-drift`)
+- Constitutional articles and the validate-module action
+- Schema migration (schema-plan, schema-apply, schema-rollback, schema-drift)
 - `dependency_resolver.py` for cross-module install ordering
 
 ## What this addon provides
@@ -49,13 +49,13 @@ The foundation skill (`erpclaw`) keeps the runtime-essential parts of the OS:
 | Variant analysis | `os-dgm-run-variant`, `os-dgm-list-variants`, `os-dgm-select-best` |
 | Compliance + health | `os-compliance-weather-status`, `os-heartbeat-analyze`, `os-heartbeat-report`, `os-heartbeat-suggest` |
 | Improvement loop | `os-log-improvement`, `os-list-improvements`, `os-review-improvement` |
-| Gap analysis + research | `os-detect-gaps`, `os-suggest-modules`, `os-research-business-rule`, `os-get-implementation-guide` |
+| Gap analysis + research | `os-detect-gaps`, `os-detect-schema-divergence`, `os-detect-stubs`, `os-suggest-modules`, `os-research-business-rule`, `os-get-implementation-guide` |
 | Robustness audit | `os-run-audit` |
 | Semantic checks | `os-semantic-check`, `os-semantic-rules-list` |
 | Web dashboard provisioning | `os-setup-web-dashboard` |
 | Status | `os-status` |
 
-All 31 actions use the `os-` prefix to avoid namespace collision with foundation actions and to clearly signal the dev-time nature of the work.
+All 33 actions use the os- prefix to avoid namespace collision with foundation actions and to clearly signal the dev-time nature of the work.
 
 ## Install
 
@@ -65,7 +65,7 @@ python3 ~/.openclaw/workspace/skills/erpclaw/scripts/module_manager.py \
   --action install-module --module-name erpclaw-os-engine
 ```
 
-The addon installs from `github.com/avansaber/erpclaw-addons` subdir `erpclaw-os-engine`.
+The addon installs from github.com/avansaber/erpclaw-addons (subdir erpclaw-os-engine).
 
 This addon is **not published to ClawHub directly**. ERPClaw's distribution model is: foundation on ClawHub, addons via `module_manager.py` from GitHub. The reason is that this addon contains the dynamic-code-generation patterns flagged by ClawHub's static-analysis scanner (`suspicious.dynamic_code_execution`). The patterns are intentional (it's the module-generation engine) and isolated to this addon, so foundation users who don't install it stay scan-clean.
 
@@ -151,7 +151,7 @@ python3 scripts/db_query.py --action os-heartbeat-report
 
 ### Setup the web dashboard
 
-Provisions the ERPClaw Web frontend (`erpclaw-web` repo) end-to-end including domain + SSL:
+Provisions the ERPClaw Web frontend (erpclaw-web repo) end-to-end including domain + SSL:
 
 ```bash
 python3 scripts/db_query.py --action os-setup-web-dashboard \
@@ -160,7 +160,7 @@ python3 scripts/db_query.py --action os-setup-web-dashboard \
 
 ## Source
 
-- Code: https://github.com/avansaber/erpclaw-addons (subdir `erpclaw-os-engine`)
+- Code: https://github.com/avansaber/erpclaw-addons (subdir erpclaw-os-engine)
 - Foundation skill: https://github.com/avansaber/erpclaw
 - Documentation: https://www.erpclaw.ai/docs/
 - License: GPL v3

@@ -92,24 +92,32 @@ def add_account(conn, args):
     # Users must run `erpclaw set-credential --integration stripe` first
     # (see CHANGELOG v4.1.0). Direct CLI keys are no longer accepted —
     # this avoids leaking the key into shell history / process argv.
+    # Foundation credential gate: refuses the action if the user hasn't
+    # set up Stripe at the foundation level via `erpclaw set-credential`.
+    # This is a usability + security gate, not the per-account key source.
     try:
         from erpclaw_lib.credentials import get_credential
     except ImportError:
         err("erpclaw_lib.credentials is unavailable; foundation v4.1.0+ required")
-    api_key = get_credential("stripe")
-    if not api_key:
+    if not get_credential("stripe"):
         err(
             "Stripe credential not found. Set it first with:  "
             "erpclaw set-credential --integration stripe --from-stdin  "
             "(then paste the key, hit Enter, Ctrl-D)"
         )
 
+    # Per-account API key. Required. This is the key encrypted into
+    # stripe_account.restricted_key_enc and used by stripe_helpers /
+    # utils to make live API calls for THIS account. Multi-account /
+    # Stripe Connect scenarios encrypt different keys per row.
+    api_key = getattr(args, "api_key", None)
+    if not api_key:
+        err("--api-key is required for per-account encryption")
+
     mode = getattr(args, "mode", "test")
     validate_enum(mode, VALID_MODES, "mode")
 
-    # Note: api_key is held in-process only; never stored in the addon's
-    # stripe_account table. Foundation manages the persistent credential.
-    encrypted_key = None  # legacy column; left empty post-v4.1.0
+    encrypted_key = encrypt_key(api_key)
 
     # Optional fields
     webhook_secret = getattr(args, "webhook_secret", None)
@@ -201,9 +209,13 @@ def update_account(conn, args):
     if account_name is not None:
         data["account_name"] = account_name
 
-    # Stripe credentials are managed via foundation `set-credential` action.
-    # Direct CLI api_key updates are rejected — `erpclaw set-credential
-    # --integration stripe --from-stdin` is the only path.
+    # Per-account API key rotation. The foundation `set-credential` action
+    # rotates the credential at the user level; this path rotates the
+    # per-account encrypted key for THIS Stripe account only (multi-account
+    # / Stripe Connect rotation scenario).
+    api_key = getattr(args, "api_key", None)
+    if api_key is not None:
+        data["restricted_key_enc"] = encrypt_key(api_key)
 
     mode = getattr(args, "mode", None)
     if mode is not None:

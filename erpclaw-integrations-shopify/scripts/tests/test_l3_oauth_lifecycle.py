@@ -198,12 +198,18 @@ def test_full_oauth_lifecycle(db_path, conn, modules):
     assert disc_result["daemon"] is not None
     assert disc_result["daemon"]["uninstalled"] is True
 
-    # Account row is gone; GL accounts are preserved (we don't assert
-    # the full 14 here, that's covered by accounts tests).
+    # Account row is soft-deleted (§18.10 fix: status='disabled' to preserve
+    # FK history into shopify_sync_job and other history tables). GL accounts
+    # are preserved (we don't assert the full 14 here, that's covered by
+    # accounts tests).
     row_after = conn.execute(
-        "SELECT 1 FROM shopify_account WHERE id = ?", (account_id,)
+        "SELECT status, access_token_enc, hmac_secret_enc FROM shopify_account WHERE id = ?",
+        (account_id,),
     ).fetchone()
-    assert row_after is None
+    assert row_after is not None, "row should be soft-deleted, not removed"
+    assert row_after["status"] == "disabled"
+    assert row_after["access_token_enc"] == ""
+    assert row_after["hmac_secret_enc"] is None
 
 
 def test_disconnect_keeps_daemon_when_other_account_exists(db_path, conn, modules):
