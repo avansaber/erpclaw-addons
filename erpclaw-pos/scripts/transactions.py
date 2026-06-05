@@ -833,5 +833,5 @@ ACTIONS = {
     "pos-lookup-item": lookup_item,
     "pos-generate-receipt": generate_receipt,
     "pos-session-summary": session_summary,
-    "status": pos_status,
+    "pos-status": pos_status,
 }

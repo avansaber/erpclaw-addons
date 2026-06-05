@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """erpclaw-growth schema extension -- adds advanced CRM/marketing tables to the shared database.
 
-24 tables: 12 CRM advanced (campaigns, territories, contracts, automation, analytics)
+25 tables: 13 CRM advanced (campaigns, territories, contracts, automation, drip sequences)
 + 12 AI engine / analytics tables (moved from core init_schema.py):
   anomaly, scenario, correlation, categorization_rule, business_rule,
   pending_decision, usage_event, audit_conversation, conversation_context,
@@ -316,6 +316,62 @@ def create_crmadv_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ns_status ON crmadv_nurture_sequence(sequence_status)")
     indexes_created += 2
 
+    # 13. crmadv_drip_sequence (M8 phase B -- drip campaign sequences)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crmadv_drip_sequence (
+            id            TEXT PRIMARY KEY,
+            company_id    TEXT NOT NULL REFERENCES company(id),
+            name          TEXT NOT NULL,
+            description   TEXT,
+            is_active     INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_company ON crmadv_drip_sequence(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_active ON crmadv_drip_sequence(is_active)")
+    indexes_created += 2
+
+    # 14. crmadv_drip_sequence_step (M8 phase B -- steps within a drip sequence)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crmadv_drip_sequence_step (
+            id                TEXT PRIMARY KEY,
+            sequence_id       TEXT NOT NULL REFERENCES crmadv_drip_sequence(id),
+            step_order        INTEGER NOT NULL,
+            delay_hours       INTEGER NOT NULL DEFAULT 0,
+            email_template_id TEXT,
+            is_active         INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_step_seq ON crmadv_drip_sequence_step(sequence_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_step_seq_order ON crmadv_drip_sequence_step(sequence_id, step_order)")
+    indexes_created += 2
+
+    # 15. crmadv_drip_enrollment (M8 phase B -- contacts enrolled in a drip sequence)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crmadv_drip_enrollment (
+            id            TEXT PRIMARY KEY,
+            sequence_id   TEXT NOT NULL REFERENCES crmadv_drip_sequence(id),
+            contact_id    TEXT NOT NULL,
+            current_step  INTEGER NOT NULL DEFAULT 0,
+            status        TEXT NOT NULL DEFAULT 'active'
+                          CHECK(status IN ('active', 'completed', 'cancelled')),
+            next_send_at  TEXT,
+            enrolled_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_seq ON crmadv_drip_enrollment(sequence_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_contact ON crmadv_drip_enrollment(contact_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_status_send ON crmadv_drip_enrollment(status, next_send_at)")
+    indexes_created += 3
+
     # ==================================================================
     # AI ENGINE / ANALYTICS TABLES (moved from core init_schema.py)
     # ==================================================================
@@ -465,28 +521,10 @@ def create_crmadv_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_decision_context ON pending_decision(context_id)")
     indexes_created += 2
 
-    # 19. usage_event
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS usage_event (
-            id              TEXT PRIMARY KEY,
-            customer_id     TEXT,
-            meter_id        TEXT,
-            event_type      TEXT NOT NULL,
-            quantity        TEXT NOT NULL DEFAULT '0',
-            timestamp       TEXT NOT NULL,
-            metadata        TEXT,
-            idempotency_key TEXT UNIQUE,
-            billing_period_id TEXT,
-            processed       INTEGER NOT NULL DEFAULT 0 CHECK(processed IN (0,1)),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_customer ON usage_event(customer_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_meter ON usage_event(meter_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_processed ON usage_event(processed)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_event_idempotency ON usage_event(idempotency_key)")
-    indexes_created += 4
+    # 19. usage_event — OWNED BY FOUNDATION (erpclaw-setup/init_schema.py) as of
+    # the 2026-05-31 migration audit (BUG-007). erpclaw-billing (foundation) also
+    # uses it, so a foundation module can't depend on an addon-owned table. growth
+    # reads/writes it as a foundation table; the definition + indexes live there.
 
     # 20. audit_conversation
     conn.execute("""

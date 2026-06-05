@@ -122,6 +122,97 @@ def create_alerts_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_notif_channel_active ON notification_channel(is_active)")
     indexes_created += 3
 
+    # ==================================================================
+    # M8 email substrate (sender + queue). notification_channel above stays for
+    # non-email channels (telegram/webhook/sms); the email stack is its own,
+    # higher-fidelity set. SMTP password is NOT stored here — it goes in the
+    # encrypted credentials store keyed 'email_account:<id>'.
+    # ==================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_account (
+            id                   TEXT PRIMARY KEY,
+            name                 TEXT NOT NULL,
+            provider             TEXT NOT NULL DEFAULT 'smtp'
+                                 CHECK(provider IN ('smtp','ses','mailgun')),
+            from_address         TEXT NOT NULL,
+            reply_to_address     TEXT,
+            is_default           INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+            is_active            INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            config_json          TEXT NOT NULL DEFAULT '{}',
+            last_health_check_at TEXT,
+            last_health_status   TEXT,
+            company_id           TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at           TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_account_company ON email_account(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_account_default ON email_account(is_default)")
+    tables_created += 1
+    indexes_created += 2
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_template (
+            id                    TEXT PRIMARY KEY,
+            name                  TEXT NOT NULL,
+            subject               TEXT NOT NULL DEFAULT '',
+            body_html             TEXT NOT NULL DEFAULT '',
+            body_text             TEXT NOT NULL DEFAULT '',
+            merge_field_list_json TEXT NOT NULL DEFAULT '[]',
+            language              TEXT NOT NULL DEFAULT 'en',
+            is_active             INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            company_id            TEXT REFERENCES company(id) ON DELETE RESTRICT,
+            created_at            TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at            TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_template_name ON email_template(name)")
+    tables_created += 1
+    indexes_created += 1
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_outbox (
+            id                  TEXT PRIMARY KEY,
+            to_address          TEXT NOT NULL,
+            from_account_id     TEXT REFERENCES email_account(id) ON DELETE RESTRICT,
+            subject             TEXT NOT NULL DEFAULT '',
+            body_html           TEXT NOT NULL DEFAULT '',
+            body_text           TEXT NOT NULL DEFAULT '',
+            template_id         TEXT REFERENCES email_template(id) ON DELETE SET NULL,
+            merge_vars_json     TEXT NOT NULL DEFAULT '{}',
+            status              TEXT NOT NULL DEFAULT 'queued'
+                                CHECK(status IN ('queued','sending','sent','bounced','failed','retry')),
+            attempt_count       INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at     TEXT,
+            provider_message_id TEXT,
+            sent_at             TEXT,
+            error_message       TEXT,
+            company_id          TEXT REFERENCES company(id) ON DELETE RESTRICT,
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_outbox_status ON email_outbox(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_outbox_next_attempt ON email_outbox(next_attempt_at)")
+    tables_created += 1
+    indexes_created += 2
+
+    # append-only delivery history (no updated_at; never UPDATE-in-place)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_log (
+            id              TEXT PRIMARY KEY,
+            email_outbox_id TEXT REFERENCES email_outbox(id) ON DELETE CASCADE,
+            event_type      TEXT NOT NULL
+                            CHECK(event_type IN ('queued','sending','sent','bounced','complaint',
+                                                 'delivered','opened','clicked','failed','retry')),
+            event_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+            payload_json    TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_log_outbox ON email_log(email_outbox_id)")
+    tables_created += 1
+    indexes_created += 1
+
     conn.commit()
     conn.close()
 

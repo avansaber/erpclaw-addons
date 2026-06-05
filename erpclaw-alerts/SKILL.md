@@ -90,6 +90,19 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `alert-list-notification-channels` | | `--company-id --channel-type --is-active --search --limit --offset` |
 | `alert-delete-notification-channel` | `--channel-id` | |
 
+### Email substrate — M8 (sender + queue; SMTP-primary)
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `add-email-account` | `--company-id --name --from-address` | `--provider --reply-to --is-default --config-json --smtp-password` (password stored encrypted, not in DB) |
+| `set-default-email-account` | `--account-id` | |
+| `test-email-account` | `--account-id --to` | (sends a probe; records health) |
+| `add-email-template` | `--name` | `--subject --body-html --body-text --merge-field-list-json --language --company-id` |
+| `list-email-templates` | | `--company-id` |
+| `send-email` | `--to` + (`--template-id` XOR `--subject`/`--body-text`/`--body-html`) | `--merge-vars --from-account --company-id` (enqueues to outbox) |
+| `process-email-queue` | | `--limit --from-account` (cron worker; exponential backoff) |
+
+> **Scheduling:** run `process-email-queue` every 1 minute via `openclaw cron add` — see "Optional scheduling" in the foundation `erpclaw` SKILL.md for the exact command.
+
 ### Alert Logs (4 actions)
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|

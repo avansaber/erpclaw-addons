@@ -1,10 +1,13 @@
-"""L1 pytest tests for erpclaw-crm-adv (47 actions across 5 domains).
+"""L1 pytest tests for erpclaw-crm-adv (48 actions across 5 domains).
 
-Domains: campaigns (12), territories (10), contracts (10), automation (10), reports (5).
+Domains: campaigns (12), territories (10), contracts (10), automation (11), reports (5).
 """
 import json
 import os
 import sys
+import uuid
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TESTS_DIR not in sys.path:
@@ -13,6 +16,12 @@ if _TESTS_DIR not in sys.path:
 from crm_adv_helpers import call_action, ns, is_ok, is_error, load_db_query
 
 MOD = load_db_query()
+
+# load_db_query() puts the module dir on sys.path, so the domain module that
+# owns process-drip-sends is importable for patching its cross-module send seam.
+import automation  # noqa: E402
+# campaigns owns send-campaign; imported here so its M8-C send seam is patchable.
+import campaigns  # noqa: E402
 
 
 # ===========================================================================
@@ -182,28 +191,184 @@ class TestScheduleSendCampaign:
     def test_send_campaign(self, conn, env):
         r = call_action(MOD.add_email_campaign, conn, ns(
             company_id=env["company_id"], name="Send Me",
-            subject=None, template_id=None,
+            subject="Hello", template_id=None,
             recipient_list_id=None, scheduled_date=None,
             limit=50, offset=0,
         ))
         camp_id = r["id"]
 
-        r2 = call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id))
+        r2 = call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id, db_path=None))
         assert is_ok(r2)
         assert r2["campaign_status"] == "sent"
 
     def test_send_already_sent(self, conn, env):
         r = call_action(MOD.add_email_campaign, conn, ns(
             company_id=env["company_id"], name="Already Sent",
-            subject=None, template_id=None,
+            subject="Hello", template_id=None,
             recipient_list_id=None, scheduled_date=None,
             limit=50, offset=0,
         ))
         camp_id = r["id"]
-        call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id))
+        call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id, db_path=None))
 
-        r2 = call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id))
+        r2 = call_action(MOD.send_campaign, conn, ns(campaign_id=camp_id, db_path=None))
         assert is_error(r2)
+
+
+def _seed_campaign_lead(conn, company_id, lead_name, email):
+    """Insert a minimal CRM lead (the campaign's contactable recipient)."""
+    lead_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO lead (id, lead_name, email, status, company_id) "
+        "VALUES (?, ?, ?, 'new', ?)",
+        (lead_id, lead_name, email, company_id))
+    conn.commit()
+    return lead_id
+
+
+class TestSendCampaignRetrofit:
+    """send-campaign enqueues one email per recipient via the M8-A send-email
+    ACTION (mocked seam) and records the returned outbox ids as crmadv_campaign_event
+    'sent' rows. Recipients with no email skip-with-note; a provider failure on
+    one recipient is a skip, never a whole-campaign failure. Mirrors the dunning
+    retrofit + process-drip-sends' cross-module send seam.
+    """
+
+    def _campaign(self, conn, company_id, subject="Spring Sale"):
+        r = call_action(MOD.add_email_campaign, conn, ns(
+            company_id=company_id, name="Promo", subject=subject,
+            template_id=None, recipient_list_id=None, scheduled_date=None,
+            limit=50, offset=0,
+        ))
+        return r["id"]
+
+    def test_send_enqueues_per_recipient_and_records_outbox_ids(self, conn, env):
+        company_id = env["company_id"]
+        _seed_campaign_lead(conn, company_id, "Ann", "ann@acme.example")
+        _seed_campaign_lead(conn, company_id, "Bob", "bob@acme.example")
+        camp_id = self._campaign(conn, company_id)
+
+        outbox_ids = iter(["OUTBOX-1", "OUTBOX-2"])
+        with patch.object(campaigns, "_dispatch_campaign_email",
+                          side_effect=lambda *a, **k: (True, next(outbox_ids))) as m:
+            result = call_action(MOD.send_campaign, conn,
+                                 ns(campaign_id=camp_id, db_path=None))
+
+        assert is_ok(result)
+        assert result["campaign_status"] == "sent"
+        assert result["recipients"] == 2
+        assert result["sent"] == 2
+        assert result["skipped"] == 0
+        assert set(result["outbox_ids"]) == {"OUTBOX-1", "OUTBOX-2"}
+        # seam invoked once per recipient with the resolved address + subject
+        assert m.call_count == 2
+        recips = {c.args[1] for c in m.call_args_list}
+        assert recips == {"ann@acme.example", "bob@acme.example"}
+        assert m.call_args_list[0].args[2] == "Spring Sale"  # subject passed
+        # 'sent' events recorded carrying the outbox ids; total_sent bumped
+        rows = conn.execute(
+            "SELECT recipient_email, metadata FROM crmadv_campaign_event "
+            "WHERE campaign_id = ? AND event_type = 'sent'", (camp_id,)).fetchall()
+        assert len(rows) == 2
+        recorded = {r["recipient_email"]: json.loads(r["metadata"])["email_outbox_id"]
+                    for r in rows}
+        assert recorded == {"ann@acme.example": "OUTBOX-1", "bob@acme.example": "OUTBOX-2"}
+        total = conn.execute(
+            "SELECT total_sent FROM crmadv_email_campaign WHERE id = ?",
+            (camp_id,)).fetchone()["total_sent"]
+        assert total == 2
+
+    def test_no_email_recipient_skipped_cleanly(self, conn, env):
+        company_id = env["company_id"]
+        _seed_campaign_lead(conn, company_id, "Ann", "ann@acme.example")
+        _seed_campaign_lead(conn, company_id, "NoMail", None)
+        camp_id = self._campaign(conn, company_id)
+
+        with patch.object(campaigns, "_dispatch_campaign_email",
+                          return_value=(True, "OUTBOX-9")) as m:
+            result = call_action(MOD.send_campaign, conn,
+                                 ns(campaign_id=camp_id, db_path=None))
+
+        assert is_ok(result)  # the no-email recipient never fails the campaign
+        assert result["recipients"] == 2
+        assert result["sent"] == 1
+        assert result["skipped"] == 1
+        # seam only invoked for the deliverable recipient
+        assert m.call_count == 1
+        assert m.call_args.args[1] == "ann@acme.example"
+        rows = conn.execute(
+            "SELECT COUNT(*) c FROM crmadv_campaign_event "
+            "WHERE campaign_id = ? AND event_type = 'sent'", (camp_id,)).fetchone()
+        assert rows["c"] == 1
+
+    def test_send_failure_skips_with_campaign_still_sent(self, conn, env):
+        company_id = env["company_id"]
+        _seed_campaign_lead(conn, company_id, "Ann", "ann@acme.example")
+        camp_id = self._campaign(conn, company_id)
+
+        with patch.object(campaigns, "_dispatch_campaign_email",
+                          return_value=(False, "smtp unreachable")) as m:
+            result = call_action(MOD.send_campaign, conn,
+                                 ns(campaign_id=camp_id, db_path=None))
+
+        assert is_ok(result)  # provider failure does not fail the campaign
+        assert result["campaign_status"] == "sent"
+        assert result["sent"] == 0
+        assert result["skipped"] == 1
+        assert result["outbox_ids"] == []
+        assert m.called
+        rows = conn.execute(
+            "SELECT COUNT(*) c FROM crmadv_campaign_event "
+            "WHERE campaign_id = ? AND event_type = 'sent'", (camp_id,)).fetchone()
+        assert rows["c"] == 0
+
+    def test_no_content_refuses_to_send(self, conn, env):
+        """A campaign with neither subject nor a template body cannot be sent."""
+        company_id = env["company_id"]
+        _seed_campaign_lead(conn, company_id, "Ann", "ann@acme.example")
+        r = call_action(MOD.add_email_campaign, conn, ns(
+            company_id=company_id, name="Empty", subject=None,
+            template_id=None, recipient_list_id=None, scheduled_date=None,
+            limit=50, offset=0,
+        ))
+        camp_id = r["id"]
+
+        with patch.object(campaigns, "_dispatch_campaign_email") as m:
+            result = call_action(MOD.send_campaign, conn,
+                                 ns(campaign_id=camp_id, db_path=None))
+
+        assert is_error(result)
+        assert not m.called  # never dispatched without resolvable content
+
+    def test_template_body_drives_send_when_no_subject(self, conn, env):
+        """Subject/body resolve from the attached campaign template."""
+        company_id = env["company_id"]
+        _seed_campaign_lead(conn, company_id, "Ann", "ann@acme.example")
+        t = call_action(MOD.add_campaign_template, conn, ns(
+            company_id=company_id, name="Newsletter", template_type="newsletter",
+            subject_template="Monthly News", body_html="<p>Hi</p>",
+            body_text="Hi", limit=50, offset=0,
+        ))
+        tmpl_id = t["id"]
+        r = call_action(MOD.add_email_campaign, conn, ns(
+            company_id=company_id, name="From Template", subject=None,
+            template_id=tmpl_id, recipient_list_id=None, scheduled_date=None,
+            limit=50, offset=0,
+        ))
+        camp_id = r["id"]
+
+        with patch.object(campaigns, "_dispatch_campaign_email",
+                          return_value=(True, "OUTBOX-T")) as m:
+            result = call_action(MOD.send_campaign, conn,
+                                 ns(campaign_id=camp_id, db_path=None))
+
+        assert is_ok(result)
+        assert result["sent"] == 1
+        # template subject + body forwarded to the send seam
+        call = m.call_args
+        assert call.args[2] == "Monthly News"   # subject
+        assert call.args[3] == "<p>Hi</p>"      # body_html
+        assert call.args[4] == "Hi"             # body_text
 
 
 class TestTrackCampaignEvent:
@@ -796,6 +961,506 @@ class TestAutomationPerformanceReport:
         assert r["total_workflows"] >= 1
         assert r["total_lead_score_rules"] >= 1
         assert r["total_nurture_sequences"] >= 1
+
+
+class TestDripSequence:
+    def test_add_drip_sequence(self, conn, env):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Welcome Drip",
+            description="3-email welcome series",
+        ))
+        assert is_ok(r)
+        assert r["name"] == "Welcome Drip"
+        assert r["is_active"] == 1
+        ds_id = r["id"]
+
+        # Verify the row landed with exact stored values.
+        row = conn.execute(
+            "SELECT id, company_id, name, description, is_active "
+            "FROM crmadv_drip_sequence WHERE id = ?", (ds_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["id"] == ds_id
+        assert row["company_id"] == env["company_id"]
+        assert row["name"] == "Welcome Drip"
+        assert row["description"] == "3-email welcome series"
+        assert row["is_active"] == 1
+
+    def test_add_drip_sequence_no_description(self, conn, env):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Minimal Drip",
+            description=None,
+        ))
+        assert is_ok(r)
+        row = conn.execute(
+            "SELECT description, is_active FROM crmadv_drip_sequence WHERE id = ?",
+            (r["id"],)
+        ).fetchone()
+        assert row["description"] is None
+        assert row["is_active"] == 1
+
+    def test_add_drip_sequence_missing_name(self, conn, env):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name=None, description=None,
+        ))
+        assert is_error(r)
+
+    def test_list_drip_sequences(self, conn, env):
+        # Seed two rows for this company.
+        r1 = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Drip A", description=None,
+        ))
+        r2 = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Drip B", description=None,
+        ))
+        assert is_ok(r1) and is_ok(r2)
+        seeded = {r1["id"], r2["id"]}
+
+        r = call_action(MOD.list_drip_sequences, conn, ns(
+            company_id=env["company_id"], is_active=None, limit=50, offset=0,
+        ))
+        assert is_ok(r)
+        assert r["total_count"] >= 2
+        listed_ids = {row["id"] for row in r["rows"]}
+        assert seeded.issubset(listed_ids)
+        # Every returned row belongs to the requested company (owning-module read).
+        assert all(row["company_id"] == env["company_id"] for row in r["rows"])
+
+    def test_list_drip_sequences_is_active_filter(self, conn, env):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Active Drip", description=None,
+        ))
+        assert is_ok(r)
+        # is_active=1 returns the freshly created (active) row.
+        active = call_action(MOD.list_drip_sequences, conn, ns(
+            company_id=env["company_id"], is_active=1, limit=50, offset=0,
+        ))
+        assert is_ok(active)
+        assert r["id"] in {row["id"] for row in active["rows"]}
+        # is_active=0 excludes it.
+        inactive = call_action(MOD.list_drip_sequences, conn, ns(
+            company_id=env["company_id"], is_active=0, limit=50, offset=0,
+        ))
+        assert is_ok(inactive)
+        assert r["id"] not in {row["id"] for row in inactive["rows"]}
+
+
+class TestDripSequenceStep:
+    def _seed_sequence(self, conn, env):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Step Host Drip", description=None,
+        ))
+        assert is_ok(r)
+        return r["id"]
+
+    def test_add_drip_step(self, conn, env):
+        seq_id = self._seed_sequence(conn, env)
+        r = call_action(MOD.add_drip_step, conn, ns(
+            sequence_id=seq_id, step_order=1, delay_hours=24,
+            email_template_id="TPL-001",
+        ))
+        assert is_ok(r)
+        assert r["sequence_id"] == seq_id
+        assert r["step_order"] == 1
+        assert r["delay_hours"] == 24
+        assert r["is_active"] == 1
+        step_id = r["id"]
+
+        # Verify the row landed with exact stored values.
+        row = conn.execute(
+            "SELECT id, sequence_id, step_order, delay_hours, email_template_id, is_active "
+            "FROM crmadv_drip_sequence_step WHERE id = ?", (step_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["id"] == step_id
+        assert row["sequence_id"] == seq_id
+        assert row["step_order"] == 1
+        assert row["delay_hours"] == 24
+        assert row["email_template_id"] == "TPL-001"
+        assert row["is_active"] == 1
+
+    def test_add_drip_step_no_template(self, conn, env):
+        seq_id = self._seed_sequence(conn, env)
+        r = call_action(MOD.add_drip_step, conn, ns(
+            sequence_id=seq_id, step_order=1, delay_hours=0,
+            email_template_id=None,
+        ))
+        assert is_ok(r)
+        row = conn.execute(
+            "SELECT email_template_id, delay_hours FROM crmadv_drip_sequence_step WHERE id = ?",
+            (r["id"],)
+        ).fetchone()
+        assert row["email_template_id"] is None
+        assert row["delay_hours"] == 0
+
+    def test_add_drip_step_missing_step_order(self, conn, env):
+        seq_id = self._seed_sequence(conn, env)
+        r = call_action(MOD.add_drip_step, conn, ns(
+            sequence_id=seq_id, step_order=None, delay_hours=12,
+            email_template_id=None,
+        ))
+        assert is_error(r)
+
+    def test_add_drip_step_invalid_sequence(self, conn, env):
+        r = call_action(MOD.add_drip_step, conn, ns(
+            sequence_id="does-not-exist", step_order=1, delay_hours=0,
+            email_template_id=None,
+        ))
+        assert is_error(r)
+
+    def test_list_drip_steps_ordered(self, conn, env):
+        seq_id = self._seed_sequence(conn, env)
+        # Insert out of order; list must return them sorted by step_order.
+        for order, delay in ((3, 72), (1, 0), (2, 24)):
+            r = call_action(MOD.add_drip_step, conn, ns(
+                sequence_id=seq_id, step_order=order, delay_hours=delay,
+                email_template_id=None,
+            ))
+            assert is_ok(r)
+
+        r = call_action(MOD.list_drip_steps, conn, ns(
+            sequence_id=seq_id, limit=50, offset=0,
+        ))
+        assert is_ok(r)
+        assert r["total_count"] == 3
+        orders = [row["step_order"] for row in r["rows"]]
+        assert orders == [1, 2, 3]
+        # Every returned step belongs to the requested sequence.
+        assert all(row["sequence_id"] == seq_id for row in r["rows"])
+
+    def test_list_drip_steps_invalid_sequence(self, conn, env):
+        r = call_action(MOD.list_drip_steps, conn, ns(
+            sequence_id="does-not-exist", limit=50, offset=0,
+        ))
+        assert is_error(r)
+
+
+class TestDripEnrollment:
+    def _seed_sequence(self, conn, env, name="Enroll Host Drip"):
+        r = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name=name, description=None,
+        ))
+        assert is_ok(r)
+        return r["id"]
+
+    def _add_step(self, conn, seq_id, order, delay):
+        r = call_action(MOD.add_drip_step, conn, ns(
+            sequence_id=seq_id, step_order=order, delay_hours=delay,
+            email_template_id=None,
+        ))
+        assert is_ok(r)
+        return r["id"]
+
+    def test_enroll_contact_computes_next_send(self, conn, env):
+        seq_id = self._seed_sequence(conn, env)
+        # First step (lowest step_order) drives next_send_at; insert out of order.
+        self._add_step(conn, seq_id, 2, 999)
+        self._add_step(conn, seq_id, 1, 48)
+
+        r = call_action(MOD.enroll_contact, conn, ns(
+            sequence_id=seq_id, contact_id="CONTACT-1",
+        ))
+        assert is_ok(r)
+        assert r["sequence_id"] == seq_id
+        assert r["contact_id"] == "CONTACT-1"
+        assert r["current_step"] == 0
+        assert r["enrollment_status"] == "active"
+        enr_id = r["id"]
+
+        # Read back exact stored values.
+        row = conn.execute(
+            "SELECT id, sequence_id, contact_id, current_step, status, "
+            "next_send_at, enrolled_at FROM crmadv_drip_enrollment WHERE id = ?",
+            (enr_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["id"] == enr_id
+        assert row["sequence_id"] == seq_id
+        assert row["contact_id"] == "CONTACT-1"
+        assert row["current_step"] == 0
+        assert row["status"] == "active"
+        # next_send_at == enrolled_at + first step's delay_hours (48h), exact.
+        enrolled = datetime.strptime(row["enrolled_at"], "%Y-%m-%dT%H:%M:%SZ")
+        expected = (enrolled + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert row["next_send_at"] == expected
+        assert r["next_send_at"] == expected
+
+    def test_enroll_contact_no_steps_null_next_send(self, conn, env):
+        seq_id = self._seed_sequence(conn, env, name="Stepless Drip")
+        r = call_action(MOD.enroll_contact, conn, ns(
+            sequence_id=seq_id, contact_id="CONTACT-2",
+        ))
+        assert is_ok(r)
+        assert r["next_send_at"] is None
+        row = conn.execute(
+            "SELECT next_send_at FROM crmadv_drip_enrollment WHERE id = ?",
+            (r["id"],)
+        ).fetchone()
+        assert row["next_send_at"] is None
+
+    def test_enroll_contact_invalid_sequence(self, conn, env):
+        r = call_action(MOD.enroll_contact, conn, ns(
+            sequence_id="does-not-exist", contact_id="CONTACT-3",
+        ))
+        assert is_error(r)
+
+    def test_enroll_contact_inactive_sequence(self, conn, env):
+        seq_id = self._seed_sequence(conn, env, name="Inactive Drip")
+        # No deactivate action yet; flip is_active directly to exercise the guard.
+        conn.execute("UPDATE crmadv_drip_sequence SET is_active = 0 WHERE id = ?", (seq_id,))
+        conn.commit()
+        r = call_action(MOD.enroll_contact, conn, ns(
+            sequence_id=seq_id, contact_id="CONTACT-4",
+        ))
+        assert is_error(r)
+
+    def test_list_enrollments_and_status_filter(self, conn, env):
+        seq_id = self._seed_sequence(conn, env, name="List Drip")
+        ids = []
+        for c in ("CONTACT-A", "CONTACT-B", "CONTACT-C"):
+            r = call_action(MOD.enroll_contact, conn, ns(
+                sequence_id=seq_id, contact_id=c,
+            ))
+            assert is_ok(r)
+            ids.append(r["id"])
+
+        # Cancel one so we can exercise the status filter.
+        cancelled = call_action(MOD.cancel_enrollment, conn, ns(enrollment_id=ids[0]))
+        assert is_ok(cancelled)
+
+        allr = call_action(MOD.list_enrollments, conn, ns(
+            sequence_id=seq_id, status=None, limit=50, offset=0,
+        ))
+        assert is_ok(allr)
+        assert allr["total_count"] == 3
+        assert all(row["sequence_id"] == seq_id for row in allr["rows"])
+
+        active = call_action(MOD.list_enrollments, conn, ns(
+            sequence_id=seq_id, status="active", limit=50, offset=0,
+        ))
+        assert is_ok(active)
+        assert active["total_count"] == 2
+        assert all(row["status"] == "active" for row in active["rows"])
+
+        cancelled_list = call_action(MOD.list_enrollments, conn, ns(
+            sequence_id=seq_id, status="cancelled", limit=50, offset=0,
+        ))
+        assert is_ok(cancelled_list)
+        assert cancelled_list["total_count"] == 1
+        assert cancelled_list["rows"][0]["id"] == ids[0]
+
+    def test_list_enrollments_invalid_sequence(self, conn, env):
+        r = call_action(MOD.list_enrollments, conn, ns(
+            sequence_id="does-not-exist", status=None, limit=50, offset=0,
+        ))
+        assert is_error(r)
+
+    def test_cancel_enrollment_sets_status(self, conn, env):
+        seq_id = self._seed_sequence(conn, env, name="Cancel Drip")
+        e = call_action(MOD.enroll_contact, conn, ns(
+            sequence_id=seq_id, contact_id="CONTACT-X",
+        ))
+        assert is_ok(e)
+        enr_id = e["id"]
+
+        r = call_action(MOD.cancel_enrollment, conn, ns(enrollment_id=enr_id))
+        assert is_ok(r)
+        assert r["enrollment_status"] == "cancelled"
+        row = conn.execute(
+            "SELECT status, next_send_at FROM crmadv_drip_enrollment WHERE id = ?",
+            (enr_id,)
+        ).fetchone()
+        assert row["status"] == "cancelled"
+        assert row["next_send_at"] is None
+
+    def test_cancel_enrollment_invalid_id(self, conn, env):
+        r = call_action(MOD.cancel_enrollment, conn, ns(enrollment_id="does-not-exist"))
+        assert is_error(r)
+
+
+# ===========================================================================
+# DRIP WORKER -- process-drip-sends (M8 phase B, completes M8-B)
+# ===========================================================================
+
+def _insert_enrollment(conn, seq_id, contact_id, next_send_at,
+                       current_step=0, status="active"):
+    """Insert a crmadv_drip_enrollment row directly so tests control
+    next_send_at / current_step precisely (the enroll-contact action derives
+    next_send_at from the wall clock, which is not deterministic)."""
+    eid = str(uuid.uuid4())
+    stamp = "2026-01-01T00:00:00Z"
+    conn.execute(
+        "INSERT INTO crmadv_drip_enrollment "
+        "(id, sequence_id, contact_id, current_step, status, next_send_at, "
+        " enrolled_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (eid, seq_id, contact_id, current_step, status, next_send_at,
+         stamp, stamp, stamp))
+    conn.commit()
+    return eid
+
+
+def _seed_lead(conn, company_id, email="drip@example.com"):
+    """Seed a CRM contact (foundation `lead` table) for recipient resolution."""
+    lid = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO lead (id, lead_name, email, status, company_id) "
+        "VALUES (?,?,?,?,?)",
+        (lid, "Drip Lead", email, "new", company_id))
+    conn.commit()
+    return lid
+
+
+class TestProcessDripSends:
+    def _seq_with_steps(self, conn, env, steps):
+        """steps: list of (step_order, delay_hours, email_template_id)."""
+        seq = call_action(MOD.add_drip_sequence, conn, ns(
+            company_id=env["company_id"], name="Worker Drip", description=None))
+        assert is_ok(seq)
+        for order, delay, tpl in steps:
+            r = call_action(MOD.add_drip_step, conn, ns(
+                sequence_id=seq["id"], step_order=order, delay_hours=delay,
+                email_template_id=tpl))
+            assert is_ok(r)
+        return seq["id"]
+
+    def test_advances_and_recomputes_next_send(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, None), (2, 48, None)])
+        enr_id = _insert_enrollment(conn, seq_id, "CONTACT-1",
+                                    next_send_at="2026-01-01T00:00:00Z")
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["processed"] == 1
+        assert r["sent"] == 1
+        assert r["completed"] == 0
+        row = conn.execute(
+            "SELECT current_step, status, next_send_at "
+            "FROM crmadv_drip_enrollment WHERE id = ?", (enr_id,)).fetchone()
+        assert row["current_step"] == 1
+        assert row["status"] == "active"
+        # next_send_at == now + the NEXT step's delay_hours (48h), exact.
+        assert row["next_send_at"] == "2026-01-04T00:00:00Z"
+
+    def test_second_run_completes(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, None), (2, 48, None)])
+        enr_id = _insert_enrollment(conn, seq_id, "CONTACT-1",
+                                    next_send_at="2026-01-01T00:00:00Z")
+        # Run 1: send step 0, recompute next_send_at to 2026-01-04T00:00:00Z.
+        call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="2026-01-02T00:00:00Z", db_path=None))
+        # Run 2: at the recomputed instant, send last step -> completed.
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="2026-01-04T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["sent"] == 1
+        assert r["completed"] == 1
+        row = conn.execute(
+            "SELECT current_step, status, next_send_at "
+            "FROM crmadv_drip_enrollment WHERE id = ?", (enr_id,)).fetchone()
+        assert row["current_step"] == 2
+        assert row["status"] == "completed"
+        assert row["next_send_at"] is None
+
+    def test_not_yet_due_untouched(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, None), (2, 48, None)])
+        enr_id = _insert_enrollment(conn, seq_id, "CONTACT-1",
+                                    next_send_at="2026-12-31T00:00:00Z")
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["processed"] == 0
+        row = conn.execute(
+            "SELECT current_step, status, next_send_at "
+            "FROM crmadv_drip_enrollment WHERE id = ?", (enr_id,)).fetchone()
+        assert row["current_step"] == 0
+        assert row["status"] == "active"
+        assert row["next_send_at"] == "2026-12-31T00:00:00Z"
+
+    def test_send_path_attempted_with_template(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, "TPL-1"), (2, 48, None)])
+        lead_id = _seed_lead(conn, env["company_id"], email="drip@example.com")
+        enr_id = _insert_enrollment(conn, seq_id, lead_id,
+                                    next_send_at="2026-01-01T00:00:00Z")
+        with patch.object(automation, "_dispatch_email",
+                          return_value=(True, "outbox-1")) as m:
+            r = call_action(MOD.process_drip_sends, conn, ns(
+                company_id=env["company_id"], limit=100,
+                now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["sent"] == 1
+        assert m.called
+        # _dispatch_email(conn, to_address, template_id, company_id, db_path)
+        call = m.call_args
+        assert call.args[1] == "drip@example.com"
+        assert call.args[2] == "TPL-1"
+        row = conn.execute(
+            "SELECT current_step FROM crmadv_drip_enrollment WHERE id = ?",
+            (enr_id,)).fetchone()
+        assert row["current_step"] == 1
+
+    def test_no_email_skips_without_advancing(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, "TPL-1"), (2, 48, None)])
+        # Lead exists but has no email -> recipient unresolvable.
+        lead_id = _seed_lead(conn, env["company_id"], email=None)
+        enr_id = _insert_enrollment(conn, seq_id, lead_id,
+                                    next_send_at="2026-01-01T00:00:00Z")
+        with patch.object(automation, "_dispatch_email") as m:
+            r = call_action(MOD.process_drip_sends, conn, ns(
+                company_id=env["company_id"], limit=100,
+                now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["skipped"] == 1
+        assert r["sent"] == 0
+        assert not m.called  # never attempted dispatch with no address
+        row = conn.execute(
+            "SELECT current_step, status, next_send_at "
+            "FROM crmadv_drip_enrollment WHERE id = ?", (enr_id,)).fetchone()
+        assert row["current_step"] == 0
+        assert row["status"] == "active"
+        assert row["next_send_at"] == "2026-01-01T00:00:00Z"
+
+    def test_caught_up_enrollment_completes(self, conn, env):
+        # current_step already at/past the step count -> nothing to send, complete.
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, None)])
+        enr_id = _insert_enrollment(conn, seq_id, "CONTACT-1",
+                                    next_send_at="2026-01-01T00:00:00Z",
+                                    current_step=1)
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["completed"] == 1
+        assert r["sent"] == 0
+        row = conn.execute(
+            "SELECT status, next_send_at "
+            "FROM crmadv_drip_enrollment WHERE id = ?", (enr_id,)).fetchone()
+        assert row["status"] == "completed"
+        assert row["next_send_at"] is None
+
+    def test_company_scope_excludes_other_company(self, conn, env):
+        seq_id = self._seq_with_steps(conn, env, [(1, 0, None), (2, 48, None)])
+        enr_id = _insert_enrollment(conn, seq_id, "CONTACT-1",
+                                    next_send_at="2026-01-01T00:00:00Z")
+        # Scope to a different (non-existent) company -> nothing processed.
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id="some-other-company", limit=100,
+            now="2026-01-02T00:00:00Z", db_path=None))
+        assert is_ok(r)
+        assert r["processed"] == 0
+        row = conn.execute(
+            "SELECT current_step FROM crmadv_drip_enrollment WHERE id = ?",
+            (enr_id,)).fetchone()
+        assert row["current_step"] == 0
+
+    def test_invalid_now_errors(self, conn, env):
+        r = call_action(MOD.process_drip_sends, conn, ns(
+            company_id=env["company_id"], limit=100,
+            now="not-a-date", db_path=None))
+        assert is_error(r)
 
 
 # ===========================================================================

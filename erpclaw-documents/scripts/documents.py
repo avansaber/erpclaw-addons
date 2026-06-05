@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
 SKILL = "erpclaw-documents"
 
@@ -143,7 +143,7 @@ def update_document(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = now()
     sql, params = dynamic_update("document", data, {"id": doc_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "document-update-document", "document", doc_id,
@@ -279,7 +279,7 @@ def add_document_version(conn, args):
 
     # Update document's current version
     sql = update_row("document",
-        data={"current_version": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"current_version": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, (version_number, doc_id))
 
@@ -512,7 +512,7 @@ def submit_for_review(conn, args):
         err(f"Cannot submit for review: document is '{row['status']}'. Must be draft")
 
     sql = update_row("document",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, ("review", doc_id))
     audit(conn, SKILL, "document-submit-for-review", "document", doc_id,
@@ -536,7 +536,7 @@ def approve_document(conn, args):
         err(f"Cannot approve: document is '{row['status']}'. Must be in review")
 
     sql = update_row("document",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, ("approved", doc_id))
     audit(conn, SKILL, "document-approve-document", "document", doc_id,
@@ -560,7 +560,7 @@ def archive_document(conn, args):
         err("Document is already archived")
 
     sql = update_row("document",
-        data={"status": P(), "is_archived": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "is_archived": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, ("archived", 1, doc_id))
     audit(conn, SKILL, "document-archive-document", "document", doc_id,
@@ -640,7 +640,7 @@ def set_retention(conn, args):
         err(f"Document {doc_id} not found")
 
     sql = update_row("document",
-        data={"retention_date": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"retention_date": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, (retention_date, doc_id))
     audit(conn, SKILL, "document-set-retention", "document", doc_id,
@@ -664,7 +664,7 @@ def hold_document(conn, args):
         err(f"Cannot hold: document is '{row['status']}'")
 
     sql = update_row("document",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": now()},
         where={"id": P()})
     conn.execute(sql, ("on_hold", doc_id))
     audit(conn, SKILL, "document-hold-document", "document", doc_id,

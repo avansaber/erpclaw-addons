@@ -1,6 +1,6 @@
 ---
 name: erpclaw-documents
-version: 1.0.0
+version: 1.1.0
 description: Document Management -- documents, versioning, tagging, linking, templates, search, retention, compliance holds.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
@@ -66,15 +66,26 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `document-set-retention` | `--document-id --retention-date` | |
 | `document-hold-document` | `--document-id` | |
 
-### Templates (6 actions)
+### Templates (7 actions)
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `document-add-template` | `--company-id --name --content` | `--template-type --merge-fields --description` |
-| `document-update-template` | `--template-id` | `--name --template-type --content --merge-fields --description --is-active` |
+| `document-add-template` | `--company-id --name --content` | `--template-type --format --engine --merge-fields --description` |
+| `document-update-template` | `--template-id` | `--name --template-type --content --format --engine --merge-fields --description --is-active` |
 | `document-get-template` | `--template-id` | |
 | `document-list-templates` | | `--company-id --template-type --is-active --search --limit --offset` |
 | `document-generate-from-template` | `--template-id --title --company-id` | `--owner --merge-data` |
+| `document-render-template` | `--template-id` | `--merge-data --format` |
 | `status` | | |
+
+### Print / PDF (6 actions)
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `document-render-pdf` | `--html` *or* `--html-from-file` | `--output-path --max-html-bytes` |
+| `document-print-document` | `--template-id --title --company-id` | `--merge-data --format --owner --output-path --max-html-bytes` |
+| `document-print-invoice` | `--invoice-id --company-id` | `--template-id --title --owner --output-path --max-html-bytes` |
+| `document-print-purchase-order` | `--po-id --company-id` | `--template-id --title --owner --output-path --max-html-bytes` |
+| `document-print-packing-slip` | `--slip-id --company-id` | `--template-id --title --owner --output-path --max-html-bytes` |
+| `document-seed-defaults` | `--company-id` | |
 
 ## Key Concepts (Tier 2)
 
@@ -83,6 +94,12 @@ python3 {baseDir}/scripts/db_query.py --action status
 - **Tagging**: Free-form tags for categorization. Tags are also searched by `document-search-documents`.
 - **Linking**: Documents can be linked to any entity (sales_order, customer, project, etc.) with link types: attachment, reference, supporting, supersedes.
 - **Templates**: Reusable content with `{{field}}` merge placeholders. `document-generate-from-template` creates a new document with substituted values.
+- **Template engine / format**: Each template carries an `engine` and a `format`.
+  - `engine`: `legacy_replace` (default) does a naive `{{field}}` string swap and leaves any unmatched placeholder in place — this is the original behavior and stays the default so existing templates are untouched. `jinja2` opts into a sandboxed Jinja2 render (merge vars, `{% if %}`, `{% for %}`, filters).
+  - `format`: `text` (default), `markdown`, or `html`. HTML output is autoescaped (XSS-safe) when rendered through Jinja2; text/markdown render raw.
+  - `document-render-template` is a pure render — it always uses sandboxed Jinja2, returns the rendered string, and does NOT create a document or PDF. `--format` overrides the template's stored format for that one render. `document-generate-from-template` branches on the template's stored `engine`.
+- **Print / PDF**: `document-render-pdf` turns an HTML string into a PDF file on disk via WeasyPrint and returns the output path. Pass HTML inline with `--html` or load it from a file with `--html-from-file`. WeasyPrint is an optional dependency — if it is not installed the action returns a clear error (`pip install weasyprint`). PDFs are written under a configurable storage root (env `ERPCLAW_PDF_STORAGE_ROOT`, default `~/.openclaw/erpclaw/documents/pdf/`); `--output-path` overrides the destination per call. Oversized HTML is rejected (default 5 MB, override with `--max-html-bytes`). This is a pure render — it does not write to the database.
+- **Print a template to PDF + document**: `document-print-document` is the composite keystone — it renders a template through the sandboxed Jinja2 engine, turns the result into HTML according to the template's `format` (`html` passes through autoescaped; `markdown` is converted via markdown-it-py; `text` is escaped and wrapped in `<pre>`), renders that HTML to a PDF (same WeasyPrint seam as `document-render-pdf`), and then persists a `document` row (status `draft`, with an initial version) whose `pdf_path` points at the PDF. `--format` overrides the template's stored format for that one print; `--output-path` overrides where the PDF lands; oversized rendered HTML is rejected (`--max-html-bytes`, default 5 MB). The same SSTI sandbox boundary applies as `document-render-template`. If the PDF render fails, no document row is written. `markdown-it-py` is required only for `format='markdown'` templates (clear install error otherwise).
 - **Retention**: Set `retention_date` for compliance. `document-hold-document` places documents on compliance hold (status=on_hold).
 - **Document Types**: general, contract, policy, report, invoice, receipt, certificate, specification, manual, other.
 

@@ -28,7 +28,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, insert_row, update_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, insert_row, update_row, now
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
     from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
 except ImportError:
@@ -243,7 +243,7 @@ def update_lead(conn, args):
     if not data:
         err("No fields to update. Provide at least one optional flag.")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = now()
     sql = update_row("lead", data, {"id": P()})
     values.append(args.lead_id)
     conn.execute(sql, values)
@@ -393,7 +393,7 @@ def convert_lead_to_opportunity(conn, args):
     sql = update_row("lead", {
         "status": ValueWrapper("converted"),
         "converted_to_opportunity": P(),
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": now(),
     }, {"id": P()})
     conn.execute(sql, (opp_id, args.lead_id))
 
@@ -551,7 +551,7 @@ def update_opportunity(conn, args):
     data["weighted_revenue"] = P()
     values.append(new_weighted)
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = now()
     sql = update_row("opportunity", data, {"id": P()})
     values.append(args.opportunity_id)
     conn.execute(sql, values)
@@ -730,7 +730,7 @@ def convert_opportunity_to_quotation(conn, args):
     if quotation_id:
         sql = update_row("opportunity", {
             "quotation_id": P(),
-            "updated_at": LiteralValue("datetime('now')"),
+            "updated_at": now(),
         }, {"id": P()})
         conn.execute(sql, (quotation_id, args.opportunity_id))
         audit(conn, "erpclaw-crm", "convert-opportunity-to-quotation", "opportunity", args.opportunity_id,
@@ -769,7 +769,7 @@ def mark_opportunity_won(conn, args):
         "stage": ValueWrapper("won"),
         "probability": ValueWrapper("100"),
         "weighted_revenue": P(),
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": now(),
     }, {"id": P()})
     conn.execute(sql, (new_weighted, args.opportunity_id))
 
@@ -817,7 +817,7 @@ def mark_opportunity_lost(conn, args):
         "probability": ValueWrapper("0"),
         "weighted_revenue": ValueWrapper("0"),
         "lost_reason": P(),
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": now(),
     }, {"id": P()})
     conn.execute(sql, (args.lost_reason, args.opportunity_id))
 

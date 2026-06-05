@@ -32,6 +32,7 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alerts import ACTIONS as ALERTS_ACTIONS
+from email_sender import EMAIL_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -41,6 +42,7 @@ REQUIRED_TABLES = ["company", "alert_rule"]
 
 ACTIONS = {}
 ACTIONS.update(ALERTS_ACTIONS)
+ACTIONS.update(EMAIL_ACTIONS)  # M8 email substrate (sender + queue)
 
 
 def main():
@@ -79,6 +81,23 @@ def main():
     parser.add_argument("--alert-status")
     parser.add_argument("--acknowledged-by")
     parser.add_argument("--channel-results")
+
+    # -- M8 Email substrate (--name / --config-json reused from above) --
+    parser.add_argument("--from-address")
+    parser.add_argument("--provider")
+    parser.add_argument("--reply-to")
+    parser.add_argument("--is-default", action="store_true", default=False)
+    parser.add_argument("--smtp-password")
+    parser.add_argument("--account-id")
+    parser.add_argument("--to")
+    parser.add_argument("--template-id")
+    parser.add_argument("--subject")
+    parser.add_argument("--body-html")
+    parser.add_argument("--body-text")
+    parser.add_argument("--merge-field-list-json")
+    parser.add_argument("--language")
+    parser.add_argument("--merge-vars")
+    parser.add_argument("--from-account")
 
     args = parser.parse_args()
     action = args.action

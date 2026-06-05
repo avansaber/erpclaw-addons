@@ -39,6 +39,10 @@ except ImportError:
 REQUIRED_TABLES = ["company", "account"]
 
 VALID_DEPRECIATION_METHODS = ("straight_line", "written_down_value", "double_declining")
+# Standard asset states (error-message hint). Authoritative validity now comes from
+# asset_status_registry via _asset_status_registered (M0 phase 4): the hardcoded CHECK
+# on asset.status was dropped so states (e.g. under_construction for CWIP) are
+# registry-sourced + addable at runtime without a migration.
 VALID_ASSET_STATUSES = ("draft", "submitted", "in_use", "scrapped", "sold")
 VALID_MOVEMENT_TYPES = ("transfer", "issue", "receipt")
 VALID_MAINTENANCE_TYPES = ("preventive", "corrective")
@@ -86,6 +90,13 @@ def _validate_company_exists(conn, company_id: str):
     if not company:
         err(f"Company {company_id} not found")
     return company
+
+
+def _asset_status_registered(conn, status):
+    """True if status exists in asset_status_registry (M0 phase 4 source of truth)."""
+    return conn.execute(
+        "SELECT 1 FROM asset_status_registry WHERE status = ? AND is_active = 1", (status,)
+    ).fetchone() is not None
 
 
 def _validate_asset_exists(conn, asset_id: str):
@@ -402,8 +413,9 @@ def update_asset(conn, args):
         params.append(args.depreciation_start_date)
 
     if args.status is not None:
-        if args.status not in VALID_ASSET_STATUSES:
-            err(f"Invalid status '{args.status}'. Must be one of: {', '.join(VALID_ASSET_STATUSES)}")
+        if not _asset_status_registered(conn, args.status):
+            err(f"Invalid status '{args.status}'. Register it in asset_status_registry "
+                f"or use a standard state: {', '.join(VALID_ASSET_STATUSES)}")
         old_values["status"] = asset_dict["status"]
         new_values["status"] = args.status
         updates.append("status = ?")

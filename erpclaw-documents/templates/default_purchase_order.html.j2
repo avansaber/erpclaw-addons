@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Purchase Order {{ naming_series | default('PO') }}</title>
+<style>{% include_raw_css %}</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <div class="company-name">{{ company_name }}</div>
+    <div class="company-meta">
+      {% if company_tax_id %}EIN: {{ company_tax_id }}<br>{% endif %}
+    </div>
+  </div>
+  <div class="doc-title-block">
+    <div class="doc-type">Purchase Order</div>
+    <div class="doc-number">{{ naming_series | default('') }}</div>
+  </div>
+</div>
+
+<div class="parties">
+  <div class="party">
+    <div class="party-label">Supplier</div>
+    <div class="party-name">{{ supplier_name }}</div>
+    {% if supplier_address %}<div class="party-detail">{{ supplier_address }}</div>{% endif %}
+  </div>
+  {% if delivery_address %}
+  <div class="party">
+    <div class="party-label">Ship To</div>
+    <div class="party-detail">{{ delivery_address }}</div>
+  </div>
+  {% endif %}
+</div>
+
+<table class="meta-table">
+  <tr><td>Order Date</td><td>{{ order_date }}</td></tr>
+  {% if required_date %}<tr><td>Required By</td><td>{{ required_date }}</td></tr>{% endif %}
+  <tr><td>Currency</td><td>{{ currency | default('USD') }}</td></tr>
+  {% if status %}<tr><td>Status</td><td>{{ status | replace('_', ' ') | title }}</td></tr>{% endif %}
+</table>
+
+<table class="line-items">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Item</th>
+      <th class="right">Qty</th>
+      <th>UOM</th>
+      {% if required_date %}<th>Required</th>{% endif %}
+      <th class="right">Unit Price</th>
+      <th class="right">Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in items %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ line.item_code | default(line.item_id | default('')) }}</td>
+      <td class="right">{{ line.quantity }}</td>
+      <td>{{ line.uom | default('') }}</td>
+      {% if required_date %}<td>{{ line.required_date | default('') }}</td>{% endif %}
+      <td class="right">{{ line.rate }}</td>
+      <td class="right">{{ line.amount }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" style="text-align:center;color:#888;">No line items</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="totals">
+  <table>
+    <tr><td>Subtotal</td><td>{{ currency | default('USD') }} {{ total_amount | default('0.00') }}</td></tr>
+    {% if tax_amount and tax_amount != '0' and tax_amount != '0.00' %}
+    <tr><td>Tax</td><td>{{ currency | default('USD') }} {{ tax_amount }}</td></tr>
+    {% endif %}
+    <tr class="grand"><td>Grand Total</td><td>{{ currency | default('USD') }} {{ grand_total | default('0.00') }}</td></tr>
+  </table>
+</div>
+
+{% if notes %}
+<div class="notes">
+  <div class="notes-label">Notes</div>
+  {{ notes }}
+</div>
+{% endif %}
+
+</body>
+</html>

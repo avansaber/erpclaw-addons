@@ -507,7 +507,7 @@ class TestSessionSummary:
 
 class TestPosStatus:
     def test_status(self, conn, env, mod):
-        r = call_action(mod.ACTIONS["status"], conn, ns())
+        r = call_action(mod.ACTIONS["pos-status"], conn, ns())
         assert is_ok(r)
         assert r["skill"] == "erpclaw-pos"
 

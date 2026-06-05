@@ -246,6 +246,42 @@ def seed_naming_series(conn, company_id: str):
     conn.commit()
 
 
+def seed_cost_center(conn, company_id: str, name="Main") -> str:
+    """Insert a default (non-group) cost_center and return its ID.
+
+    Required by the 12-step GL validation (step 6) for any income/expense
+    account posting. Real installs seed this via erpclaw-setup defaults; the
+    test environment must mirror that.
+    """
+    cc_id = _uuid()
+    conn.execute(
+        """INSERT INTO cost_center (id, name, company_id, is_group)
+           VALUES (?, ?, ?, 0)""",
+        (cc_id, f"{name} {cc_id[:6]}", company_id)
+    )
+    conn.commit()
+    return cc_id
+
+
+def seed_fiscal_year(conn, company_id: str) -> str:
+    """Insert an open fiscal year spanning a wide range so any test date posts.
+
+    GL validation step 9 requires an open fiscal_year row covering the
+    posting_date. Real installs typically have one FY per actual year; the
+    test env seeds a single broad-range FY (2020-2030) to cover any
+    realistic test date without per-test setup.
+    """
+    fy_id = _uuid()
+    conn.execute(
+        """INSERT INTO fiscal_year (id, name, start_date, end_date,
+           is_closed, company_id)
+           VALUES (?, ?, ?, ?, 0, ?)""",
+        (fy_id, f"FY-test-{fy_id[:6]}", "2020-01-01", "2030-12-31", company_id)
+    )
+    conn.commit()
+    return fy_id
+
+
 def build_env(conn) -> dict:
     """Create a full loans test environment.
 
@@ -254,6 +290,8 @@ def build_env(conn) -> dict:
     """
     cid = seed_company(conn)
     seed_naming_series(conn, cid)
+    seed_cost_center(conn, cid)   # required for GL validation step 6
+    seed_fiscal_year(conn, cid)   # required for GL validation step 9
     cust = seed_customer(conn, cid, "Acme Corp")
     emp = seed_employee(conn, cid, "John Doe")
     sup = seed_supplier(conn, cid, "Parts Inc")

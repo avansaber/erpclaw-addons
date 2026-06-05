@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invoice {{ naming_series | default('INV') }}</title>
+<style>{% include_raw_css %}</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <div class="company-name">{{ company_name }}</div>
+    <div class="company-meta">
+      {% if company_tax_id %}EIN: {{ company_tax_id }}<br>{% endif %}
+    </div>
+  </div>
+  <div class="doc-title-block">
+    <div class="doc-type">Invoice</div>
+    <div class="doc-number">{{ naming_series | default('') }}</div>
+  </div>
+</div>
+
+<div class="parties">
+  <div class="party">
+    <div class="party-label">Bill To</div>
+    <div class="party-name">{{ customer_name }}</div>
+    {% if customer_address %}<div class="party-detail">{{ customer_address }}</div>{% endif %}
+  </div>
+</div>
+
+<table class="meta-table">
+  <tr><td>Invoice Date</td><td>{{ posting_date }}</td></tr>
+  {% if due_date %}<tr><td>Due Date</td><td>{{ due_date }}</td></tr>{% endif %}
+  <tr><td>Currency</td><td>{{ currency | default('USD') }}</td></tr>
+  {% if status %}<tr><td>Status</td><td>{{ status | title }}</td></tr>{% endif %}
+</table>
+
+<table class="line-items">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Item</th>
+      <th>Description</th>
+      <th class="right">Qty</th>
+      <th class="right">Unit Price</th>
+      <th class="right">Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in items %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ line.item_code | default(line.item_id | default('')) }}</td>
+      <td>{{ line.description | default('') }}</td>
+      <td class="right">{{ line.quantity }}</td>
+      <td class="right">{{ line.rate }}</td>
+      <td class="right">{{ line.amount }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" style="text-align:center;color:#888;">No line items</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="totals">
+  <table>
+    <tr><td>Subtotal</td><td>{{ currency | default('USD') }} {{ total_amount | default('0.00') }}</td></tr>
+    {% if tax_amount and tax_amount != '0' and tax_amount != '0.00' %}
+    <tr><td>Tax</td><td>{{ currency | default('USD') }} {{ tax_amount }}</td></tr>
+    {% endif %}
+    {% if rounding_adjustment and rounding_adjustment != '0' %}
+    <tr><td>Rounding</td><td>{{ currency | default('USD') }} {{ rounding_adjustment }}</td></tr>
+    {% endif %}
+    <tr class="grand"><td>Total Due</td><td>{{ currency | default('USD') }} {{ grand_total | default('0.00') }}</td></tr>
+  </table>
+</div>
+
+{% if notes %}
+<div class="notes">
+  <div class="notes-label">Notes</div>
+  {{ notes }}
+</div>
+{% endif %}
+
+</body>
+</html>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """erpclaw-crm-adv -- db_query.py (unified router)
 
-Advanced CRM & marketing automation. Routes all 47 actions
+Advanced CRM & marketing automation. Routes all 50 actions
 across 5 domain modules: campaigns, territories, contracts, automation, reports.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
@@ -114,6 +114,15 @@ def main():
     parser.add_argument("--criteria-json")
     parser.add_argument("--points", type=int)
     parser.add_argument("--steps-json")
+    parser.add_argument("--is-active", type=int, choices=(0, 1))
+    parser.add_argument("--sequence-id")
+    parser.add_argument("--step-order", type=int)
+    parser.add_argument("--delay-hours", type=int)
+    parser.add_argument("--email-template-id")
+    parser.add_argument("--contact-id")
+    parser.add_argument("--enrollment-id")
+    parser.add_argument("--status")
+    parser.add_argument("--now")
 
     # -- Shared --
     parser.add_argument("--search")

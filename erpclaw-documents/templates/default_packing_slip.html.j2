@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Packing Slip {{ slip_id | default('') }}</title>
+<style>{% include_raw_css %}</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <div class="company-name">{{ company_name }}</div>
+  </div>
+  <div class="doc-title-block">
+    <div class="doc-type">Packing Slip</div>
+    <div class="doc-number">{{ slip_id | default('') }}</div>
+  </div>
+</div>
+
+<div class="parties">
+  <div class="party">
+    <div class="party-label">Ship To</div>
+    <div class="party-name">{{ customer_name | default('') }}</div>
+    {% if shipping_address %}<div class="party-detail">{{ shipping_address }}</div>{% endif %}
+  </div>
+  <div class="party">
+    <div class="party-label">Delivery Note</div>
+    <div class="party-detail">{{ delivery_note_id | default('') }}</div>
+  </div>
+</div>
+
+<table class="meta-table">
+  <tr><td>Pack Date</td><td>{{ posting_date }}</td></tr>
+</table>
+
+<table class="line-items">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Item</th>
+      <th class="right">Qty Packed</th>
+      <th>UOM</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in items %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ line.item_code | default(line.item_id | default('')) }}</td>
+      <td class="right">{{ line.qty_packed }}</td>
+      <td>{{ line.uom | default('') }}</td>
+      <td>{{ line.notes | default('') }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" style="text-align:center;color:#888;">No items</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if notes %}
+<div class="notes">
+  <div class="notes-label">Notes</div>
+  {{ notes }}
+</div>
+{% endif %}
+
+<div class="notes" style="margin-top:24pt;">
+  <strong>Received by:</strong> ________________________  &nbsp;&nbsp;
+  <strong>Date:</strong> ________________________
+</div>
+
+</body>
+</html>

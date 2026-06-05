@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ERPClaw-Growth v2 — Unified router for 113 actions across 4 domains.
+"""ERPClaw-Growth v2 — Unified router for 115 actions across 4 domains.
 
 Routes --action to the correct domain script via os.execvp().
 Domains: crm, analytics, ai-engine, crm-adv.
@@ -13,7 +13,7 @@ import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Action → domain mapping (109 unique actions + 4 status aliases)
+# Action → domain mapping (111 unique actions + 4 status aliases)
 # Only collision: `status` in all 4 domains → routes to analytics.
 ACTION_MAP = {
     # === CRM (18 actions) ===
@@ -123,7 +123,7 @@ ACTION_MAP = {
     "contract-expiry-report": "erpclaw-crm-adv",
     "contract-value-report": "erpclaw-crm-adv",
 
-    # === CRM Advanced — Automation (10 actions) ===
+    # === CRM Advanced — Automation (18 actions) ===
     "add-automation-workflow": "erpclaw-crm-adv",
     "update-automation-workflow": "erpclaw-crm-adv",
     "list-automation-workflows": "erpclaw-crm-adv",
@@ -134,6 +134,14 @@ ACTION_MAP = {
     "add-nurture-sequence": "erpclaw-crm-adv",
     "list-nurture-sequences": "erpclaw-crm-adv",
     "automation-performance-report": "erpclaw-crm-adv",
+    "add-drip-sequence": "erpclaw-crm-adv",
+    "list-drip-sequences": "erpclaw-crm-adv",
+    "add-drip-step": "erpclaw-crm-adv",
+    "list-drip-steps": "erpclaw-crm-adv",
+    "enroll-contact": "erpclaw-crm-adv",
+    "list-enrollments": "erpclaw-crm-adv",
+    "cancel-enrollment": "erpclaw-crm-adv",
+    "process-drip-sends": "erpclaw-crm-adv",
 
     # === CRM Advanced — Reports (4 actions) ===
     "funnel-analysis": "erpclaw-crm-adv",

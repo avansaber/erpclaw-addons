@@ -27,6 +27,7 @@ try:
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.query import Q, P, Table, Field, fn, Order, Criterion, insert_row
+    from erpclaw_lib.voucher_types import canonical_voucher_type
     from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
@@ -318,8 +319,12 @@ def add_quality_inspection(conn, args):
             err(f"Batch {args.batch_id} not found")
 
     # Validate reference type
-    if args.reference_type:
-        if args.reference_type not in VALID_REFERENCE_TYPES:
+    # FINDING-006: reference_type is a doctype field; the gateway may hand a
+    # label ("Delivery Note"). Canonicalize before validating + storing so the
+    # row holds snake_case (matching VALID_REFERENCE_TYPES and any later filter).
+    reference_type = canonical_voucher_type(args.reference_type)
+    if reference_type:
+        if reference_type not in VALID_REFERENCE_TYPES:
             err(f"--reference-type must be one of {VALID_REFERENCE_TYPES}")
 
     # Validate template if provided
@@ -342,7 +347,7 @@ def add_quality_inspection(conn, args):
         "inspected_by": P(), "sample_size": P(), "status": P(), "remarks": P(),
     })
     conn.execute(qi_sql, (inspection_id, naming, args.inspection_type,
-                           args.item_id, args.batch_id, args.reference_type,
+                           args.item_id, args.batch_id, reference_type,
                            args.reference_id, args.template_id,
                            args.inspection_date, args.inspected_by,
                            sample_size, "accepted", args.remarks))
@@ -376,7 +381,7 @@ def add_quality_inspection(conn, args):
             "inspection_type": args.inspection_type,
             "item_id": args.item_id,
             "batch_id": args.batch_id,
-            "reference_type": args.reference_type,
+            "reference_type": reference_type,
             "reference_id": args.reference_id,
             "template_id": args.template_id,
             "inspection_date": args.inspection_date,
@@ -603,11 +608,14 @@ def list_quality_inspections(conn, args):
         params.append(args.inspection_type)
 
     if args.reference_type:
-        if args.reference_type not in VALID_REFERENCE_TYPES:
+        # FINDING-006: canonicalize so a label filter ("Delivery Note") matches
+        # stored "delivery_note" rows.
+        reference_type = canonical_voucher_type(args.reference_type)
+        if reference_type not in VALID_REFERENCE_TYPES:
             err(f"--reference-type must be one of {VALID_REFERENCE_TYPES}")
         q = q.where(T_qi.reference_type == P())
         cq = cq.where(T_qi.reference_type == P())
-        params.append(args.reference_type)
+        params.append(reference_type)
 
     if args.reference_id:
         q = q.where(T_qi.reference_id == P())

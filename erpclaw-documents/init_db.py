@@ -34,6 +34,7 @@ def init_documents_schema(db_path: str = DB_PATH) -> dict:
                                 CHECK(document_type IN ('general','contract','policy','report','invoice','receipt','certificate','specification','manual','other')),
             file_name           TEXT,
             file_path           TEXT,
+            pdf_path            TEXT,
             file_size           INTEGER,
             mime_type           TEXT,
             content             TEXT,
@@ -128,6 +129,10 @@ def init_documents_schema(db_path: str = DB_PATH) -> dict:
             template_type       TEXT NOT NULL DEFAULT 'general'
                                 CHECK(template_type IN ('general','contract','invoice','letter','report','certificate','other')),
             content             TEXT NOT NULL,
+            format              TEXT NOT NULL DEFAULT 'text'
+                                CHECK(format IN ('text','markdown','html')),
+            engine              TEXT NOT NULL DEFAULT 'legacy_replace'
+                                CHECK(engine IN ('legacy_replace','jinja2')),
             merge_fields        TEXT,
             description         TEXT,
             is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),

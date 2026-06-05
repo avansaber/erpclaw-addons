@@ -199,6 +199,17 @@ def ns(**kwargs) -> argparse.Namespace:
         "merge_fields": None,
         "is_active": None,
         "merge_data": None,
+        "format": None,
+        "engine": None,
+        # PDF (render-pdf)
+        "html": None,
+        "html_from_file": None,
+        "output_path": None,
+        "max_html_bytes": None,
+        # Print wrappers
+        "invoice_id": None,
+        "po_id": None,
+        "slip_id": None,
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -284,22 +295,144 @@ def seed_document(conn, company_id: str, title="Test Document",
 
 
 def seed_template(conn, company_id: str, name="Test Template",
-                  template_type="general") -> str:
-    """Insert a document template and return its ID."""
+                  template_type="general", content=None,
+                  fmt="text", engine="legacy_replace") -> str:
+    """Insert a document template and return its ID.
+
+    Defaults to a legacy_replace/text template (backward-compat baseline). Pass
+    engine='jinja2' (+ a Jinja2 body via `content`) to seed an opt-in template.
+    """
     from erpclaw_lib.naming import get_next_name
     tpl_id = _uuid()
     naming = get_next_name(conn, "document_template", company_id=company_id)
+    if content is None:
+        content = "Hello {{name}}, your order {{order_id}} is ready."
     conn.execute(
         """INSERT INTO document_template
-           (id, naming_series, name, template_type, content,
+           (id, naming_series, name, template_type, content, format, engine,
             merge_fields, is_active, company_id)
-           VALUES (?,?,?,?,?,?,1,?)""",
-        (tpl_id, naming, name, template_type,
-         "Hello {{name}}, your order {{order_id}} is ready.",
+           VALUES (?,?,?,?,?,?,?,?,1,?)""",
+        (tpl_id, naming, name, template_type, content, fmt, engine,
          "name,order_id", company_id)
     )
     conn.commit()
     return tpl_id
+
+
+def seed_customer(conn, company_id: str, name="Test Customer") -> str:
+    cid = _uuid()
+    conn.execute(
+        "INSERT INTO customer(id, name, customer_type, default_currency, company_id) "
+        "VALUES(?,?,?,?,?)",
+        (cid, f"{name} {cid[:6]}", "company", "USD", company_id),
+    )
+    conn.commit()
+    return cid
+
+
+def seed_supplier(conn, company_id: str, name="Test Supplier") -> str:
+    sid = _uuid()
+    conn.execute(
+        "INSERT INTO supplier(id, name, supplier_type, default_currency, company_id) "
+        "VALUES(?,?,?,?,?)",
+        (sid, f"{name} {sid[:6]}", "company", "USD", company_id),
+    )
+    conn.commit()
+    return sid
+
+
+def seed_item(conn, name="Widget") -> str:
+    iid = _uuid()
+    conn.execute(
+        "INSERT INTO item(id, item_code, item_name, item_type) VALUES(?,?,?,?)",
+        (iid, f"ITEM-{iid[:6]}", f"{name} {iid[:6]}", "stock"),
+    )
+    conn.commit()
+    return iid
+
+
+def seed_sales_invoice(conn, company_id: str, customer_id: str,
+                       status: str = "submitted", items=None) -> str:
+    """Seed a submitted sales_invoice + line items. Returns invoice id."""
+    inv_id = _uuid()
+    conn.execute(
+        """INSERT INTO sales_invoice
+           (id, customer_id, posting_date, currency, total_amount, tax_amount,
+            grand_total, outstanding_amount, rounding_adjustment, status,
+            update_stock, company_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,1,?)""",
+        (inv_id, customer_id, "2026-06-01", "USD",
+         "1000.00", "80.00", "1080.00", "1080.00", "0.00", status, company_id),
+    )
+    if items:
+        for item_id in items:
+            conn.execute(
+                """INSERT INTO sales_invoice_item
+                   (id, sales_invoice_id, item_id, quantity, rate, amount,
+                    discount_percentage, net_amount)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (_uuid(), inv_id, item_id, "2", "500.00", "1000.00", "0.00", "1000.00"),
+            )
+    conn.commit()
+    return inv_id
+
+
+def seed_purchase_order(conn, company_id: str, supplier_id: str,
+                        status: str = "confirmed", items=None) -> str:
+    po_id = _uuid()
+    conn.execute(
+        """INSERT INTO purchase_order
+           (id, supplier_id, order_date, currency, total_amount, tax_amount,
+            grand_total, per_received, per_invoiced, status, company_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (po_id, supplier_id, "2026-06-01", "USD",
+         "2000.00", "160.00", "2160.00", "0.00", "0.00", status, company_id),
+    )
+    if items:
+        for item_id in items:
+            conn.execute(
+                """INSERT INTO purchase_order_item
+                   (id, purchase_order_id, item_id, quantity, received_qty, invoiced_qty,
+                    rate, amount, discount_percentage, net_amount)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (_uuid(), po_id, item_id, "4", "0.00", "0.00",
+                 "500.00", "2000.00", "0.00", "2000.00"),
+            )
+    conn.commit()
+    return po_id
+
+
+def seed_delivery_note_and_packing_slip(conn, company_id: str, customer_id: str,
+                                        item_id: str) -> tuple:
+    """Seed a submitted delivery_note, one item, and a packing_slip. Returns (dn_id, slip_id)."""
+    dn_id = _uuid()
+    conn.execute(
+        """INSERT INTO delivery_note
+           (id, customer_id, posting_date, status, company_id)
+           VALUES(?,?,?,?,?)""",
+        (dn_id, customer_id, "2026-06-01", "submitted", company_id),
+    )
+    dni_id = _uuid()
+    conn.execute(
+        """INSERT INTO delivery_note_item
+           (id, delivery_note_id, item_id, quantity, uom)
+           VALUES(?,?,?,?,?)""",
+        (dni_id, dn_id, item_id, "2", "ea"),
+    )
+    slip_id = _uuid()
+    conn.execute(
+        "INSERT INTO packing_slip(id, delivery_note_id, posting_date, company_id) "
+        "VALUES(?,?,?,?)",
+        (slip_id, dn_id, "2026-06-01", company_id),
+    )
+    conn.execute(
+        """INSERT INTO packing_slip_item
+           (id, packing_slip_id, item_id, delivery_note_item_id, qty_packed, uom)
+           VALUES(?,?,?,?,?,?)""",
+        (_uuid(), slip_id, item_id, dni_id, "2", "ea"),
+    )
+    conn.commit()
+    return dn_id, slip_id
 
 
 def build_env(conn) -> dict:

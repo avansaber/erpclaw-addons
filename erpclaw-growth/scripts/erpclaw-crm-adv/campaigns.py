@@ -5,6 +5,7 @@ Imported by db_query.py (unified router).
 """
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -319,9 +320,117 @@ def schedule_campaign(conn, args):
 
 
 # ===========================================================================
-# 10. send-campaign
+# 10. send-campaign  (M8-C: actually enqueues per-recipient email via M8-A)
 # ===========================================================================
+def _resolve_campaign_content(conn, d):
+    """Resolve the deliverable subject + body for a campaign.
+
+    Subject comes from the campaign's own `subject`, falling back to the
+    attached campaign template's `subject_template`. Body (html/text) comes from
+    the attached template. Reads only crmadv_* tables (owning-module READ).
+    Returns (subject, body_html, body_text) -- any may be None/empty.
+    """
+    subject = d.get("subject")
+    body_html = None
+    body_text = None
+    tpl_id = d.get("template_id")
+    if tpl_id:
+        trow = conn.execute(
+            "SELECT subject_template, body_html, body_text "
+            "FROM crmadv_campaign_template WHERE id = ?", (tpl_id,)).fetchone()
+        if trow:
+            t = row_to_dict(trow)
+            if not subject:
+                subject = t.get("subject_template")
+            body_html = t.get("body_html")
+            body_text = t.get("body_text")
+    return subject, body_html, body_text
+
+
+def _resolve_campaign_recipients(conn, company_id):
+    """READ the campaign's deliverable audience -- the company's CRM contacts.
+
+    The contactable CRM entity that carries an email address is the foundation
+    `lead` table; we send to every lead in the campaign's company. This is a
+    cross-module READ (any module may read any table); we never write `lead`.
+    Returns (with_email, without_email): lists of {id, lead_name, email} dicts.
+    """
+    rows = conn.execute(
+        "SELECT id, lead_name, email FROM lead WHERE company_id = ?",
+        (company_id,)).fetchall()
+    with_email, without_email = [], []
+    for r in rows:
+        rec = row_to_dict(r)
+        if rec.get("email") and str(rec["email"]).strip():
+            with_email.append(rec)
+        else:
+            without_email.append(rec)
+    return with_email, without_email
+
+
+def _dispatch_campaign_email(conn, to_address, subject, body_html, body_text,
+                             company_id, db_path):
+    """Enqueue one campaign email via the erpclaw-alerts `send-email` ACTION.
+
+    Cross-module reach is by INVOKING the action (subprocess to alerts'
+    db_query.py) -- we never write erpclaw-alerts' email_outbox/email_log tables
+    directly (owning-module-writes rule). The campaign carries its own
+    crmadv_campaign_template (distinct from the alerts email_template), so we
+    send INLINE subject/body rather than passing a template id. Returns
+    (ok: bool, info: str) where info is the returned outbox id on success, else
+    the error message. This is the single seam tests patch (no real subprocess
+    in CI), mirroring process-drip-sends' `_dispatch_email`.
+    """
+    from erpclaw_lib.dependencies import check_subprocess_target, resolve_skill_script
+    dep_err = check_subprocess_target(conn, "erpclaw-alerts", "email_outbox")
+    if dep_err:
+        return False, dep_err["error"]
+    script = resolve_skill_script("erpclaw-alerts")
+    cmd = [
+        sys.executable, script,
+        "--action", "send-email",
+        "--to", to_address,
+    ]
+    if subject:
+        cmd.extend(["--subject", subject])
+    if body_html:
+        cmd.extend(["--body-html", body_html])
+    if body_text:
+        cmd.extend(["--body-text", body_text])
+    if company_id:
+        cmd.extend(["--company-id", company_id])
+    if db_path:
+        cmd.extend(["--db-path", db_path])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False, "send-email timed out (30s)"
+    if result.returncode != 0:
+        return False, (result.stdout.strip() or result.stderr.strip() or "send-email failed")
+    try:
+        resp = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, f"invalid response from erpclaw-alerts: {result.stdout[:200]}"
+    if resp.get("status") != "ok":
+        return False, resp.get("message") or resp.get("error") or "send-email failed"
+    return True, resp.get("email_outbox_id") or "queued"
+
+
 def send_campaign(conn, args):
+    """Send a campaign: enqueue one email per recipient via the M8-A send-email
+    ACTION and record the returned outbox ids on the campaign (M8-C).
+
+    For each recipient (the company's CRM contacts) with a deliverable email we
+    INVOKE erpclaw-alerts' send-email action (cross-module subprocess) and write
+    a `crmadv_campaign_event` 'sent' row carrying the outbox id; recipients with
+    no email skip-with-note. A send-provider failure on one recipient is a skip,
+    never a whole-campaign failure.
+
+    Sends run BEFORE we open our own write transaction: send-email opens its own
+    connection to write the alerts outbox, so we must not hold an open write
+    transaction while it runs. Returns a {recipients, sent, skipped, outbox_ids}
+    summary; the campaign flips to 'sent' once dispatch completes.
+    """
     camp_id = getattr(args, "campaign_id", None)
     if not camp_id:
         err("--campaign-id is required")
@@ -334,16 +443,60 @@ def send_campaign(conn, args):
     if d["campaign_status"] not in ("draft", "scheduled"):
         err(f"Cannot send campaign in status '{d['campaign_status']}'. Must be draft or scheduled.")
 
+    company_id = d["company_id"]
+    subject, body_html, body_text = _resolve_campaign_content(conn, d)
+    if not (subject or body_html or body_text):
+        err("Cannot send campaign: no subject or body. Set a subject or attach a "
+            "campaign template with body content.")
+
+    with_email, without_email = _resolve_campaign_recipients(conn, company_id)
+    db_path = getattr(args, "db_path", None)
+
+    # Phase 1 -- dispatch (reads only on our conn; each send-email subprocess
+    # opens its own connection + commits, so we hold no write lock here).
+    sent_records = []   # (recipient_email, outbox_id)
+    skipped = []        # (recipient_email, reason)
+    for rec in with_email:
+        sent_ok, info = _dispatch_campaign_email(
+            conn, rec["email"], subject, body_html, body_text, company_id, db_path)
+        if sent_ok:
+            sent_records.append((rec["email"], info))
+        else:
+            skipped.append((rec["email"], f"send failed: {info}"))
+    for rec in without_email:
+        skipped.append((rec.get("email"), "no email on contact record"))
+
+    # Phase 2 -- record the result in one transaction on crmadv_* (owned) tables.
     now = _now_iso()
+    for recipient_email, outbox_id in sent_records:
+        conn.execute("""
+            INSERT INTO crmadv_campaign_event (
+                id, campaign_id, event_type, recipient_email, event_timestamp,
+                metadata, company_id, created_at
+            ) VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            str(uuid.uuid4()), camp_id, "sent", recipient_email, now,
+            json.dumps({"email_outbox_id": outbox_id}), company_id, now,
+        ))
     conn.execute("""
         UPDATE crmadv_email_campaign
-        SET campaign_status = 'sent', sent_date = ?, updated_at = ?
+        SET campaign_status = 'sent', sent_date = ?,
+            total_sent = total_sent + ?, updated_at = ?
         WHERE id = ?
-    """, (now, now, camp_id))
+    """, (now, len(sent_records), now, camp_id))
     audit(conn, SKILL, "send-campaign", "crmadv_email_campaign", camp_id,
-          new_values={"campaign_status": "sent"})
+          new_values={"campaign_status": "sent", "sent": len(sent_records),
+                      "skipped": len(skipped)})
     conn.commit()
-    ok({"id": camp_id, "campaign_status": "sent", "sent_date": now})
+    ok({
+        "id": camp_id,
+        "campaign_status": "sent",
+        "sent_date": now,
+        "recipients": len(with_email) + len(without_email),
+        "sent": len(sent_records),
+        "skipped": len(skipped),
+        "outbox_ids": [oid for _, oid in sent_records],
+    })
 
 
 # ===========================================================================

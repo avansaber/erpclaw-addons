@@ -493,50 +493,9 @@ def create_integration_tables(db_path=None):
     """)
     tables_created += 1
 
-    # TABLE 19: plaid_linked_account
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS plaid_linked_account (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            access_token    TEXT NOT NULL,
-            institution_name TEXT,
-            account_name    TEXT,
-            account_type    TEXT,
-            account_mask    TEXT,
-            erp_account_id  TEXT,
-            last_synced_at  TEXT,
-            status          TEXT NOT NULL DEFAULT 'active'
-                            CHECK(status IN ('active','disconnected','error')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_plaid_account_company ON plaid_linked_account(company_id)")
-    indexes_created += 1
-
-    # TABLE 20: plaid_transaction
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS plaid_transaction (
-            id              TEXT PRIMARY KEY,
-            plaid_linked_account_id TEXT NOT NULL REFERENCES plaid_linked_account(id) ON DELETE CASCADE,
-            plaid_transaction_id TEXT NOT NULL,
-            date            TEXT NOT NULL,
-            amount          TEXT NOT NULL DEFAULT '0',
-            name            TEXT,
-            category        TEXT,
-            merchant_name   TEXT,
-            matched_gl_entry_id TEXT,
-            match_status    TEXT NOT NULL DEFAULT 'unmatched'
-                            CHECK(match_status IN ('unmatched','auto_matched','manual_matched','ignored')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(plaid_linked_account_id, plaid_transaction_id)
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_plaid_txn_account ON plaid_transaction(plaid_linked_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_plaid_txn_status ON plaid_transaction(match_status)")
-    indexes_created += 2
+    # plaid_linked_account / plaid_transaction removed 2026-06-01 (audit P2): dead
+    # scaffolding for an unbuilt Plaid connector (zero code/doc references). Dropped
+    # from existing DBs by this module's migration 001.
 
     # ==================================================================
     # STRIPE -- Payment Gateway (3 tables)
@@ -561,46 +520,10 @@ def create_integration_tables(db_path=None):
     """)
     tables_created += 1
 
-    # TABLE 22: stripe_payment_intent
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_payment_intent (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            stripe_id       TEXT NOT NULL,
-            amount          TEXT NOT NULL DEFAULT '0',
-            currency        TEXT NOT NULL DEFAULT 'USD',
-            customer_id     TEXT,
-            sales_invoice_id TEXT,
-            status          TEXT NOT NULL DEFAULT 'created'
-                            CHECK(status IN ('created','processing','succeeded','failed','cancelled')),
-            payment_entry_id TEXT,
-            metadata        TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pi_company ON stripe_payment_intent(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pi_status ON stripe_payment_intent(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pi_stripe_id ON stripe_payment_intent(stripe_id)")
-    indexes_created += 3
-
-    # TABLE 23: stripe_webhook_event
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_webhook_event (
-            id              TEXT PRIMARY KEY,
-            stripe_event_id TEXT NOT NULL UNIQUE,
-            event_type      TEXT NOT NULL,
-            payload         TEXT NOT NULL,
-            processed       INTEGER NOT NULL DEFAULT 0,
-            processed_at    TEXT,
-            error_message   TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_webhook_type ON stripe_webhook_event(event_type)")
-    indexes_created += 1
+    # stripe_payment_intent / stripe_webhook_event removed 2026-06-01 (audit P2):
+    # dead scaffolding (zero code/doc references) superseded by the dedicated live
+    # erpclaw-integrations-stripe addon. stripe_config kept (referenced). Dropped
+    # from existing DBs by this module's migration 001.
 
     # ==================================================================
     # S3 -- Cloud Backup (2 tables)
@@ -625,26 +548,9 @@ def create_integration_tables(db_path=None):
     """)
     tables_created += 1
 
-    # TABLE 25: s3_backup_record
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS s3_backup_record (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            s3_key          TEXT NOT NULL,
-            file_size_bytes INTEGER,
-            backup_type     TEXT NOT NULL DEFAULT 'full'
-                            CHECK(backup_type IN ('full','incremental')),
-            encrypted       INTEGER NOT NULL DEFAULT 0,
-            checksum        TEXT,
-            status          TEXT NOT NULL DEFAULT 'completed'
-                            CHECK(status IN ('uploading','completed','failed','deleted')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_s3_backup_company ON s3_backup_record(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_s3_backup_status ON s3_backup_record(status)")
-    indexes_created += 2
+    # s3_backup_record removed 2026-06-01 (audit P2): dead scaffolding (zero
+    # code/doc references); s3_config kept (referenced). Dropped from existing DBs
+    # by this module's migration 001.
 
     conn.commit()
     conn.close()

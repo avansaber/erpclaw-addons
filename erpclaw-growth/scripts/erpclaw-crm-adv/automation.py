@@ -1,13 +1,14 @@
 """erpclaw-crm-adv -- automation domain module
 
-Actions for marketing automation workflows, lead scoring, and nurture sequences (3 tables, 10 actions).
+Actions for marketing automation workflows, lead scoring, nurture sequences, and drip sequences (6 tables, 17 actions).
 Imported by db_query.py (unified router).
 """
 import json
 import os
+import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
@@ -406,6 +407,475 @@ def automation_performance_report(conn, args):
     })
 
 
+# ===========================================================================
+# 11. add-drip-sequence (M8 phase B -- standalone create)
+# ===========================================================================
+def add_drip_sequence(conn, args):
+    _validate_company(conn, args.company_id)
+    name = getattr(args, "name", None)
+    if not name:
+        err("--name is required")
+
+    ds_id = str(uuid.uuid4())
+    now = _now_iso()
+
+    conn.execute("""
+        INSERT INTO crmadv_drip_sequence (
+            id, company_id, name, description, is_active, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?)
+    """, (
+        ds_id, args.company_id, name,
+        getattr(args, "description", None),
+        1, now, now,
+    ))
+    audit(conn, SKILL, "add-drip-sequence", "crmadv_drip_sequence", ds_id,
+          new_values={"name": name})
+    conn.commit()
+    ok({"id": ds_id, "name": name, "is_active": 1})
+
+
+# ===========================================================================
+# 12. list-drip-sequences (M8 phase B -- read, owning-module)
+# ===========================================================================
+def list_drip_sequences(conn, args):
+    _validate_company(conn, args.company_id)
+
+    where, params = ["company_id = ?"], [args.company_id]
+    if getattr(args, "is_active", None) is not None:
+        where.append("is_active = ?")
+        params.append(args.is_active)
+
+    where_sql = " AND ".join(where)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM crmadv_drip_sequence WHERE {where_sql}", params
+    ).fetchone()[0]
+    params.extend([args.limit, args.offset])
+    rows = conn.execute(
+        f"SELECT * FROM crmadv_drip_sequence WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params
+    ).fetchall()
+    result_rows = [row_to_dict(r) for r in rows]
+    ok({
+        "rows": result_rows,
+        "total_count": total, "limit": args.limit, "offset": args.offset,
+        "has_more": (args.offset + args.limit) < total,
+    })
+
+
+# ===========================================================================
+# 13. add-drip-step (M8 phase B -- standalone create within a drip sequence)
+# ===========================================================================
+def add_drip_step(conn, args):
+    sequence_id = getattr(args, "sequence_id", None)
+    if not sequence_id:
+        err("--sequence-id is required")
+    if not conn.execute(
+        Q.from_(Table("crmadv_drip_sequence")).select(Field('id')).where(Field("id") == P()).get_sql(),
+        (sequence_id,),
+    ).fetchone():
+        err(f"Drip sequence {sequence_id} not found")
+
+    step_order_raw = getattr(args, "step_order", None)
+    if step_order_raw is None:
+        err("--step-order is required")
+    try:
+        step_order = int(step_order_raw)
+    except (ValueError, TypeError):
+        err("--step-order must be an integer")
+
+    delay_hours_raw = getattr(args, "delay_hours", None)
+    if delay_hours_raw is None:
+        err("--delay-hours is required")
+    try:
+        delay_hours = int(delay_hours_raw)
+    except (ValueError, TypeError):
+        err("--delay-hours must be an integer")
+
+    step_id = str(uuid.uuid4())
+    now = _now_iso()
+
+    conn.execute("""
+        INSERT INTO crmadv_drip_sequence_step (
+            id, sequence_id, step_order, delay_hours, email_template_id,
+            is_active, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+    """, (
+        step_id, sequence_id, step_order, delay_hours,
+        getattr(args, "email_template_id", None),
+        1, now, now,
+    ))
+    audit(conn, SKILL, "add-drip-step", "crmadv_drip_sequence_step", step_id,
+          new_values={"sequence_id": sequence_id, "step_order": step_order})
+    conn.commit()
+    ok({"id": step_id, "sequence_id": sequence_id, "step_order": step_order,
+        "delay_hours": delay_hours, "is_active": 1})
+
+
+# ===========================================================================
+# 14. list-drip-steps (M8 phase B -- read, owning-module)
+# ===========================================================================
+def list_drip_steps(conn, args):
+    sequence_id = getattr(args, "sequence_id", None)
+    if not sequence_id:
+        err("--sequence-id is required")
+    if not conn.execute(
+        Q.from_(Table("crmadv_drip_sequence")).select(Field('id')).where(Field("id") == P()).get_sql(),
+        (sequence_id,),
+    ).fetchone():
+        err(f"Drip sequence {sequence_id} not found")
+
+    params = [sequence_id]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM crmadv_drip_sequence_step WHERE sequence_id = ?", params
+    ).fetchone()[0]
+    params.extend([args.limit, args.offset])
+    rows = conn.execute(
+        "SELECT * FROM crmadv_drip_sequence_step WHERE sequence_id = ? ORDER BY step_order LIMIT ? OFFSET ?",
+        params
+    ).fetchall()
+    result_rows = [row_to_dict(r) for r in rows]
+    ok({
+        "rows": result_rows,
+        "total_count": total, "limit": args.limit, "offset": args.offset,
+        "has_more": (args.offset + args.limit) < total,
+    })
+
+
+# ===========================================================================
+# 15. enroll-contact (M8 phase B -- enroll a contact into a drip sequence)
+# ===========================================================================
+def enroll_contact(conn, args):
+    sequence_id = getattr(args, "sequence_id", None)
+    if not sequence_id:
+        err("--sequence-id is required")
+    contact_id = getattr(args, "contact_id", None)
+    if not contact_id:
+        err("--contact-id is required")
+
+    # The sequence must exist AND be active to accept enrollments.
+    seq = conn.execute(
+        Q.from_(Table("crmadv_drip_sequence")).select(Field("id"), Field("is_active"))
+        .where(Field("id") == P()).get_sql(),
+        (sequence_id,),
+    ).fetchone()
+    if not seq:
+        err(f"Drip sequence {sequence_id} not found")
+    if row_to_dict(seq)["is_active"] != 1:
+        err(f"Drip sequence {sequence_id} is not active")
+
+    # next_send_at is driven by the first step (lowest step_order). With no
+    # steps the enrollment has nothing to send, so next_send_at stays NULL.
+    first_step = conn.execute(
+        "SELECT delay_hours FROM crmadv_drip_sequence_step "
+        "WHERE sequence_id = ? ORDER BY step_order LIMIT 1",
+        (sequence_id,),
+    ).fetchone()
+
+    # enrolled_at and next_send_at share one base instant so next_send_at is
+    # exactly enrolled_at + the first step's delay_hours.
+    now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if first_step is not None:
+        base = now_dt + timedelta(hours=int(first_step["delay_hours"]))
+        next_send_at = base.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        next_send_at = None
+
+    enr_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO crmadv_drip_enrollment (
+            id, sequence_id, contact_id, current_step, status,
+            next_send_at, enrolled_at, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        enr_id, sequence_id, contact_id, 0, "active",
+        next_send_at, now, now, now,
+    ))
+    audit(conn, SKILL, "enroll-contact", "crmadv_drip_enrollment", enr_id,
+          new_values={"sequence_id": sequence_id, "contact_id": contact_id})
+    conn.commit()
+    # NB: the response envelope owns the top-level "status" key, so the
+    # enrollment's own status is surfaced as "enrollment_status".
+    ok({"id": enr_id, "sequence_id": sequence_id, "contact_id": contact_id,
+        "current_step": 0, "enrollment_status": "active", "next_send_at": next_send_at})
+
+
+# ===========================================================================
+# 16. list-enrollments (M8 phase B -- read, owning-module)
+# ===========================================================================
+def list_enrollments(conn, args):
+    sequence_id = getattr(args, "sequence_id", None)
+    if not sequence_id:
+        err("--sequence-id is required")
+    if not conn.execute(
+        Q.from_(Table("crmadv_drip_sequence")).select(Field('id')).where(Field("id") == P()).get_sql(),
+        (sequence_id,),
+    ).fetchone():
+        err(f"Drip sequence {sequence_id} not found")
+
+    # Build the optional status filter from literal fragments only (no user
+    # data is ever interpolated into SQL; values stay bound parameters).
+    params = [sequence_id]
+    status_clause = ""
+    if getattr(args, "status", None):
+        status_clause = " AND status = ?"
+        params.append(args.status)
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM crmadv_drip_enrollment WHERE sequence_id = ?" + status_clause,
+        params,
+    ).fetchone()[0]
+    params.extend([args.limit, args.offset])
+    rows = conn.execute(
+        "SELECT * FROM crmadv_drip_enrollment WHERE sequence_id = ?" + status_clause
+        + " ORDER BY enrolled_at DESC LIMIT ? OFFSET ?",
+        params,
+    ).fetchall()
+    result_rows = [row_to_dict(r) for r in rows]
+    ok({
+        "rows": result_rows,
+        "total_count": total, "limit": args.limit, "offset": args.offset,
+        "has_more": (args.offset + args.limit) < total,
+    })
+
+
+# ===========================================================================
+# 17. cancel-enrollment (M8 phase B -- guarded UPDATE)
+# ===========================================================================
+def cancel_enrollment(conn, args):
+    enr_id = getattr(args, "enrollment_id", None)
+    if not enr_id:
+        err("--enrollment-id is required")
+    row = conn.execute(
+        Q.from_(Table("crmadv_drip_enrollment")).select(Table("crmadv_drip_enrollment").star)
+        .where(Field("id") == P()).get_sql(),
+        (enr_id,),
+    ).fetchone()
+    if not row:
+        err(f"Drip enrollment {enr_id} not found")
+
+    d = row_to_dict(row)
+    if d["status"] == "cancelled":
+        err("Enrollment is already cancelled")
+
+    now = _now_iso()
+    conn.execute("""
+        UPDATE crmadv_drip_enrollment
+        SET status = 'cancelled', next_send_at = NULL, updated_at = ?
+        WHERE id = ?
+    """, (now, enr_id))
+    audit(conn, SKILL, "cancel-enrollment", "crmadv_drip_enrollment", enr_id,
+          new_values={"status": "cancelled"})
+    conn.commit()
+    # "enrollment_status" -- the envelope owns the top-level "status" key.
+    ok({"id": enr_id, "enrollment_status": "cancelled"})
+
+
+# ===========================================================================
+# 18. process-drip-sends (M8 phase B -- cron worker, completes M8-B)
+# ===========================================================================
+def _resolve_recipient_email(conn, contact_id):
+    """READ-only lookup of a CRM contact's email address.
+
+    The CRM's contactable entity that carries an email address is the
+    foundation `lead` table; enrollment.contact_id is its id. This is a
+    cross-module READ (any module may read any table) -- we never write it.
+    Returns the email string, or None when the contact / email is missing.
+    """
+    row = conn.execute(
+        "SELECT email FROM lead WHERE id = ?", (contact_id,)
+    ).fetchone()
+    if row and row["email"]:
+        return row["email"]
+    return None
+
+
+def _dispatch_email(conn, to_address, template_id, company_id, db_path):
+    """Send one drip step's email via the erpclaw-alerts `send-email` ACTION.
+
+    Cross-module reach is by INVOKING the action (subprocess to alerts'
+    db_query.py) -- we never write erpclaw-alerts' email_outbox/email_log
+    tables directly (owning-module-writes rule). Returns (ok: bool, info: str).
+    This is the single seam tests patch (no real subprocess in CI).
+    """
+    from erpclaw_lib.dependencies import check_subprocess_target, resolve_skill_script
+    dep_err = check_subprocess_target(conn, "erpclaw-alerts", "email_outbox")
+    if dep_err:
+        return False, dep_err["error"]
+    script = resolve_skill_script("erpclaw-alerts")
+    cmd = [
+        sys.executable, script,
+        "--action", "send-email",
+        "--to", to_address,
+        "--template-id", template_id,
+    ]
+    if company_id:
+        cmd.extend(["--company-id", company_id])
+    if db_path:
+        cmd.extend(["--db-path", db_path])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False, "send-email timed out (30s)"
+    if result.returncode != 0:
+        return False, (result.stdout.strip() or result.stderr.strip() or "send-email failed")
+    try:
+        resp = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, f"invalid response from erpclaw-alerts: {result.stdout[:200]}"
+    if resp.get("status") != "ok":
+        return False, resp.get("message") or resp.get("error") or "send-email failed"
+    return True, resp.get("email_outbox_id") or "queued"
+
+
+def _process_one_enrollment(conn, enr, now, now_dt, db_path):
+    """Advance a single due enrollment by one step inside one transaction.
+
+    Returns a per-enrollment detail dict. Raises on unexpected DB errors so the
+    caller can roll back and record the failure.
+    """
+    enr_id = enr["id"]
+    steps = [row_to_dict(s) for s in conn.execute(
+        "SELECT id, step_order, delay_hours, email_template_id "
+        "FROM crmadv_drip_sequence_step WHERE sequence_id = ? ORDER BY step_order",
+        (enr["sequence_id"],)
+    ).fetchall()]
+    n_steps = len(steps)
+    cur = int(enr["current_step"])
+
+    # Nothing left to send: the enrollment has caught up to (or past) the last
+    # step. Mark it completed and stop scheduling.
+    if cur >= n_steps:
+        conn.execute(
+            "UPDATE crmadv_drip_enrollment SET status = 'completed', "
+            "next_send_at = NULL, updated_at = ? WHERE id = ?",
+            (now, enr_id))
+        audit(conn, SKILL, "process-drip-sends", "crmadv_drip_enrollment", enr_id,
+              new_values={"status": "completed", "reason": "no steps remaining"})
+        conn.commit()
+        return {"enrollment_id": enr_id, "outcome": "completed", "advanced": False,
+                "note": "no steps remaining"}
+
+    step = steps[cur]
+    template_id = step.get("email_template_id")
+    recipient = None
+
+    if template_id:
+        recipient = _resolve_recipient_email(conn, enr["contact_id"])
+        if not recipient:
+            # No deliverable address: skip WITHOUT advancing so a later run can
+            # retry once the contact has an email.
+            return {"enrollment_id": enr_id, "outcome": "skipped", "advanced": False,
+                    "note": f"no email for contact {enr['contact_id']}"}
+        sent_ok, info = _dispatch_email(
+            conn, recipient, template_id, enr.get("seq_company_id"), db_path)
+        if not sent_ok:
+            # Send failed: do not advance; surface the provider error.
+            return {"enrollment_id": enr_id, "outcome": "skipped", "advanced": False,
+                    "note": f"send failed: {info}"}
+    # else: step carries no template -> no-op send, but still advance.
+
+    new_step = cur + 1
+    if new_step < n_steps:
+        next_delay = int(steps[new_step]["delay_hours"])
+        next_send_at = (now_dt + timedelta(hours=next_delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_status = "active"
+    else:
+        next_send_at = None
+        new_status = "completed"
+
+    conn.execute(
+        "UPDATE crmadv_drip_enrollment SET current_step = ?, status = ?, "
+        "next_send_at = ?, updated_at = ? WHERE id = ?",
+        (new_step, new_status, next_send_at, now, enr_id))
+    audit(conn, SKILL, "process-drip-sends", "crmadv_drip_enrollment", enr_id,
+          new_values={"current_step": new_step, "status": new_status,
+                      "next_send_at": next_send_at})
+    conn.commit()
+
+    return {"enrollment_id": enr_id, "outcome": "sent", "advanced": True,
+            "completed": new_status == "completed", "current_step": new_step,
+            "next_send_at": next_send_at, "recipient": recipient,
+            "email_template_id": template_id,
+            "note": None if template_id else "no-op (step has no email_template_id)"}
+
+
+def process_drip_sends(conn, args):
+    """Cron worker: find due active enrollments and send the next step's email.
+
+    Due = status='active' AND next_send_at IS NOT NULL AND next_send_at <= now.
+    Each enrollment is advanced in its own transaction. Cross-module reach is via
+    the erpclaw-alerts send-email ACTION only; the CRM contact is READ-only; only
+    crmadv_* tables are written here. --now overrides the clock for deterministic
+    tests.
+    """
+    now_arg = getattr(args, "now", None)
+    if now_arg:
+        try:
+            now_dt = datetime.strptime(now_arg, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            err("--now must be ISO format YYYY-MM-DDTHH:MM:SSZ")
+            return  # unreachable; err() exits
+    else:
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    limit_raw = getattr(args, "limit", None)
+    try:
+        limit = int(limit_raw) if limit_raw is not None else 100
+    except (ValueError, TypeError):
+        err("--limit must be an integer")
+        return
+    if limit <= 0:
+        limit = 100
+
+    where = ["e.status = 'active'", "e.next_send_at IS NOT NULL", "e.next_send_at <= ?"]
+    params = [now]
+    if getattr(args, "company_id", None):
+        where.append("s.company_id = ?")
+        params.append(args.company_id)
+    where_sql = " AND ".join(where)
+    params.append(limit)
+
+    rows = conn.execute(
+        "SELECT e.*, s.company_id AS seq_company_id "
+        "FROM crmadv_drip_enrollment e "
+        "JOIN crmadv_drip_sequence s ON s.id = e.sequence_id "
+        f"WHERE {where_sql} ORDER BY e.next_send_at LIMIT ?",
+        params
+    ).fetchall()
+    enrollments = [row_to_dict(r) for r in rows]
+
+    db_path = getattr(args, "db_path", None)
+    processed = sent = completed = skipped = 0
+    details = []
+
+    for enr in enrollments:
+        processed += 1
+        try:
+            detail = _process_one_enrollment(conn, enr, now, now_dt, db_path)
+        except Exception as e:  # noqa: BLE001 -- isolate one bad enrollment
+            conn.rollback()
+            skipped += 1
+            details.append({"enrollment_id": enr["id"], "outcome": "error",
+                            "advanced": False, "note": str(e)})
+            continue
+
+        outcome = detail["outcome"]
+        if outcome == "sent":
+            sent += 1
+            if detail.get("completed"):
+                completed += 1
+        elif outcome == "completed":
+            completed += 1
+        elif outcome == "skipped":
+            skipped += 1
+        details.append(detail)
+
+    ok({"processed": processed, "sent": sent, "completed": completed,
+        "skipped": skipped, "details": details})
+
+
 # ---------------------------------------------------------------------------
 # Action registry
 # ---------------------------------------------------------------------------
@@ -420,4 +890,12 @@ ACTIONS = {
     "add-nurture-sequence": add_nurture_sequence,
     "list-nurture-sequences": list_nurture_sequences,
     "automation-performance-report": automation_performance_report,
+    "add-drip-sequence": add_drip_sequence,
+    "list-drip-sequences": list_drip_sequences,
+    "add-drip-step": add_drip_step,
+    "list-drip-steps": list_drip_steps,
+    "enroll-contact": enroll_contact,
+    "list-enrollments": list_enrollments,
+    "cancel-enrollment": cancel_enrollment,
+    "process-drip-sends": process_drip_sends,
 }

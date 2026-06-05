@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ERPClaw Documents -- db_query.py (unified router)
 
-Document management: CRUD, versioning, tagging, linking, templates, search.
-Routes all 25 actions across 2 domain modules: documents, templates.
+Document management: CRUD, versioning, tagging, linking, templates, search, PDF.
+Routes all 32 actions across 5 domain modules: documents, templates, pdf, print, wrappers.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -39,6 +39,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from documents import ACTIONS as DOC_ACTIONS
 from templates import ACTIONS as TPL_ACTIONS
+from pdf import PDF_ACTIONS
+from print_docs import PRINT_ACTIONS
+from print_wrappers import WRAPPER_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -49,6 +52,9 @@ REQUIRED_TABLES = ["company", "document"]
 ACTIONS = {}
 ACTIONS.update(DOC_ACTIONS)
 ACTIONS.update(TPL_ACTIONS)
+ACTIONS.update(PDF_ACTIONS)
+ACTIONS.update(PRINT_ACTIONS)
+ACTIONS.update(WRAPPER_ACTIONS)
 
 
 def main():
@@ -90,6 +96,19 @@ def main():
     parser.add_argument("--description")
     parser.add_argument("--is-active")
     parser.add_argument("--merge-data")
+    parser.add_argument("--format")
+    parser.add_argument("--engine")
+
+    # -- Print wrappers --
+    parser.add_argument("--invoice-id")
+    parser.add_argument("--po-id")
+    parser.add_argument("--slip-id")
+
+    # -- PDF (render-pdf) --
+    parser.add_argument("--html")
+    parser.add_argument("--html-from-file")
+    parser.add_argument("--output-path")
+    parser.add_argument("--max-html-bytes", type=int, default=None)
 
     # -- Shared --
     parser.add_argument("--status")

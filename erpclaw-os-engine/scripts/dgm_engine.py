@@ -361,15 +361,17 @@ def handle_dgm_run_variant(args):
             status = "no_improvement"
 
     except Exception as e:
-        # Mark run as failed
+        # Mark run as failed. If even this status update fails, surface it —
+        # an undetected stale 'running' DGM record is worse than a noisy log.
         try:
             conn.execute(
                 'UPDATE erpclaw_dgm_run SET status = ?, completed_at = datetime(\'now\') WHERE id = ?',
                 ("failed", run_id),
             )
             conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as status_err:
+            print(f"WARN: dgm_engine could not mark run {run_id} as failed "
+                  f"after exception {e!r}: {status_err}", file=sys.stderr)
         return {"error": f"DGM run failed: {str(e)}", "run_id": run_id}
     finally:
         conn.close()

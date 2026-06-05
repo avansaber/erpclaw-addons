@@ -1,0 +1,93 @@
+/* ERPClaw Documents — default PDF stylesheet (shared by all bundled templates)
+   Optimised for WeasyPrint: box-sizing, page size, and print-safe fonts.      */
+
+@page {
+    size: letter;
+    margin: 0.75in 0.75in 0.85in 0.75in;
+    @bottom-right {
+        content: "Page " counter(page) " of " counter(pages);
+        font-size: 8pt;
+        color: #888;
+    }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: "DejaVu Sans", Arial, sans-serif;
+    font-size: 10pt;
+    color: #1a1a1a;
+    line-height: 1.45;
+}
+
+/* ---- Header ---- */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding-bottom: 14pt;
+    border-bottom: 2px solid #2c3e50;
+    margin-bottom: 16pt;
+}
+.company-name { font-size: 18pt; font-weight: bold; color: #2c3e50; }
+.company-meta { font-size: 8pt; color: #555; margin-top: 4pt; line-height: 1.6; }
+.doc-title-block { text-align: right; }
+.doc-type { font-size: 20pt; font-weight: bold; color: #2c3e50; text-transform: uppercase; }
+.doc-number { font-size: 12pt; color: #555; }
+
+/* ---- Party blocks ---- */
+.parties {
+    display: flex;
+    gap: 24pt;
+    margin-bottom: 14pt;
+}
+.party { flex: 1; }
+.party-label {
+    font-size: 7.5pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #666;
+    margin-bottom: 3pt;
+}
+.party-name { font-size: 11pt; font-weight: bold; }
+.party-detail { font-size: 9pt; color: #444; line-height: 1.5; }
+
+/* ---- Meta table (dates, terms, etc.) ---- */
+.meta-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 14pt;
+    font-size: 9pt;
+}
+.meta-table td { padding: 3pt 6pt 3pt 0; }
+.meta-table td:first-child { font-weight: bold; width: 38%; color: #444; }
+
+/* ---- Line items ---- */
+.line-items { width: 100%; border-collapse: collapse; margin-bottom: 14pt; font-size: 9pt; }
+.line-items th {
+    background: #2c3e50;
+    color: #fff;
+    padding: 5pt 6pt;
+    text-align: left;
+    font-weight: bold;
+}
+.line-items th.right, .line-items td.right { text-align: right; }
+.line-items td { padding: 4pt 6pt; border-bottom: 1px solid #e8e8e8; vertical-align: top; }
+.line-items tr:nth-child(even) td { background: #f7f7f7; }
+
+/* ---- Totals ---- */
+.totals {
+    width: 240pt;
+    margin-left: auto;
+    margin-bottom: 20pt;
+    font-size: 9pt;
+}
+.totals table { width: 100%; border-collapse: collapse; }
+.totals td { padding: 3pt 6pt; }
+.totals td:last-child { text-align: right; }
+.totals .grand { font-size: 11pt; font-weight: bold; border-top: 2px solid #2c3e50; padding-top: 5pt; }
+
+/* ---- Notes / footer ---- */
+.notes { font-size: 8.5pt; color: #555; margin-top: 10pt; }
+.notes-label { font-weight: bold; color: #333; margin-bottom: 3pt; }

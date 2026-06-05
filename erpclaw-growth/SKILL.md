@@ -3,7 +3,7 @@ name: erpclaw-growth
 version: 2.0.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module
-  analytics, and AI-powered business analysis for ERPClaw. 113 actions across 4 domains:
+  analytics, and AI-powered business analysis for ERPClaw. 120 actions across 4 domains:
   lead management, opportunity pipeline, email campaigns, territories, contracts, automation,
   KPI dashboards, anomaly detection, cash flow forecasting, and relationship scoring.
 author: AvanSaber
@@ -135,7 +135,7 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `add-recipient-list` | `--name`, `--company-id` | `--description`, `--list-type`, `--filter-criteria` |
 | `list-recipient-lists` | | `--company-id`, `--list-type`, `--limit`, `--offset` |
 | `schedule-campaign` | `--campaign-id`, `--scheduled-date` | |
-| `send-campaign` | `--campaign-id` | |
+| `send-campaign` | `--campaign-id` | `--db-path` — enqueues one email per company contact via the erpclaw-alerts `send-email` action (M8-A), records outbox ids as `sent` events; no-email contacts skip-with-note |
 | `track-campaign-event` | `--campaign-id`, `--event-type` | `--recipient-email`, `--event-timestamp`, `--metadata` |
 | `campaign-roi-report` | `--company-id` | `--start-date`, `--end-date` |
 
@@ -169,7 +169,7 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `contract-expiry-report` | `--company-id` | `--start-date`, `--end-date` |
 | `contract-value-report` | `--company-id` | `--contract-type` |
 
-### CRM Advanced — Automation (10 actions)
+### CRM Advanced — Automation (18 actions)
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
@@ -183,6 +183,16 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `add-nurture-sequence` | `--name`, `--company-id` | `--description`, `--steps-json` |
 | `list-nurture-sequences` | | `--company-id`, `--limit`, `--offset` |
 | `automation-performance-report` | `--company-id` | |
+| `add-drip-sequence` | `--company-id`, `--name` | `--description` |
+| `list-drip-sequences` | `--company-id` | `--is-active`, `--limit`, `--offset` |
+| `add-drip-step` | `--sequence-id`, `--step-order`, `--delay-hours` | `--email-template-id` |
+| `list-drip-steps` | `--sequence-id` | `--limit`, `--offset` |
+| `enroll-contact` | `--sequence-id`, `--contact-id` | |
+| `list-enrollments` | `--sequence-id` | `--status`, `--limit`, `--offset` |
+| `cancel-enrollment` | `--enrollment-id` | |
+| `process-drip-sends` | | `--company-id`, `--limit`, `--now` |
+
+> **Scheduling:** run `process-drip-sends` every 5 minutes via `openclaw cron add` — see "Optional scheduling" in the foundation `erpclaw` SKILL.md for the exact command.
 
 ### CRM Advanced — Reports (5 actions)
 
@@ -265,11 +275,11 @@ Currency: `$X,XXX.XX` (negatives in parentheses). Ratios: 2dp. Percentages: 1dp 
 
 ### Architecture
 - **Router**: `scripts/db_query.py` dispatches to 4 domain scripts (crm, analytics, ai-engine, crm-adv)
-- **Domains**: crm (18 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (47 actions)
+- **Domains**: crm (18 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
 - **Database**: Single SQLite at `~/.openclaw/erpclaw/data.sqlite` (shared with erpclaw)
 
-### Tables Owned (29)
-CRM: lead_source, lead, opportunity, campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence. Analytics: none (read-only).
+### Tables Owned (32)
+CRM: lead_source, lead, opportunity, campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence, crmadv_drip_sequence, crmadv_drip_sequence_step, crmadv_drip_enrollment. Analytics: none (read-only).
 
 ### Data Conventions
 Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601). CRM naming series: `LEAD-{YEAR}-{SEQ}`, `OPP-{YEAR}-{SEQ}`. CRM-Adv naming series: `EMCAMP-{YEAR}-{SEQ}`, `TERR-{YEAR}-{SEQ}`, `CTR-{YEAR}-{SEQ}`, `AWFL-{YEAR}-{SEQ}`, `ANUR-{YEAR}-{SEQ}`. GL entries and stock ledger entries are immutable. All queries use parameterized statements.

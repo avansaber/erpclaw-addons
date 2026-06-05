@@ -110,7 +110,7 @@ def handle_record_repayment(conn, args):
                        CAST(REPLACE(paid_amount, ',', '') AS NUMERIC) + ? AS TEXT),
                        outstanding = ?, status = ?, payment_date = ?
                    WHERE id = ?""",
-                (float(pay), str(new_s_outstanding), s_status, repayment_date, sid),
+                (str(pay), str(new_s_outstanding), s_status, repayment_date, sid),
             )
             remaining -= pay
 
@@ -278,25 +278,50 @@ def handle_write_off_loan(conn, args):
         where={"id": loan_id})
     conn.execute(sql, params_u)
 
-    try:
-        from erpclaw_lib.gl_posting import post_gl_entry
-        if loan_account_id:
-            post_gl_entry(conn, {
-                "account_id": bad_debt_account_id,
-                "debit": str(outstanding), "credit": "0",
-                "voucher_type": "Loan Write Off", "voucher_id": wo_id,
-                "company_id": company_id, "posting_date": write_off_date,
-                "remarks": f"Loan write-off: {reason}",
-            })
-            post_gl_entry(conn, {
-                "account_id": loan_account_id,
-                "debit": "0", "credit": str(outstanding),
-                "voucher_type": "Loan Write Off", "voucher_id": wo_id,
-                "company_id": company_id, "posting_date": write_off_date,
-                "remarks": f"Loan write-off: {reason}",
-            })
-    except Exception:
-        pass
+    # GL posting must propagate failures. A swallowed exception here would
+    # leave the loan marked 'written_off' with no offsetting GL entries —
+    # books out of balance, violating the 12-step GL validation rule.
+    # (The prior version imported the wrong symbol post_gl_entry — which
+    # never existed in erpclaw_lib.gl_posting — and swallowed the
+    # resulting ImportError, so loan write-offs were silently producing
+    # zero GL entries the entire time. Fixed to use insert_gl_entries
+    # with cost_center_id (validation step 6) + party_type/party_id on
+    # the receivable side (validation step 5).)
+    from erpclaw_lib.gl_posting import insert_gl_entries
+    from erpclaw_lib.query_helpers import get_default_cost_center
+    if loan_account_id:
+        cost_center_id = get_default_cost_center(conn, company_id)
+        insert_gl_entries(
+            conn,
+            [
+                {
+                    "account_id": bad_debt_account_id,
+                    "debit": str(outstanding),
+                    "credit": "0",
+                    "cost_center_id": cost_center_id,
+                },
+                {
+                    "account_id": loan_account_id,
+                    "debit": "0",
+                    "credit": str(outstanding),
+                    "cost_center_id": cost_center_id,
+                    # loan_account is a 'receivable' type; step 5 requires party.
+                    # loan.applicant_type is one of customer/employee/supplier;
+                    # the GL validator accepts all three for receivable/payable.
+                    "party_type": ld["applicant_type"],
+                    "party_id": ld["applicant_id"],
+                },
+            ],
+            # 'journal_entry' is the catch-all voucher_type per the gl_entry
+            # CHECK constraint — loan write-offs aren't a first-class voucher
+            # type in foundation. Semantic identity is preserved via voucher_id
+            # (points to loan_write_off record) + remarks ("Loan write-off: ...").
+            voucher_type="journal_entry",
+            voucher_id=wo_id,
+            posting_date=write_off_date,
+            company_id=company_id,
+            remarks=f"Loan write-off: {reason}",
+        )
 
     conn.commit()
     return ok({"id": wo_id, "loan_id": loan_id, "write_off_amount": str(outstanding)})

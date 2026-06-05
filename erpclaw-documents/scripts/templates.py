@@ -19,6 +19,66 @@ SKILL = "erpclaw-documents"
 VALID_TEMPLATE_TYPES = (
     "general", "contract", "invoice", "letter", "report", "certificate", "other",
 )
+VALID_TEMPLATE_FORMATS = ("text", "markdown", "html")
+VALID_TEMPLATE_ENGINES = ("legacy_replace", "jinja2")
+
+
+# ---------------------------------------------------------------------------
+# Render engines
+# ---------------------------------------------------------------------------
+def _render_legacy_replace(content, data):
+    """The original naive merge engine: substitute every ``{{key}}`` with its
+    string value. Preserved verbatim for backward-compatibility — a template
+    stored with engine='legacy_replace' must render byte-identically to how it
+    rendered before the S8 engine columns were added. Unmatched placeholders are
+    left in place, exactly as before."""
+    for key, value in data.items():
+        content = content.replace("{{" + key + "}}", str(value))
+    return content
+
+
+def _render_jinja2(content, data, fmt):
+    """Render ``content`` via a SANDBOXED Jinja2 environment.
+
+    autoescape is enabled only for ``html`` output (XSS hardening for
+    user-authored HTML templates); text/markdown render raw. The sandbox blocks
+    access to ``__class__``/``import`` and other unsafe attribute traversal.
+    Raises ``jinja2.TemplateError`` (or a sandbox SecurityError) on bad
+    templates; callers convert that to an err() response.
+    """
+    from jinja2.sandbox import SandboxedEnvironment
+    env = SandboxedEnvironment(autoescape=(fmt == "html"))
+    template = env.from_string(content)
+    # Pass the merge map positionally so arbitrary (non-identifier) JSON keys
+    # are accepted; Jinja2's render does dict(*args, **kwargs) internally.
+    return template.render(data)
+
+
+def _row_get(row, key, default=None):
+    """Read a column from a sqlite3.Row/dict, tolerating its absence.
+
+    Defensive for a DB that predates the S8 engine columns (migration 005 not
+    yet applied): such a row has no 'engine'/'format' key, so we fall back to the
+    backward-compatible defaults rather than raising."""
+    try:
+        val = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if val is None else val
+
+
+def _parse_merge_data(merge_data):
+    """Parse the --merge-data JSON object into a dict. err() on bad input."""
+    if not merge_data:
+        return {}
+    import json
+    try:
+        data = json.loads(merge_data)
+    except (json.JSONDecodeError, TypeError):
+        err("--merge-data must be valid JSON")
+    if not isinstance(data, dict):
+        err("--merge-data must be a JSON object (key/value map)")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -39,26 +99,35 @@ def add_template(conn, args):
     if template_type not in VALID_TEMPLATE_TYPES:
         err(f"Invalid template-type: {template_type}")
 
+    fmt = getattr(args, "format", None) or "text"
+    if fmt not in VALID_TEMPLATE_FORMATS:
+        err(f"Invalid format: {fmt} (expected one of {', '.join(VALID_TEMPLATE_FORMATS)})")
+    engine = getattr(args, "engine", None) or "legacy_replace"
+    if engine not in VALID_TEMPLATE_ENGINES:
+        err(f"Invalid engine: {engine} (expected one of {', '.join(VALID_TEMPLATE_ENGINES)})")
+
     tpl_id = str(uuid.uuid4())
     ns = get_next_name(conn, "document_template", company_id=args.company_id)
 
     conn.execute(
         """INSERT INTO document_template
-           (id, naming_series, name, template_type, content, merge_fields,
-            description, is_active, company_id)
-           VALUES (?,?,?,?,?,?,?,1,?)""",
+           (id, naming_series, name, template_type, content, format, engine,
+            merge_fields, description, is_active, company_id)
+           VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
         (
             tpl_id, ns, args.name, template_type,
-            args.content,
+            args.content, fmt, engine,
             getattr(args, "merge_fields", None),
             getattr(args, "description", None),
             args.company_id,
         ),
     )
     audit(conn, SKILL, "document-add-template", "document_template", tpl_id,
-          new_values={"name": args.name, "naming_series": ns})
+          new_values={"name": args.name, "naming_series": ns,
+                      "format": fmt, "engine": engine})
     conn.commit()
-    ok({"template_id": tpl_id, "naming_series": ns, "template_type": template_type})
+    ok({"template_id": tpl_id, "naming_series": ns, "template_type": template_type,
+        "format": fmt, "engine": engine})
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +163,22 @@ def update_template(conn, args):
         updates.append("template_type = ?")
         params.append(tt)
         changed.append("template_type")
+
+    fmt = getattr(args, "format", None)
+    if fmt is not None:
+        if fmt not in VALID_TEMPLATE_FORMATS:
+            err(f"Invalid format: {fmt} (expected one of {', '.join(VALID_TEMPLATE_FORMATS)})")
+        updates.append("format = ?")
+        params.append(fmt)
+        changed.append("format")
+
+    engine = getattr(args, "engine", None)
+    if engine is not None:
+        if engine not in VALID_TEMPLATE_ENGINES:
+            err(f"Invalid engine: {engine} (expected one of {', '.join(VALID_TEMPLATE_ENGINES)})")
+        updates.append("engine = ?")
+        params.append(engine)
+        changed.append("engine")
 
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
@@ -193,17 +278,23 @@ def generate_from_template(conn, args):
     if not conn.execute(Q.from_(Table("company")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.company_id,)).fetchone():
         err(f"Company {args.company_id} not found")
 
-    # Perform merge field substitution
+    # Perform merge field substitution. Branch on the template's engine:
+    # legacy_replace preserves the original str.replace behavior EXACTLY; jinja2
+    # opts into the sandboxed Jinja2 render. Existing templates default to
+    # legacy_replace (set by the schema), so no behavior change for them.
     content = row["content"]
+    engine = (_row_get(row, "engine") or "legacy_replace")
+    fmt = (_row_get(row, "format") or "text")
     merge_data = getattr(args, "merge_data", None)
     if merge_data:
-        import json
-        try:
-            fields = json.loads(merge_data)
-        except (json.JSONDecodeError, TypeError):
-            err("--merge-data must be valid JSON")
-        for key, value in fields.items():
-            content = content.replace("{{" + key + "}}", str(value))
+        data = _parse_merge_data(merge_data)
+        if engine == "jinja2":
+            try:
+                content = _render_jinja2(content, data, fmt)
+            except Exception as e:  # noqa: BLE001 — surface as a clean err()
+                err(f"Template render failed: {e}")
+        else:
+            content = _render_legacy_replace(content, data)
 
     # Determine document type from template type
     tpl_type = row["template_type"]
@@ -250,14 +341,57 @@ def generate_from_template(conn, args):
 
 
 # ---------------------------------------------------------------------------
+# render-template
+# ---------------------------------------------------------------------------
+def render_template(conn, args):
+    """Render a template's body via SANDBOXED Jinja2 and return the string.
+
+    Pure render: validates the template exists, parses --merge-data, picks the
+    output format (--format override, else the template's stored format), and
+    renders with jinja2.sandbox.SandboxedEnvironment (autoescape ON for html).
+    Does NOT create a document or emit a PDF — PDF is a separate later chunk.
+    """
+    tpl_id = getattr(args, "template_id", None)
+    if not tpl_id:
+        err("--template-id is required")
+
+    row = conn.execute(
+        Q.from_(Table("document_template")).select(Table("document_template").star)
+        .where(Field("id") == P()).get_sql(),
+        (tpl_id,),
+    ).fetchone()
+    if not row:
+        err(f"Template {tpl_id} not found")
+
+    fmt = getattr(args, "format", None) or _row_get(row, "format") or "text"
+    if fmt not in VALID_TEMPLATE_FORMATS:
+        err(f"Invalid format: {fmt} (expected one of {', '.join(VALID_TEMPLATE_FORMATS)})")
+
+    data = _parse_merge_data(getattr(args, "merge_data", None))
+
+    try:
+        rendered = _render_jinja2(row["content"], data, fmt)
+    except Exception as e:  # noqa: BLE001 — surface as a clean err()
+        err(f"Template render failed: {e}")
+
+    ok({
+        "template_id": tpl_id,
+        "template_name": row["name"],
+        "format": fmt,
+        "engine": "jinja2",
+        "rendered": rendered,
+    })
+
+
+# ---------------------------------------------------------------------------
 # status (module status)
 # ---------------------------------------------------------------------------
 def module_status(conn, args):
     ok({
         "skill": SKILL,
-        "version": "1.0.0",
-        "actions_available": 25,
-        "domains": ["documents", "templates"],
+        "version": "1.1.0",
+        "actions_available": 32,
+        "domains": ["documents", "templates", "pdf", "print", "wrappers"],
         "tables": [
             "document", "document_version", "document_tag",
             "document_link", "document_template",
@@ -274,5 +408,6 @@ ACTIONS = {
     "document-get-template": get_template,
     "document-list-templates": list_templates,
     "document-generate-from-template": generate_from_template,
+    "document-render-template": render_template,
     "status": module_status,
 }

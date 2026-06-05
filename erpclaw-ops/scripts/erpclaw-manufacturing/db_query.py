@@ -34,7 +34,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs, now, line_order, rowid_col
     from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
@@ -417,7 +417,7 @@ def add_bom(conn, args):
         bom_t = Table("bom")
         unset_q = (Q.update(bom_t)
                    .set(bom_t.is_default, 0)
-                   .set(bom_t.updated_at, LiteralValue("datetime('now')"))
+                   .set(bom_t.updated_at, now())
                    .where(bom_t.item_id == P())
                    .where(bom_t.company_id == P())
                    .where(bom_t.is_default == 1))
@@ -555,7 +555,7 @@ def update_bom(conn, args):
             bom_t2 = Table("bom")
             unset_def_q = (Q.update(bom_t2)
                            .set(bom_t2.is_default, 0)
-                           .set(bom_t2.updated_at, LiteralValue("datetime('now')"))
+                           .set(bom_t2.updated_at, now())
                            .where(bom_t2.item_id == P())
                            .where(bom_t2.company_id == P())
                            .where(bom_t2.is_default == 1)
@@ -749,7 +749,7 @@ def update_bom(conn, args):
         err("No fields to update")
 
     # raw SQL — dynamic column list built at runtime
-    updates.append("updated_at = datetime('now')")
+    updates.append("updated_at = CAST(CURRENT_TIMESTAMP AS TEXT)")
     params.append(args.bom_id)
     conn.execute(
         f"UPDATE bom SET {', '.join(updates)} WHERE id = ?", params,
@@ -812,7 +812,7 @@ def get_bom(conn, args):
             .left_join(i).on(i.id == bi.item_id)
             .select(bi.star, i.item_code, i.item_name, i.field("stock_uom").as_("item_uom"))
             .where(bi.bom_id == P())
-            .orderby(bi.rowid))
+            .orderby(line_order(bi)))
     items = conn.execute(bi_q.get_sql(), (args.bom_id,)).fetchall()
     data["items"] = [row_to_dict(r) for r in items]
 
@@ -828,7 +828,7 @@ def get_bom(conn, args):
                     w.name.as_("workstation_name"),
                     w.operating_cost_per_hour.as_("ws_hour_rate"))
             .where(bo.bom_id == P())
-            .orderby(bo.sequence, bo.rowid))
+            .orderby(bo.sequence, line_order(bo)))
     operations = conn.execute(bo_q.get_sql(), (args.bom_id,)).fetchall()
     data["operations"] = [row_to_dict(r) for r in operations]
 
@@ -1397,7 +1397,7 @@ def get_work_order(conn, args):
              .left_join(i).on(i.id == woi.item_id)
              .select(woi.star, i.item_code, i.item_name, i.stock_uom)
              .where(woi.work_order_id == P())
-             .orderby(woi.rowid))
+             .orderby(line_order(woi)))
     items = conn.execute(woi_q.get_sql(), (args.work_order_id,)).fetchall()
     data["items"] = [row_to_dict(r) for r in items]
 
@@ -1519,7 +1519,7 @@ def start_work_order(conn, args):
     wo_start_q = (Q.update(wo_t)
                   .set(wo_t.status, ValueWrapper("in_process"))
                   .set(wo_t.actual_start_date, P())
-                  .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                  .set(wo_t.updated_at, now())
                   .where(wo_t.id == P()))
     conn.execute(wo_start_q.get_sql(), (now_str, args.work_order_id))
 
@@ -1766,7 +1766,7 @@ def transfer_materials(conn, args):
         conn.execute(
             """UPDATE work_order_item
                SET transferred_qty = CAST(
-                   (transferred_qty + 0 + ?) AS TEXT)
+                   (CAST(transferred_qty AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)
                WHERE work_order_id = ? AND item_id = ?""",
             (str(round_currency(transfer_qty)), args.work_order_id, item_id),
         )
@@ -1777,7 +1777,7 @@ def transfer_materials(conn, args):
     new_transferred = round_currency(current_transferred + total_material_transferred)
     wo_upd_q = (Q.update(wo_t)
                 .set(wo_t.material_transferred_for_manufacturing, P())
-                .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                .set(wo_t.updated_at, now())
                 .where(wo_t.id == P()))
     conn.execute(wo_upd_q.get_sql(), (str(new_transferred), args.work_order_id))
 
@@ -1785,7 +1785,7 @@ def transfer_materials(conn, args):
     if wo_dict["status"] == "not_started":
         wo_status_q = (Q.update(wo_t)
                        .set(wo_t.status, ValueWrapper("in_process"))
-                       .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                       .set(wo_t.updated_at, now())
                        .where(wo_t.id == P()))
         conn.execute(wo_status_q.get_sql(), (args.work_order_id,))
 
@@ -1937,7 +1937,7 @@ def complete_job_card(conn, args):
                     .set(jc_t.total_time_in_minutes, P())
                     .set(jc_t.time_completed, P())
                     .set(jc_t.completed_qty, P())
-                    .set(jc_t.updated_at, LiteralValue("datetime('now')"))
+                    .set(jc_t.updated_at, now())
                     .where(jc_t.id == P()))
         conn.execute(jc_upd_q.get_sql(), (time_mins, now_str, completed_qty, args.job_card_id))
     else:
@@ -1945,7 +1945,7 @@ def complete_job_card(conn, args):
                     .set(jc_t.status, ValueWrapper("completed"))
                     .set(jc_t.total_time_in_minutes, P())
                     .set(jc_t.time_completed, P())
-                    .set(jc_t.updated_at, LiteralValue("datetime('now')"))
+                    .set(jc_t.updated_at, now())
                     .where(jc_t.id == P()))
         conn.execute(jc_upd_q.get_sql(), (time_mins, now_str, args.job_card_id))
 
@@ -2209,7 +2209,7 @@ def complete_work_order(conn, args):
                          .set(wo_t.produced_qty, P())
                          .set(wo_t.status, ValueWrapper("completed"))
                          .set(wo_t.actual_end_date, P())
-                         .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                         .set(wo_t.updated_at, now())
                          .where(wo_t.id == P()))
         conn.execute(
             wo_complete_q.get_sql(),
@@ -2220,7 +2220,7 @@ def complete_work_order(conn, args):
     else:
         wo_partial_q = (Q.update(wo_t)
                         .set(wo_t.produced_qty, P())
-                        .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                        .set(wo_t.updated_at, now())
                         .where(wo_t.id == P()))
         conn.execute(
             wo_partial_q.get_sql(),
@@ -2349,7 +2349,7 @@ def cancel_work_order(conn, args):
     # Set WO status to cancelled
     wo_cancel_q = (Q.update(wo_t)
                    .set(wo_t.status, ValueWrapper("cancelled"))
-                   .set(wo_t.updated_at, LiteralValue("datetime('now')"))
+                   .set(wo_t.updated_at, now())
                    .where(wo_t.id == P()))
     conn.execute(wo_cancel_q.get_sql(), (args.work_order_id,))
 
@@ -2357,7 +2357,7 @@ def cancel_work_order(conn, args):
     jc_t = Table("job_card")
     jc_cancel_q = (Q.update(jc_t)
                    .set(jc_t.status, ValueWrapper("cancelled"))
-                   .set(jc_t.updated_at, LiteralValue("datetime('now')"))
+                   .set(jc_t.updated_at, now())
                    .where(jc_t.work_order_id == P())
                    .where(jc_t.status.isin(["open", "in_process"])))
     conn.execute(jc_cancel_q.get_sql(), (args.work_order_id,))
@@ -2652,7 +2652,7 @@ def run_mrp(conn, args):
                    JOIN purchase_order po ON po.id = poi.purchase_order_id
                    WHERE poi.item_id = ?
                      AND po.status NOT IN ('cancelled', 'closed')
-                     AND poi.qty + 0 > poi.received_qty + 0""",
+                     AND CAST(poi.qty AS NUMERIC) > CAST(poi.received_qty AS NUMERIC)""",
                 (item_id,),
             ).fetchone()
             if po_row and po_row["pending"]:
@@ -2696,7 +2696,7 @@ def run_mrp(conn, args):
     # Update plan status
     pp_upd_q = (Q.update(pp_t)
                 .set(pp_t.status, ValueWrapper("submitted"))
-                .set(pp_t.updated_at, LiteralValue("datetime('now')"))
+                .set(pp_t.updated_at, now())
                 .where(pp_t.id == P()))
     conn.execute(pp_upd_q.get_sql(), (args.production_plan_id,))
 
@@ -2746,7 +2746,7 @@ def get_production_plan(conn, args):
              .select(ppi.star, i.item_code, i.item_name,
                      b.naming_series.as_("bom_naming_series"))
              .where(ppi.production_plan_id == P())
-             .orderby(ppi.rowid))
+             .orderby(line_order(ppi)))
     items = conn.execute(ppi_q.get_sql(), (args.production_plan_id,)).fetchall()
     data["items"] = [row_to_dict(r) for r in items]
 
@@ -2757,7 +2757,7 @@ def get_production_plan(conn, args):
              .left_join(i2).on(i2.id == ppm.item_id)
              .select(ppm.star, i2.item_code, i2.item_name, i2.stock_uom)
              .where(ppm.production_plan_id == P())
-             .orderby(ppm.rowid))
+             .orderby(line_order(ppm)))
     materials = conn.execute(ppm_q.get_sql(), (args.production_plan_id,)).fetchall()
     data["materials"] = [row_to_dict(r) for r in materials]
 
@@ -2928,13 +2928,13 @@ def generate_purchase_requests(conn, args):
     # Feature #9: Only include items with procurement_type 'purchase' or 'both'
     # raw SQL — arithmetic comparison (shortfall_qty + 0 > 0)
     materials = conn.execute(
-        """SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
+        f"""SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
            FROM production_plan_material ppm
            LEFT JOIN item i ON i.id = ppm.item_id
            WHERE ppm.production_plan_id = ?
-             AND ppm.shortfall_qty + 0 > 0
+             AND CAST(ppm.shortfall_qty AS NUMERIC) > 0
              AND ppm.procurement_type IN ('purchase', 'both')
-           ORDER BY ppm.rowid""",
+           ORDER BY {rowid_col("ppm.")}""",
         (args.production_plan_id,),
     ).fetchall()
 
@@ -2956,13 +2956,13 @@ def generate_purchase_requests(conn, args):
 
     # Also fetch manufacture-type items for informational purposes
     mfg_materials = conn.execute(
-        """SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
+        f"""SELECT ppm.*, i.item_code, i.item_name, i.stock_uom
            FROM production_plan_material ppm
            LEFT JOIN item i ON i.id = ppm.item_id
            WHERE ppm.production_plan_id = ?
-             AND ppm.shortfall_qty + 0 > 0
+             AND CAST(ppm.shortfall_qty AS NUMERIC) > 0
              AND ppm.procurement_type IN ('manufacture', 'both')
-           ORDER BY ppm.rowid""",
+           ORDER BY {rowid_col("ppm.")}""",
         (args.production_plan_id,),
     ).fetchall()
 
@@ -3420,7 +3420,7 @@ def update_item_procurement_type(conn, args):
     i_t = Table("item")
     upd_q = (Q.update(i_t)
              .set(i_t.default_procurement_type, P())
-             .set(i_t.updated_at, LiteralValue("datetime('now')"))
+             .set(i_t.updated_at, now())
              .where(i_t.id == P()))
     conn.execute(upd_q.get_sql(), (args.procurement_type, args.item_id))
 
