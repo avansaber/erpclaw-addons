@@ -1,6 +1,6 @@
 ---
 name: erpclaw-ops
-version: 2.0.0
+version: 2.0.1
 description: >
   Operations suite for ERPClaw. Manufacturing (BOMs, work orders, MRP),
   advanced manufacturing (shop floor, tools, ECOs, recipes),
