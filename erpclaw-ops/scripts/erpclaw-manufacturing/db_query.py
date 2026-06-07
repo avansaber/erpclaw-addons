@@ -1732,14 +1732,18 @@ def transfer_materials(conn, args):
     sle_dicts = [row_to_dict(r) for r in sle_rows]
 
     # Create perpetual inventory GL entries
-    gl_entries = create_perpetual_inventory_gl(
-        conn, sle_dicts,
-        voucher_type="work_order",
-        voucher_id=args.work_order_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        cost_center_id=cost_center_id,
-    )
+    try:
+        gl_entries = create_perpetual_inventory_gl(
+            conn, sle_dicts,
+            voucher_type="work_order",
+            voucher_id=args.work_order_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            cost_center_id=cost_center_id,
+        )
+    except (ValueError, NotImplementedError) as e:
+        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+        err(f"GL posting failed: {e}")
 
     gl_ids = []
     if gl_entries:
@@ -2171,14 +2175,18 @@ def complete_work_order(conn, args):
     sle_dicts = [row_to_dict(r) for r in sle_rows]
 
     # Create perpetual inventory GL entries
-    gl_entries = create_perpetual_inventory_gl(
-        conn, sle_dicts,
-        voucher_type="work_order",
-        voucher_id=completion_voucher_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        cost_center_id=cost_center_id,
-    )
+    try:
+        gl_entries = create_perpetual_inventory_gl(
+            conn, sle_dicts,
+            voucher_type="work_order",
+            voucher_id=completion_voucher_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            cost_center_id=cost_center_id,
+        )
+    except (ValueError, NotImplementedError) as e:
+        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+        err(f"GL posting failed: {e}")
 
     gl_ids = []
     if gl_entries:
