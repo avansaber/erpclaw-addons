@@ -31,7 +31,7 @@ OAuth tokens are forwarded once to your ERPClaw during pairing and deleted from 
 CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis. <!-- SYNC:value:module.erpclaw-growth.actions -->110<!-- /SYNC --> actions across 4 sub-modules: CRM, CRM Advanced, Analytics, AI Engine.
 
 ### Operations Suite (`erpclaw-ops`)
-Manufacturing (BOMs, work orders, MRP), advanced manufacturing (shop floor, tools, ECOs), projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal), quality (inspections, NCRs), and support (issues, SLAs, warranty). <!-- SYNC:value:module.erpclaw-ops.actions -->126<!-- /SYNC --> actions across 6 sub-modules.
+Manufacturing (BOMs, work orders, MRP), advanced manufacturing (shop floor, tools, ECOs), projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal), quality (inspections, NCRs), and support (issues, SLAs, warranty). <!-- SYNC:value:module.erpclaw-ops.actions -->135<!-- /SYNC --> actions across 6 sub-modules.
 
 ### Integration Connectors (`erpclaw-integrations`)
 Connector configs, field mappings, sync logs, and webhook registrations for booking, delivery, real estate, financial, and productivity platforms. <!-- SYNC:value:module.erpclaw-integrations.actions -->80<!-- /SYNC --> actions across 9 domains. (For Stripe and Shopify, use the dedicated deep-integration modules above.)

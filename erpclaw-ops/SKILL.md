@@ -1,11 +1,11 @@
 ---
 name: erpclaw-ops
-version: 2.0.1
+version: 2.1.0
 description: >
   Operations suite for ERPClaw. Manufacturing (BOMs, work orders, MRP),
   advanced manufacturing (shop floor, tools, ECOs, recipes),
   projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal),
-  quality (inspections, NCRs), and support (issues, SLAs, warranty). 126 actions
+  quality (inspections, NCRs), and support (issues, SLAs, warranty). 135 actions
   across 6 domains with immutable audit trail.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
@@ -155,7 +155,7 @@ Tool lifecycle: new -> good -> worn -> needs_repair -> scrapped. ECO workflow: d
 | `project-profitability` / `gantt-data` / `resource-utilization` | Reports |
 | `status` | Projects dashboard |
 
-### Assets (16 actions)
+### Assets (25 actions)
 
 | Action | Description |
 |--------|-------------|
@@ -164,12 +164,21 @@ Tool lifecycle: new -> good -> worn -> needs_repair -> scrapped. ECO workflow: d
 | `generate-depreciation-schedule` | Calculate monthly depreciation entries |
 | `post-depreciation` / `run-depreciation` | Post GL entries (DR Depreciation Expense, CR Accumulated Depreciation) |
 | `record-asset-movement` | Track location/custodian transfers |
-| `schedule-maintenance` / `complete-maintenance` | Asset maintenance lifecycle |
+| `schedule-maintenance` / `complete-maintenance` | Asset maintenance lifecycle; `--is-capex` capitalizes the cost into the asset (DR Asset / CR Cash) + recomputes depreciation, else expenses it |
 | `dispose-asset` | Sell or scrap with gain/loss GL posting |
+| `impair-asset` / `reverse-impairment` | Write down to recoverable amount (DR Impairment Loss / CR Accumulated Impairment); reverse = mirror GL + restore book value |
+| `capitalize-asset` | Initial recognition from a purchase cost (DR Fixed Asset / CR source account) |
+| `revalue-asset` | Upward/downward revaluation (Asset vs Revaluation Reserve) + depreciation recompute |
+| `add-cwip` | Start a construction-in-progress asset (status `under_construction`, zero value); optional `--project-id` for per-project roll-up |
+| `accumulate-cwip-cost` | Add a cost to a CWIP asset (DR CWIP account / CR source); tags `gl_entry.project_id`; bumps carrying value. Costs may also arrive via the `--cwip-asset-id` hooks on the purchase-invoice / journal-entry actions in erpclaw-buying / erpclaw-journals (S3/AVA-43, same accumulation row) |
+| `transfer-cwip-to-asset` | Capitalize a finished CWIP asset to `in_use` (DR Fixed Asset / CR CWIP) + generate the depreciation schedule from the transfer date; optional `--final-additional-cost` |
+| `cancel-cwip` | Cancel before transfer = reverse every accumulation (mirror GL) + status `cancelled`. Rejected if any cost came from a submitted purchase invoice / journal entry (the `--cwip-asset-id` hooks) — cancel those documents instead |
+| `list-cwip-projects` | List in-progress CWIP assets with cumulative cost |
 | `asset-register-report` / `depreciation-summary` | Reports |
 | `status` | Assets dashboard |
 
 Depreciation methods: straight_line, written_down_value, double_declining.
+CWIP lifecycle: `under_construction` → accumulate costs → `in_use` (transfer) or `cancelled`.
 
 ### Quality (14 actions)
 

@@ -62,7 +62,7 @@ ACTION_MAP = {
     "gantt-data": "erpclaw-projects",
     "resource-utilization": "erpclaw-projects",
 
-    # === Assets (16 actions) ===
+    # === Assets (25 actions) ===
     "add-asset-category": "erpclaw-assets",
     "list-asset-categories": "erpclaw-assets",
     "add-asset": "erpclaw-assets",
@@ -76,6 +76,18 @@ ACTION_MAP = {
     "schedule-maintenance": "erpclaw-assets",
     "complete-maintenance": "erpclaw-assets",
     "dispose-asset": "erpclaw-assets",
+    # M7 asset-depth (drive-by: these shipped in AVA-39 but were never added to
+    # the router ACTION_MAP, so they were unreachable via the unified CLI).
+    "impair-asset": "erpclaw-assets",
+    "reverse-impairment": "erpclaw-assets",
+    "capitalize-asset": "erpclaw-assets",
+    "revalue-asset": "erpclaw-assets",
+    # S3 CWIP (construction-in-progress)
+    "add-cwip": "erpclaw-assets",
+    "accumulate-cwip-cost": "erpclaw-assets",
+    "transfer-cwip-to-asset": "erpclaw-assets",
+    "cancel-cwip": "erpclaw-assets",
+    "list-cwip-projects": "erpclaw-assets",
     "asset-register-report": "erpclaw-assets",
     "depreciation-summary": "erpclaw-assets",
 

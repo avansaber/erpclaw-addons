@@ -202,6 +202,28 @@ def ns(**kwargs) -> argparse.Namespace:
         "disposal_method": None,
         "sale_amount": None,
         "buyer_details": None,
+        # M7 asset depth
+        "impairment_id": None,
+        "impairment_amount": None,
+        "recoverable_amount": None,
+        "impairment_date": None,
+        "capitalized_amount": None,
+        "capitalization_date": None,
+        "source_account_id": None,
+        "new_value": None,
+        "reserve_account_id": None,
+        "revaluation_date": None,
+        "is_capex": None,
+        "cash_account_id": None,
+        "expense_account_id": None,
+        # S3 CWIP
+        "project_id": None,
+        "amount": None,
+        "cwip_account_id": None,
+        "source_voucher_type": None,
+        "source_voucher_id": None,
+        "notes": None,
+        "final_additional_cost": None,
         # Reports
         "as_of_date": None,
         # Filters
@@ -271,7 +293,7 @@ def seed_naming_series(conn, company_id: str):
 
 
 def seed_account(conn, company_id: str, name="Test Account",
-                 account_type="asset", root_type="Asset") -> str:
+                 account_type="asset", root_type="asset") -> str:
     """Insert a test account and return its ID."""
     aid = _uuid()
     conn.execute(
@@ -317,6 +339,46 @@ def seed_asset(conn, company_id: str, category_id: str,
     return aid
 
 
+def wire_category_accounts(conn, category_id: str, company_id: str) -> dict:
+    """Attach asset / depreciation / accumulated-depreciation accounts to a
+    category and return their IDs (needed for any GL-posting action)."""
+    asset_acct = seed_account(conn, company_id, "Fixed Asset", "asset", "asset")
+    dep_acct = seed_account(conn, company_id, "Depreciation Expense", "expense", "expense")
+    accum_acct = seed_account(conn, company_id, "Accum Depreciation", "asset", "asset")
+    conn.execute(
+        """UPDATE asset_category SET asset_account_id = ?,
+           depreciation_account_id = ?, accumulated_depreciation_account_id = ?
+           WHERE id = ?""",
+        (asset_acct, dep_acct, accum_acct, category_id))
+    conn.commit()
+    return {"asset_account_id": asset_acct, "depreciation_account_id": dep_acct,
+            "accumulated_depreciation_account_id": accum_acct}
+
+
+def seed_fiscal_year(conn, company_id, name="FY2026", start="2026-01-01", end="2026-12-31"):
+    """Seed an open fiscal year so GL postings resolve a fiscal_year."""
+    conn.execute(
+        """INSERT INTO fiscal_year (id, name, start_date, end_date, is_closed, company_id)
+           VALUES (?, ?, ?, ?, 0, ?)""",
+        (_uuid(), f"{name}-{company_id[:6]}", start, end, company_id))
+    conn.commit()
+
+
+def seed_cost_center(conn, company_id: str, name="Main CC") -> str:
+    """Seed a non-group cost center (GL Step 6 requires one for P&L legs)."""
+    ccid = _uuid()
+    conn.execute(
+        "INSERT INTO cost_center (id, name, company_id, is_group) VALUES (?, ?, ?, 0)",
+        (ccid, f"{name} {ccid[:6]}", company_id))
+    conn.commit()
+    return ccid
+
+
+def set_asset_status(conn, asset_id: str, status: str):
+    conn.execute("UPDATE asset SET status = ? WHERE id = ?", (status, asset_id))
+    conn.commit()
+
+
 def build_env(conn) -> dict:
     """Create a complete assets test environment.
 
@@ -332,3 +394,20 @@ def build_env(conn) -> dict:
         "category_id": cat_id,
         "asset_id": asset_id,
     }
+
+
+def build_gl_env(conn) -> dict:
+    """Full environment for GL-posting M7 tests: company, naming, fiscal year,
+    a category with accounts, plus an in_use asset (book value 5000)."""
+    cid = seed_company(conn)
+    seed_naming_series(conn, cid)
+    seed_fiscal_year(conn, cid)
+    cc_id = seed_cost_center(conn, cid)
+    cat_id = seed_asset_category(conn, cid)
+    accts = wire_category_accounts(conn, cat_id, cid)
+    asset_id = seed_asset(conn, cid, cat_id, gross_value="5000.00")
+    set_asset_status(conn, asset_id, "in_use")
+    env = {"company_id": cid, "category_id": cat_id, "asset_id": asset_id,
+           "cost_center_id": cc_id}
+    env.update(accts)
+    return env
