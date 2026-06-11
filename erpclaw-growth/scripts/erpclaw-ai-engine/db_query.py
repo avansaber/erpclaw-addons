@@ -46,6 +46,8 @@ VALID_ANOMALY_TYPES = {
     "round_number", "ghost_employee", "vendor_concentration",
     "sequence_violation", "benford_deviation", "budget_overrun",
     "inventory_shrinkage", "payment_pattern_shift",
+    # Wave 1 AI1: asset book-value invariant + dimension-tagging consistency
+    "asset_book_value_drift", "dimension_tag_drift",
 }
 
 VALID_SEVERITY = {"info", "warning", "critical"}
@@ -1190,6 +1192,103 @@ def detect_anomalies(conn, args):
                         new_anomalies.append(aid)
                         by_type["volume_change"] = by_type.get("volume_change", 0) + 1
                         by_severity[severity] = by_severity.get(severity, 0) + 1
+
+    # --- Heuristic 6: asset_book_value_drift (AI1) ---
+    # Accounting invariant: current_book_value == gross_value − accumulated_depreciation.
+    # A material deviation signals an unexplained book-value spike/drop. Point-in-time
+    # state check (assets carry no posting_date), so it ignores the date window.
+    ast = Table("asset")
+    q = (Q.from_(ast)
+         .select(ast.id, ast.asset_name, ast.gross_value,
+                 ast.accumulated_depreciation, ast.current_book_value)
+         .where(ast.company_id == P())
+         .where(ast.status.notin([P(), P()])))
+    assets = conn.execute(
+        q.get_sql(), (company_id, 'draft', 'under_construction')).fetchall()
+
+    for a_row in assets:
+        ad = row_to_dict(a_row)
+        gross = to_decimal(str(ad["gross_value"] or "0"))
+        accum = to_decimal(str(ad["accumulated_depreciation"] or "0"))
+        actual_bv = to_decimal(str(ad["current_book_value"] or "0"))
+        expected_bv = gross - accum
+        if expected_bv <= 0:
+            # Fully depreciated / draft-like values carry no meaningful invariant.
+            continue
+        deviation = (abs(actual_bv - expected_bv) / expected_bv
+                     * Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if deviation > Decimal("5"):
+            severity = "critical" if deviation > Decimal("25") else "warning"
+            aid = _insert_anomaly(
+                conn, "asset_book_value_drift", severity,
+                "asset", ad["id"],
+                f"Asset book value ${actual_bv} drifts {deviation}% from expected "
+                f"${expected_bv} (gross ${gross} − accumulated depreciation ${accum})",
+                {"company_id": company_id, "asset_id": ad["id"],
+                 "asset_name": ad["asset_name"]},
+                baseline={"expected_book_value": str(expected_bv)},
+                actual={"current_book_value": str(actual_bv)},
+                deviation_pct=str(deviation),
+            )
+            if aid:
+                new_anomalies.append(aid)
+                by_type["asset_book_value_drift"] = by_type.get("asset_book_value_drift", 0) + 1
+                by_severity[severity] = by_severity.get(severity, 0) + 1
+
+    # --- Heuristic 7: dimension_tag_drift (AI1, reads dimensions_json — M6) ---
+    # Within an account_type, dimension tagging should be consistent. If a key
+    # appears on some entries but is omitted on others (partial coverage), flag it.
+    # Grouping/parsing is done in Python (no JSON SQL / GROUP BY), so it is dialect-safe.
+    tag_rows = conn.execute(
+        """SELECT a.account_type AS account_type, g.dimensions_json AS dims
+           FROM gl_entry g
+           JOIN account a ON g.account_id = a.id
+           WHERE a.company_id = ?
+             AND g.posting_date >= ? AND g.posting_date <= ?
+             AND g.is_cancelled = 0""",
+        (company_id, from_date, to_date),
+    ).fetchall()
+
+    # account_type -> {"total": n, "keys": {dimension_key: present_count}}
+    tag_stats = {}
+    for tr in tag_rows:
+        t = row_to_dict(tr)
+        acct_type = t["account_type"] or "unknown"
+        stat = tag_stats.setdefault(acct_type, {"total": 0, "keys": {}})
+        stat["total"] += 1
+        try:
+            dims = json.loads(t["dims"]) if t["dims"] else {}
+        except (json.JSONDecodeError, TypeError):
+            dims = {}
+        if isinstance(dims, dict):
+            for k, v in dims.items():
+                if v is not None and v != "":
+                    stat["keys"][k] = stat["keys"].get(k, 0) + 1
+
+    MIN_TAG_ENTRIES = 3  # too few entries to judge a consistent convention
+    for acct_type, stat in sorted(tag_stats.items()):
+        total = stat["total"]
+        if total < MIN_TAG_ENTRIES:
+            continue
+        for key in sorted(stat["keys"]):
+            present = stat["keys"][key]
+            if 0 < present < total:  # partial coverage == inconsistent tagging
+                coverage = (Decimal(present) / Decimal(total) * Decimal("100")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+                aid = _insert_anomaly(
+                    conn, "dimension_tag_drift", "warning",
+                    "account_type", f"{company_id}:{acct_type}:{key}",
+                    f"Inconsistent '{key}' dimension tagging on {acct_type} entries: "
+                    f"{present} of {total} tagged ({coverage}%)",
+                    {"company_id": company_id, "account_type": acct_type,
+                     "dimension_key": key, "tagged_count": present,
+                     "total_count": total},
+                    deviation_pct=str(coverage),
+                )
+                if aid:
+                    new_anomalies.append(aid)
+                    by_type["dimension_tag_drift"] = by_type.get("dimension_tag_drift", 0) + 1
+                    by_severity["warning"] = by_severity.get("warning", 0) + 1
 
     conn.commit()
     ok({

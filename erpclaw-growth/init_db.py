@@ -387,7 +387,8 @@ def create_crmadv_tables(db_path=None):
                                 'consumption_spike','late_pattern','round_number',
                                 'ghost_employee','vendor_concentration',
                                 'sequence_violation','benford_deviation','budget_overrun',
-                                'inventory_shrinkage','payment_pattern_shift'
+                                'inventory_shrinkage','payment_pattern_shift',
+                                'asset_book_value_drift','dimension_tag_drift'
                             )),
             severity        TEXT NOT NULL DEFAULT 'info'
                             CHECK(severity IN ('info','warning','critical')),

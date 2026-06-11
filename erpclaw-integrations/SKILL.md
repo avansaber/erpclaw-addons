@@ -1,6 +1,6 @@
 ---
 name: erpclaw-integrations
-version: 2.0.0
+version: 2.1.0
 description: Integration Connectors -- manage connector configs, field mappings, sync logs, webhook registrations, and platform-specific connectors for booking, delivery, real estate, financial, and productivity platforms. 80 actions across 9 domains. Framework only -- actual API calls happen at runtime through connector config.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
@@ -191,9 +191,40 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `integration-sync-volume-report` | `--company-id` | |
 | `integration-error-rate-report` | `--company-id` | |
 
+### Bank Statements — Import + Matching (M2) (11 actions)
+File-import path (OFX / CAMT.053 / MT940 / BAI2) + matching engine. Owns
+`bank_statement`, `bank_statement_line`, `bank_match_rule`. Plaid stub
+(Financial Connectors above) is the separate API-feed path, untouched.
+
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `integration-import-bank-statement` | `--file` and (`--bank-account-name` or `--bank-account-id`) | `--company --company-id --format` (auto\|ofx\|camt053\|mt940\|bai2) |
+| `integration-list-bank-statements` | | `--company-id --bank-account-id --limit --offset` |
+| `integration-get-bank-statement` | `--statement-id` | |
+| `integration-archive-bank-statement` | `--statement-id` | |
+| `integration-add-bank-match-rule` | `--name --match-field --match-operator --match-value --target-action` | `--company --company-id --target-id --priority` |
+| `integration-list-bank-match-rules` | | `--company-id --is-active` |
+| `integration-auto-match-bank-statement` | `--statement-id` | |
+| `integration-manual-match-bank-line` | `--line-id --target-action` | `--target-id` |
+| `integration-clear-bank-line-match` | `--line-id` | |
+| `integration-unmatched-bank-lines` | | `--statement-id --bank-account-id --limit --offset` |
+| `integration-bank-reconciliation-summary` | `--bank-account-name` or `--bank-account-id` | `--company --company-id --as-of` |
+
+`--match-field`: `description` \| `counterparty_name` \| `reference` \| `amount`.
+`--match-operator`: `equals` \| `contains` \| `regex` \| `amount_range` (value
+`min:max`). `--target-action`: `map_to_account` \| `map_to_vendor` \|
+`map_to_customer` \| `ignore`. The bank account is resolved by name within the
+company (ADR-0015); a named-but-missing account hard-errors and never falls
+through to another account. Re-importing a file is idempotent (duplicate lines
+skipped via the `external_id` UNIQUE).
+
 ### Quick Command Reference
 | User Says | Action |
 |-----------|--------|
+| "Import my bank statement for Checking" | `integration-import-bank-statement` with `--file --bank-account-name "Checking"` |
+| "Auto-match the statement" | `integration-auto-match-bank-statement` |
+| "Show unmatched bank lines" | `integration-unmatched-bank-lines` |
+| "Reconcile the bank account" | `integration-bank-reconciliation-summary` |
 | "Connect to Shopify" | `integration-add-connector` with `--platform shopify` |
 | "Set up API key" | `integration-add-connector-credential` |
 | "Map fields" | `integration-add-field-mapping` |
@@ -209,9 +240,9 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 
 ## Technical Details (Tier 3)
 
-**Tables owned (17):** integration_connector, integration_credential, integration_webhook, integration_sync, integration_sync_schedule, integration_field_mapping, integration_entity_map, integration_transform_rule, integration_sync_error, connv2_booking_connector, connv2_booking_sync_log, connv2_delivery_connector, connv2_delivery_order, connv2_realestate_connector, connv2_realestate_lead, connv2_financial_connector, connv2_productivity_connector
+**Tables owned (20):** integration_connector, integration_credential, integration_webhook, integration_sync, integration_sync_schedule, integration_field_mapping, integration_entity_map, integration_transform_rule, integration_sync_error, connv2_booking_connector, connv2_booking_sync_log, connv2_delivery_connector, connv2_delivery_order, connv2_realestate_connector, connv2_realestate_lead, connv2_financial_connector, connv2_productivity_connector, bank_statement, bank_statement_line, bank_match_rule (M2 — defined in the foundation schema, written only here)
 
-**Script:** `scripts/db_query.py` routes to 9 domain modules: connectors.py, sync.py, mappings.py, booking.py, delivery.py, realestate.py, financial.py, productivity.py, connv2_reports.py
+**Script:** `scripts/db_query.py` routes to 10 domain modules: connectors.py, sync.py, mappings.py, booking.py, delivery.py, realestate.py, financial.py, productivity.py, connv2_reports.py, bank.py (+ `parsers/` for ofx/camt053/mt940/bai2)
 
 **Data conventions:** Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601), Booleans = INTEGER (0/1)
 

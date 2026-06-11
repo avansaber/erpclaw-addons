@@ -254,6 +254,53 @@ def seed_gl_entries(conn, company_id: str, accounts: dict):
     conn.commit()
 
 
+def seed_asset_category(conn, company_id: str, name="Equipment") -> str:
+    """Insert an asset_category and return its ID."""
+    acid = _uuid()
+    conn.execute(
+        """INSERT INTO asset_category (id, name, depreciation_method,
+           useful_life_years, company_id)
+           VALUES (?, ?, 'straight_line', 5, ?)""",
+        (acid, f"{name} {acid[:6]}", company_id),
+    )
+    conn.commit()
+    return acid
+
+
+def seed_asset(conn, company_id: str, asset_category_id: str, *,
+               gross_value: str, accumulated_depreciation: str,
+               current_book_value: str, status: str = "in_use",
+               name: str = "Server") -> str:
+    """Insert an asset row with explicit book-value figures. Returns asset ID."""
+    aid = _uuid()
+    conn.execute(
+        """INSERT INTO asset (id, asset_name, asset_category_id, gross_value,
+           salvage_value, accumulated_depreciation, current_book_value,
+           status, company_id)
+           VALUES (?, ?, ?, ?, '0', ?, ?, ?, ?)""",
+        (aid, f"{name} {aid[:6]}", asset_category_id, gross_value,
+         accumulated_depreciation, current_book_value, status, company_id),
+    )
+    conn.commit()
+    return aid
+
+
+def seed_gl_with_dimensions(conn, company_id: str, account_id: str,
+                            dimensions_list: list):
+    """Seed one GL entry per entry in dimensions_list (a list of dicts) on the
+    given account. Each dict is serialized into gl_entry.dimensions_json; pass
+    ``{}`` for an untagged entry. Posting date is fixed inside 2026-Q1."""
+    for i, dims in enumerate(dimensions_list):
+        conn.execute(
+            """INSERT INTO gl_entry (id, posting_date, account_id, debit, credit,
+               voucher_type, voucher_id, is_cancelled, dimensions_json)
+               VALUES (?, ?, ?, ?, '0', 'journal_entry', ?, 0, ?)""",
+            (_uuid(), f"2026-02-{(i % 27) + 1:02d}", account_id,
+             str(1000 + i), _uuid(), json.dumps(dims)),
+        )
+    conn.commit()
+
+
 def build_env(conn) -> dict:
     """Create a full AI engine test environment with GL data."""
     cid = seed_company(conn)
