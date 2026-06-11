@@ -13,7 +13,10 @@ _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from ai_helpers import call_action, ns, is_ok, is_error, load_db_query, _uuid
+from ai_helpers import (
+    call_action, ns, is_ok, is_error, load_db_query, _uuid,
+    seed_asset_category, seed_asset, seed_gl_with_dimensions,
+)
 
 MOD = load_db_query()
 
@@ -422,3 +425,95 @@ class TestStatusAction:
         ))
         assert is_ok(r)
         assert "ai_engine" in r or "status" in r or "tables" in r
+
+
+# ===========================================================================
+# AI1 — asset_book_value_drift + dimension_tag_drift  (Wave 1)
+# ===========================================================================
+
+class TestAI1AssetBookValueDrift:
+    def _detect(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id,
+            from_date="2026-01-01", to_date="2026-03-31",
+        ))
+
+    def test_book_value_spike_raises(self, conn, env):
+        """An asset whose book value far exceeds gross - accumulated raises
+        asset_book_value_drift."""
+        cat = seed_asset_category(conn, env["company_id"])
+        # gross 10000, accumulated 4000 => expected book 6000; actual 25000 spike
+        seed_asset(conn, env["company_id"], cat,
+                   gross_value="10000", accumulated_depreciation="4000",
+                   current_book_value="25000")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("asset_book_value_drift", 0) >= 1
+
+        rows = call_action(MOD.list_anomalies, conn, ns(
+            company_id=env["company_id"], severity=None,
+            status=None, limit="50", offset="0",
+        ))
+        types = {a["anomaly_type"] for a in rows["anomalies"]}
+        assert "asset_book_value_drift" in types
+
+    def test_clean_asset_no_drift(self, conn, env):
+        """NEGATIVE CONTROL: book value == gross - accumulated must NOT fire."""
+        cat = seed_asset_category(conn, env["company_id"])
+        seed_asset(conn, env["company_id"], cat,
+                   gross_value="10000", accumulated_depreciation="4000",
+                   current_book_value="6000")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("asset_book_value_drift", 0) == 0
+
+
+class TestAI1DimensionTagDrift:
+    def _detect(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id,
+            from_date="2026-01-01", to_date="2026-03-31",
+        ))
+
+    def test_inconsistent_tagging_raises(self, conn, env):
+        """An account_type batch where some entries carry a dimension key and
+        others omit it raises dimension_tag_drift."""
+        acct = env["accounts"]["expense"]
+        seed_gl_with_dimensions(conn, env["company_id"], acct, [
+            {"department": _uuid()},
+            {"department": _uuid()},
+            {"department": _uuid()},
+            {},   # untagged — the drift
+            {},
+        ])
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("dimension_tag_drift", 0) >= 1
+
+        rows = call_action(MOD.list_anomalies, conn, ns(
+            company_id=env["company_id"], severity=None,
+            status=None, limit="50", offset="0",
+        ))
+        types = {a["anomaly_type"] for a in rows["anomalies"]}
+        assert "dimension_tag_drift" in types
+
+    def test_consistent_tagging_no_drift(self, conn, env):
+        """NEGATIVE CONTROL: a batch all consistently tagged must NOT fire."""
+        acct = env["accounts"]["expense"]
+        dept = _uuid()
+        seed_gl_with_dimensions(conn, env["company_id"], acct, [
+            {"department": dept},
+            {"department": dept},
+            {"department": dept},
+            {"department": dept},
+        ])
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("dimension_tag_drift", 0) == 0
+
+    def test_all_untagged_no_drift(self, conn, env):
+        """NEGATIVE CONTROL: a batch with no dimensions at all must NOT fire
+        (the default seed_gl_entries data is untagged)."""
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("dimension_tag_drift", 0) == 0

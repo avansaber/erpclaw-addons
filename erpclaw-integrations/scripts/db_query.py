@@ -41,6 +41,7 @@ from realestate import ACTIONS as REALESTATE_ACTIONS
 from financial import ACTIONS as FINANCIAL_ACTIONS
 from productivity import ACTIONS as PRODUCTIVITY_ACTIONS
 from connv2_reports import ACTIONS as CONNV2_REPORTS_ACTIONS
+from bank import ACTIONS as BANK_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -60,6 +61,7 @@ ACTIONS.update(PRODUCTIVITY_ACTIONS)
 # Remove "status" from connv2_reports before merging to avoid overwriting existing status
 connv2_reports_filtered = {k: v for k, v in CONNV2_REPORTS_ACTIONS.items() if k != "status"}
 ACTIONS.update(connv2_reports_filtered)
+ACTIONS.update(BANK_ACTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,25 @@ def main():
     parser.add_argument("--sync-calendar")
     parser.add_argument("--sync-contacts")
     parser.add_argument("--sync-files")
+
+    # -- Bank statement import + matching domain (M2) --
+    parser.add_argument("--company", dest="company_name")  # ADR-0015 name resolution
+    parser.add_argument("--file")
+    parser.add_argument("--format")
+    parser.add_argument("--bank-account-id")
+    parser.add_argument("--bank-account-name")
+    parser.add_argument("--statement-id")
+    parser.add_argument("--line-id")
+    parser.add_argument("--rule-id")
+    # --rule-name already declared above in the Transform rule domain (shared dest=rule_name); reused by M2 matching rules
+    parser.add_argument("--match-field")
+    parser.add_argument("--match-operator")
+    parser.add_argument("--match-value")
+    parser.add_argument("--target-action")
+    parser.add_argument("--target-id")
+    parser.add_argument("--priority")
+    parser.add_argument("--as-of")
+    parser.add_argument("--user-id")
 
     args = parser.parse_args()
     action = args.action
