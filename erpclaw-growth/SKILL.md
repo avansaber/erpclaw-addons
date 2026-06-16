@@ -1,11 +1,12 @@
 ---
 name: erpclaw-growth
-version: 2.1.0
+version: 2.6.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module
-  analytics, and AI-powered business analysis for ERPClaw. 120 actions across 4 domains:
-  lead management, opportunity pipeline, email campaigns, territories, contracts, automation,
-  KPI dashboards, anomaly detection, cash flow forecasting, and relationship scoring.
+  analytics, and AI-powered business analysis for ERPClaw. 135 actions across 4 domains: lead
+  management, opportunity pipeline, saved views, global search, CSV import/export, email
+  campaigns, territories, contracts, automation, KPI dashboards, anomaly detection, cash flow
+  forecasting, and relationship scoring.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -26,15 +27,13 @@ the full CRM pipeline (leads, opportunities, campaigns, activities), advanced ma
 (assignments, quotas, performance), contract lifecycle (obligations, renewal, termination),
 marketing automation (workflows, lead scoring, nurture sequences), compute cross-module KPIs
 and financial ratios, and run AI-powered analysis (anomaly detection, cash flow forecasting,
-relationship scoring, business rules). All data lives in a single local SQLite database.
-Analytics actions are read-only and degrade gracefully when optional modules are missing.
+relationship scoring, business rules). All data lives in a single local SQLite database; Analytics actions are read-only and degrade gracefully when optional modules are missing.
 
 ## Security Model
 
-- **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **Fully offline by default**: No telemetry, no cloud dependencies
+- **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`. Fully offline by default (no telemetry, no cloud dependencies)
 - **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
-- **SQL injection safe**: All queries use parameterized statements
+- **SQL injection safe**: All queries use parameterized statements; the saved-view filter-JSON DSL whitelists columns + operators and binds every value
 - **Internal routing only**: All actions routed through a single entry point to domain scripts within this package. CRM's convert-to-quotation action invokes erpclaw-selling through the shared library
 
 ### Skill Activation Triggers
@@ -45,8 +44,7 @@ analysis, expense breakdown, ABC analysis, inventory turnover, anomaly, suspicio
 cash flow forecast, business rule, relationship score, customer health, scenario analysis,
 executive dashboard, company scorecard, what-if analysis, trend, correlation, email campaign,
 territory, territory quota, contract, contract obligation, renewal, automation workflow,
-lead scoring, nurture sequence, marketing automation, campaign ROI, funnel analysis,
-pipeline velocity, win-loss analysis, marketing dashboard.
+lead scoring, nurture sequence, marketing automation, campaign ROI, funnel analysis, pipeline velocity, win-loss analysis, marketing dashboard, saved view, saved search.
 
 ### Setup
 
@@ -77,7 +75,6 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 ```
 --action detect-anomalies --company-id <id> --from-date 2026-01-01 --to-date 2026-03-06
 --action forecast-cash-flow --company-id <id> --horizon-days 30
---action score-relationship --party-type customer --party-id <id>
 ```
 
 ## All Actions (Tier 2)
@@ -89,7 +86,7 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `add-lead` | `--lead-name` | `--company-name`, `--email`, `--phone`, `--source`, `--territory`, `--industry`, `--assigned-to`, `--notes` |
 | `update-lead` | `--lead-id` | `--lead-name`, `--company-name`, `--email`, `--phone`, `--source`, `--territory`, `--industry`, `--status`, `--assigned-to`, `--notes` |
 | `get-lead` | `--lead-id` | |
-| `list-leads` | | `--status`, `--source`, `--search`, `--limit`, `--offset` |
+| `list-leads` | | `--status`, `--source`, `--search`, `--saved-view-id`, `--limit`, `--offset` |
 | `convert-lead-to-opportunity` | `--lead-id`, `--opportunity-name` | `--expected-revenue`, `--probability`, `--opportunity-type`, `--expected-closing-date` |
 
 ### CRM — Opportunities (7 actions)
@@ -99,7 +96,7 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `add-opportunity` | `--opportunity-name` | `--lead-id`, `--customer-id`, `--opportunity-type`, `--expected-revenue`, `--probability`, `--expected-closing-date`, `--assigned-to` |
 | `update-opportunity` | `--opportunity-id` | `--opportunity-name`, `--stage`, `--probability`, `--expected-revenue`, `--expected-closing-date`, `--assigned-to`, `--next-follow-up-date` |
 | `get-opportunity` | `--opportunity-id` | |
-| `list-opportunities` | | `--stage`, `--search`, `--limit`, `--offset` |
+| `list-opportunities` | | `--stage`, `--search`, `--saved-view-id`, `--limit`, `--offset` |
 | `convert-opportunity-to-quotation` | `--opportunity-id`, `--items` (JSON) | |
 | `mark-opportunity-won` | `--opportunity-id` | |
 | `mark-opportunity-lost` | `--opportunity-id`, `--lost-reason` | |
@@ -120,7 +117,23 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `pipeline-report` | | `--stage`, `--from-date`, `--to-date` |
+| `pipeline-report` | | `--stage`, `--from-date`, `--to-date` (Wave 1B F3: dual-path — groups by custom pipeline + stage when `pipeline_stage_id` set, else legacy stage text) |
+
+### CRM — Contacts & Companies (12 actions)
+
+Separate Contact (person) + Company (org) entities; full flags/rules in `scripts/erpclaw-crm/references/crm_contacts.md`. Contacts: `add-crm-contact`, `update-crm-contact`, `get-crm-contact`, `list-crm-contacts`, `remove-crm-contact`. Companies: `add-crm-company`, `update-crm-company`, `get-crm-company`, `list-crm-companies`. Association + lifecycle: `link-contact-to-company`, `merge-crm-contacts` (single-txn FK reassign), `promote-contact-to-customer` (cross-skill add-customer, rollback on failure). `email`/`domain` are UNIQUE case-insensitively per company; `--revenue` is TEXT Decimal.
+
+### CRM — Tasks (8 actions)
+
+First-class tasks (status/priority/due-date lifecycle) tied to any CRM entity; full flags/rules in `scripts/erpclaw-crm/references/crm_tasks.md`. Lifecycle: `add-crm-task` (collision-safe name; `--link-to "<type>:<id>"` repeatable, runtime existence-checked, atomic), `update-crm-task`, `get-crm-task`, `list-crm-tasks` (`--status`/`--priority`/`--overdue`/`--due-within-days`/`--linked-to`), `complete-crm-task` (rejects on already-done), `cancel-crm-task`. Links: `link-task-to-entity`, `unlink-task-from-entity` (entity types: lead/opportunity/customer/crm_contact/crm_company). `crm_activity` is not replaced.
+
+### CRM — Pipeline Stages (6 actions)
+
+Customizable sales pipelines; full flags/rules in `scripts/erpclaw-crm/references/crm_pipelines.md`. The hardcoded `opportunity.stage` CHECK was displaced (foundation migration 024); stages live in `crm_pipeline`/`crm_pipeline_stage` and a nullable opaque FK `opportunity.pipeline_stage_id` (ADR-0023). A default "Standard Sales" 7-stage pipeline is seeded. Actions: `add-crm-pipeline` (`--set-as-default`), `add-crm-pipeline-stage` (`--order`/`--terminal won|lost`/`--probability`/`--shift-existing`; stage_order collision + terminal uniqueness enforced), `update-crm-pipeline-stage`, `list-crm-pipelines` (with `stage_count`), `list-crm-pipeline-stages`, `set-opportunity-pipeline-stage` (cross-pipeline transitions blocked). `update-opportunity --stage X`/`mark-opportunity-won`/`mark-opportunity-lost` dual-write the resolved `pipeline_stage_id`; backward-compat preserved (legacy `stage` text still works, zero-pipeline opps still report).
+
+### CRM — Saved Views (6) + Global Search (1) + CSV Import/Export (8)
+
+Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules + the DSL spec in `scripts/erpclaw-crm/references/crm_saved_views.md`. Actions: `add-crm-saved-view` (`--name`/`--entity-type`/`--filter-json` + `--sort-json`/`--group-by-json`/`--column-order-json`/`--is-shared`/`--owner-user-id`), `update-crm-saved-view`, `get-crm-saved-view`, `list-crm-saved-views` (`--entity-type`/`--owner-user-id`/`--shared-only`), `delete-crm-saved-view` (owner-only hard delete), `apply-saved-view --view <id>`. The filter-JSON is validated at save AND apply against the entity's column whitelist (native columns + UDF field names) + the operator whitelist (`eq/neq/contains/gt/lt/in/between`); values are always bound parameters (no SQL injection), nesting is depth-capped. `list-leads`/`list-opportunities`/`list-crm-contacts`/`list-crm-companies` take `--saved-view-id` to replay a view; the foundation-owned `customer` entity routes through `apply-saved-view` (Option A — calls `list-customers`, post-filters in Python; no flag added to `list-customers`). Shared views (`is_shared=1`) are readable by everyone in the company; only the owner may update or delete a view that has an owner. **Global search (Wave 1B F5; full rules in `scripts/erpclaw-crm/references/crm_global_search.md`):** `global-crm-search` (`--query Q [--limit N] [--entity-types CSV]`) fans one query out over lead/opportunity/customer/crm_contact/crm_company (V1 default; `customer` is a foundation READ), 3-pass ranked match (exact rank 1, prefix rank 2, contains rank 3), merged into a flat list `[{entity_type,id,display_name,snippet,updated_at,match_rank}]` sorted by `match_rank` asc then `updated_at` desc; min 2-char query, hard cap 200, an entity type whose table is absent (e.g. `crm_task` pre-F2) skips gracefully via `table_exists`. **CSV import/export (Wave 1B F6):** bulk load + extract the 4 main CRM entities; full flags/rules in `scripts/erpclaw-crm/references/crm_csv_import_export.md`. Import: `import-leads`, `import-opportunities`, `import-crm-contacts`, `import-crm-companies` — each takes `--file <path.csv>` + a **required** `--on-duplicate {skip|update|fail}` (no default; explicit intent). Path is realpath-gated + `.csv`-only. Dedup keys: lead/contact `email` (case-insensitive per company), company `domain` (case-insensitive); opportunity has no natural key (every row inserts). The whole import runs in one transaction (rolls back on `fail`/error). Money columns (`opportunity.expected_revenue`, `crm_company.annual_revenue`) are Decimal-validated; bad enum/email/number rejects before any write. Export: `export-leads`, `export-opportunities`, `export-crm-contacts`, `export-crm-companies` — `--output <path.csv>` (overwrite, never append; UTF-8-sig), simple `--status`/`--stage`/`--lifecycle` filters (pre-F4), `--include-udfs` appends `cf_<name>` columns when M1 custom-field data exists. An export → re-import (`--on-duplicate skip`) round-trip is a no-op. XLSX is deferred (M11/Wave 4).
 
 ### CRM Advanced — Email Campaigns (12 actions)
 
@@ -261,25 +274,21 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 
 ### Confirmation Requirements
 
-Confirm before: `convert-opportunity-to-quotation`, `evaluate-business-rules`, `mark-opportunity-won`/`lost`, `convert-lead-to-opportunity`, `send-campaign`, `terminate-contract`, `activate-workflow`/`deactivate-workflow`. All other actions run immediately.
+Confirm before: `convert-opportunity-to-quotation`, `evaluate-business-rules`, `mark-opportunity-won`/`lost`, `convert-lead-to-opportunity`, `send-campaign`, `terminate-contract`, `activate-workflow`/`deactivate-workflow`, `merge-crm-contacts`, `promote-contact-to-customer`. All other actions run immediately.
 
-### Graceful Degradation
+### Graceful Degradation & Response Formatting
 
-Analytics degrade gracefully when optional modules are missing. AI and CRM actions work independently.
-
-### Response Formatting
-
-Currency: `$X,XXX.XX` (negatives in parentheses). Ratios: 2dp. Percentages: 1dp with %. Dates: `Mon DD, YYYY`. Use markdown tables for tabular output.
+Analytics degrade gracefully when optional modules are missing; AI and CRM actions work independently. Currency: `$X,XXX.XX` (negatives in parentheses). Ratios: 2dp. Percentages: 1dp with %. Dates: `Mon DD, YYYY`. Use markdown tables for tabular output.
 
 ## Technical Details (Tier 3)
 
 ### Architecture
 - **Router**: `scripts/db_query.py` dispatches to 4 domain scripts (crm, analytics, ai-engine, crm-adv)
-- **Domains**: crm (18 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
+- **Domains**: crm (44 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
 - **Database**: Single SQLite at `~/.openclaw/erpclaw/data.sqlite` (shared with erpclaw)
 
-### Tables Owned (32)
-CRM: lead_source, lead, opportunity, campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence, crmadv_drip_sequence, crmadv_drip_sequence_step, crmadv_drip_enrollment. Analytics: none (read-only).
+### Tables Owned (39)
+CRM (Wave 1B F1, growth-owned): crm_contact, crm_company, crm_contact_role. CRM (Wave 1B F2, growth-owned): crm_task, crm_task_link. CRM (Wave 1B F3, growth-owned): crm_pipeline, crm_pipeline_stage. CRM (Wave 1B F4, growth-owned): crm_saved_view. CRM (foundation-owned, read here): lead_source, lead, opportunity (writes opportunity.pipeline_stage_id per ADR-0023), campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence, crmadv_drip_sequence, crmadv_drip_sequence_step, crmadv_drip_enrollment. Analytics: none (read-only).
 
 ### Data Conventions
 Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601). CRM naming series: `LEAD-{YEAR}-{SEQ}`, `OPP-{YEAR}-{SEQ}`. CRM-Adv naming series: `EMCAMP-{YEAR}-{SEQ}`, `TERR-{YEAR}-{SEQ}`, `CTR-{YEAR}-{SEQ}`, `AWFL-{YEAR}-{SEQ}`, `ANUR-{YEAR}-{SEQ}`. GL entries and stock ledger entries are immutable. All queries use parameterized statements.

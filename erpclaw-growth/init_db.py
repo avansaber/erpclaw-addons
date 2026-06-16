@@ -22,6 +22,57 @@ REQUIRED_FOUNDATION = [
     "company", "naming_series", "audit_log",
 ]
 
+# Wave 1B F3 — default "Standard Sales" pipeline seed. Kept in sync with
+# migrations/003_crm_pipelines.py and foundation migration 024.
+# (stage_order, name, is_terminal_won, is_terminal_lost, default_probability)
+DEFAULT_PIPELINE_NAME = "Standard Sales"
+DEFAULT_PIPELINE_STAGES = [
+    (1, "new", 0, 0, "0"),
+    (2, "contacted", 0, 0, "10"),
+    (3, "qualified", 0, 0, "25"),
+    (4, "proposal_sent", 0, 0, "50"),
+    (5, "negotiation", 0, 0, "75"),
+    (6, "won", 1, 0, "100"),
+    (7, "lost", 0, 1, "0"),
+]
+
+
+def _seed_default_pipeline(conn):
+    """Seed the default 7-stage 'Standard Sales' pipeline if no default exists.
+
+    Idempotent. Used by both create_crmadv_tables() (fresh installs) and growth
+    migration 003 (existing installs) so they converge. TEXT uuid4 ids;
+    default_probability is TEXT-Decimal.
+    """
+    import uuid
+    existing = conn.execute(
+        "SELECT id FROM crm_pipeline WHERE is_default = 1 LIMIT 1"
+    ).fetchone()
+    if existing:
+        return existing[0]
+    named = conn.execute(
+        "SELECT id FROM crm_pipeline WHERE name = ? LIMIT 1", (DEFAULT_PIPELINE_NAME,)
+    ).fetchone()
+    if named:
+        return named[0]
+
+    pipeline_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO crm_pipeline (id, name, description, is_default, is_active) "
+        "VALUES (?, ?, ?, 1, 1)",
+        (pipeline_id, DEFAULT_PIPELINE_NAME,
+         "Default sales pipeline (the original 7 hardcoded opportunity stages)"),
+    )
+    for order_no, name, won, lost, prob in DEFAULT_PIPELINE_STAGES:
+        conn.execute(
+            "INSERT INTO crm_pipeline_stage "
+            "(id, crm_pipeline_id, stage_order, name, is_terminal_won, "
+            " is_terminal_lost, default_probability, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (str(uuid.uuid4()), pipeline_id, order_no, name, won, lost, prob),
+        )
+    return pipeline_id
+
 
 def create_crmadv_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
@@ -371,6 +422,248 @@ def create_crmadv_tables(db_path=None):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_contact ON crmadv_drip_enrollment(contact_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_status_send ON crmadv_drip_enrollment(status, next_send_at)")
     indexes_created += 3
+
+    # ==================================================================
+    # CONTACT + COMPANY MODEL (Wave 1B F1)
+    # crm_contact / crm_company / crm_contact_role. Person + Org entities
+    # that the foundation lead/opportunity/customer/crm_activity tables point
+    # at via the nullable FK columns added in foundation migration 023
+    # (ADR-0023). Growth is the sole writer of both these tables and those
+    # foundation FK columns.
+    # ==================================================================
+
+    # crm_company — Org entity (defined before crm_contact: contact FKs company)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_company (
+            id                 TEXT PRIMARY KEY,
+            name               TEXT NOT NULL,
+            domain             TEXT,
+            industry           TEXT,
+            employee_count     INTEGER,
+            annual_revenue     TEXT,
+            address_line1      TEXT,
+            address_line2      TEXT,
+            city               TEXT,
+            state              TEXT,
+            postal_code        TEXT,
+            country            TEXT,
+            linkedin_url       TEXT,
+            lifecycle          TEXT NOT NULL DEFAULT 'prospect'
+                               CHECK(lifecycle IN ('prospect','customer','partner','vendor','other')),
+            linked_customer_id TEXT REFERENCES customer(id) ON DELETE SET NULL,
+            assigned_to_user_id TEXT,
+            notes              TEXT,
+            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_company ON crm_company(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_lifecycle ON crm_company(lifecycle)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_linked_customer ON crm_company(linked_customer_id)")
+    # domain UNIQUE where not NULL (case-insensitive): partial unique index on lower(domain)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_company_domain ON crm_company(company_id, lower(domain)) WHERE domain IS NOT NULL")
+    indexes_created += 4
+
+    # crm_contact — Person entity
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_contact (
+            id                 TEXT PRIMARY KEY,
+            name               TEXT NOT NULL,
+            email              TEXT,
+            phone              TEXT,
+            mobile             TEXT,
+            job_title          TEXT,
+            linkedin_url       TEXT,
+            address_line1      TEXT,
+            address_line2      TEXT,
+            city               TEXT,
+            state              TEXT,
+            postal_code        TEXT,
+            country            TEXT,
+            lifecycle          TEXT NOT NULL DEFAULT 'lead'
+                               CHECK(lifecycle IN ('lead','mql','sql','customer','other')),
+            crm_company_id     TEXT REFERENCES crm_company(id) ON DELETE SET NULL,
+            assigned_to_user_id TEXT,
+            notes              TEXT,
+            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_company ON crm_contact(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_crm_company ON crm_contact(crm_company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_lifecycle ON crm_contact(lifecycle)")
+    # email UNIQUE where not NULL, case-insensitive: partial unique index on lower(email)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_contact_email ON crm_contact(company_id, lower(email)) WHERE email IS NOT NULL")
+    indexes_created += 4
+
+    # crm_contact_role — many-to-many: a person can work at multiple companies
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_contact_role (
+            id                 TEXT PRIMARY KEY,
+            crm_contact_id     TEXT NOT NULL REFERENCES crm_contact(id) ON DELETE CASCADE,
+            crm_company_id     TEXT NOT NULL REFERENCES crm_company(id) ON DELETE CASCADE,
+            role_title         TEXT,
+            is_primary         INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0,1)),
+            started_at         TEXT,
+            ended_at           TEXT,
+            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_role_contact ON crm_contact_role(crm_contact_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_role_company ON crm_contact_role(crm_company_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_contact_role ON crm_contact_role(crm_contact_id, crm_company_id)")
+    indexes_created += 3
+
+    # ==================================================================
+    # TASKS — FIRST-CLASS ENTITY (Wave 1B F2)
+    # crm_task / crm_task_link. A richer task row than crm_activity
+    # (status / priority / due_date lifecycle); crm_task_link is the
+    # many-to-many tie to any CRM entity (lead / opportunity / customer /
+    # crm_contact / crm_company). crm_activity is NOT replaced — legacy
+    # activity_type='task' rows stay valid. Growth-owned.
+    # ==================================================================
+
+    # crm_task — first-class task entity
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_task (
+            id                  TEXT PRIMARY KEY,
+            subject             TEXT NOT NULL,
+            description         TEXT,
+            status              TEXT NOT NULL DEFAULT 'open'
+                                CHECK(status IN ('open','in_progress','done','cancelled')),
+            priority            TEXT NOT NULL DEFAULT 'medium'
+                                CHECK(priority IN ('low','medium','high','urgent')),
+            due_date            TEXT,
+            assigned_to_user_id TEXT,
+            created_by_user_id  TEXT,
+            completed_at        TEXT,
+            cancel_reason       TEXT,
+            linked_count        INTEGER NOT NULL DEFAULT 0,
+            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_company ON crm_task(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_status ON crm_task(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_assigned ON crm_task(assigned_to_user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_due ON crm_task(due_date)")
+    indexes_created += 4
+
+    # crm_task_link — many-to-many: a task can attach to any CRM entity
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_task_link (
+            id                 TEXT PRIMARY KEY,
+            crm_task_id        TEXT NOT NULL REFERENCES crm_task(id) ON DELETE CASCADE,
+            linked_entity_type TEXT NOT NULL
+                               CHECK(linked_entity_type IN ('lead','opportunity','customer','crm_contact','crm_company')),
+            linked_entity_id   TEXT NOT NULL,
+            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_link_task ON crm_task_link(crm_task_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_link_entity ON crm_task_link(linked_entity_type, linked_entity_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_task_link ON crm_task_link(crm_task_id, linked_entity_type, linked_entity_id)")
+    indexes_created += 3
+
+    # ==================================================================
+    # Wave 1B F3 — Pipeline stages (customizable). crm_pipeline /
+    # crm_pipeline_stage (growth-owned). Foundation opportunity carries a
+    # nullable opaque FK column pipeline_stage_id -> crm_pipeline_stage (ADR-0023;
+    # growth is the SOLE writer of that column). The hardcoded opportunity.stage
+    # CHECK is dropped in foundation migration 024; the legacy `stage` text column
+    # stays for backward-compat (dual-path pipeline-report). A default
+    # "Standard Sales" 7-stage pipeline is seeded below so existing opportunity
+    # rows have somewhere to point. Pipelines are catalog rows (no company_id) —
+    # shared across the install, like a chart-of-accounts template.
+    # ==================================================================
+
+    # crm_pipeline — pipeline definition
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_pipeline (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            description TEXT,
+            is_default  INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+            is_active   INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_name ON crm_pipeline(lower(name))")
+    indexes_created += 1
+
+    # crm_pipeline_stage — ordered stage within a pipeline
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_pipeline_stage (
+            id                  TEXT PRIMARY KEY,
+            crm_pipeline_id     TEXT NOT NULL REFERENCES crm_pipeline(id) ON DELETE CASCADE,
+            stage_order         INTEGER NOT NULL,
+            name                TEXT NOT NULL,
+            is_terminal_won     INTEGER NOT NULL DEFAULT 0 CHECK(is_terminal_won IN (0,1)),
+            is_terminal_lost    INTEGER NOT NULL DEFAULT 0 CHECK(is_terminal_lost IN (0,1)),
+            default_probability TEXT NOT NULL DEFAULT '0',
+            is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_pipeline_stage_pipeline ON crm_pipeline_stage(crm_pipeline_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_stage_order ON crm_pipeline_stage(crm_pipeline_id, stage_order)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_stage_name ON crm_pipeline_stage(crm_pipeline_id, lower(name))")
+    indexes_created += 3
+
+    # Seed the default "Standard Sales" 7-stage pipeline (matches migration 024's
+    # DEFAULT_PIPELINE_STAGES). Idempotent: only seed when no default pipeline exists.
+    _seed_default_pipeline(conn)
+
+    # ==================================================================
+    # Wave 1B F4 — Saved views (filter-JSON DSL + persistence). crm_saved_view
+    # (growth-owned). A persisted, named view over one CRM entity: a bounded
+    # filter-JSON (operator + column whitelist, validated at SAVE-time, never
+    # interpolated into SQL) plus optional sort / group-by / column-order JSON.
+    # company_id is NOT NULL (multi-company-safe; matches every other company-scoped
+    # growth table — DECISION #2, Wave 1B plan). is_shared 0/1: a shared view is
+    # readable by every user in the company; only the owner may update or delete it.
+    # entity_type is CHECK-bounded over the 6 supported CRM entities. No FK on the
+    # opaque list-side (the view simply filters whatever list-<entity> returns).
+    # ==================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_saved_view (
+            id                TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            entity_type       TEXT NOT NULL
+                              CHECK(entity_type IN ('lead','opportunity','customer',
+                                                    'crm_contact','crm_company','crm_task')),
+            owner_user_id     TEXT,
+            is_shared         INTEGER NOT NULL DEFAULT 0 CHECK(is_shared IN (0,1)),
+            filter_json       TEXT,
+            sort_json         TEXT,
+            group_by_json     TEXT,
+            column_order_json TEXT,
+            company_id        TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
+            created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tables_created += 1
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_company ON crm_saved_view(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_entity ON crm_saved_view(entity_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_owner ON crm_saved_view(owner_user_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_saved_view_name "
+                 "ON crm_saved_view(company_id, owner_user_id, lower(name))")
+    indexes_created += 4
 
     # ==================================================================
     # AI ENGINE / ANALYTICS TABLES (moved from core init_schema.py)
