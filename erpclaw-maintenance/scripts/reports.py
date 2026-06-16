@@ -9,7 +9,7 @@ import sys
 import sqlite3
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order
 

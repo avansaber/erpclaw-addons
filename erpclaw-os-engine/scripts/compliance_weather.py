@@ -17,7 +17,7 @@ import sqlite3
 import time
 from datetime import datetime, date
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
 # How many days before fiscal year end to activate year_end_close mode
 YEAR_END_CLOSE_DAYS = 45

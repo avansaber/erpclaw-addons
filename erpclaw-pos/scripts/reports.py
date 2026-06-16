@@ -10,7 +10,7 @@ import sys
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 

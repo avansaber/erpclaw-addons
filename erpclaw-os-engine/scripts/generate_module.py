@@ -219,10 +219,10 @@ Run: python3 init_db.py [db_path]
 import os
 import sqlite3
 import sys
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "{display_name}"
 
 REQUIRED_FOUNDATION = [
@@ -297,7 +297,7 @@ def _generate_domain_module(module_name, prefix, display_name, entities, busines
         'from decimal import Decimal',
         '',
         'try:',
-        '    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))',
+        '    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))',
         '    from erpclaw_lib.db import get_connection',
         '    from erpclaw_lib.decimal_utils import to_decimal, round_currency',
         '    from erpclaw_lib.response import ok, err, row_to_dict',
@@ -753,7 +753,7 @@ import os
 import sys
 
 # Shared library
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 # Domain module (same directory)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 

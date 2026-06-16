@@ -12,7 +12,7 @@ import uuid
 from decimal import Decimal
 
 try:
-    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict, rows_to_list
     from erpclaw_lib.audit import audit

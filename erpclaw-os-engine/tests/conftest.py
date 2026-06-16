@@ -32,7 +32,7 @@ def temp_module_dir(tmp_path):
     (module_dir / "init_db.py").write_text(textwrap.dedent("""\
         import os, sqlite3, sys
 
-        DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+        DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
         def init_schema(db_path=None):
             db_path = db_path or DEFAULT_DB_PATH
@@ -70,7 +70,7 @@ def temp_module_dir(tmp_path):
     (scripts_dir / "db_query.py").write_text(textwrap.dedent("""\
         #!/usr/bin/env python3
         import os, sys, json
-        sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
         from erpclaw_lib.response import ok, err
         from erpclaw_lib.args import SafeArgumentParser
 
@@ -192,7 +192,7 @@ def violation_module(tmp_path):
         # Base db_query.py (valid)
         db_query = textwrap.dedent("""\
             import os, sys, json
-            sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+            sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
             from erpclaw_lib.response import ok, err
 
             def main():
@@ -271,7 +271,7 @@ def violation_module(tmp_path):
             # INSERT/UPDATE/DELETE targeting a table not owned by the module
             db_query = textwrap.dedent("""\
                 import os, sys, json, sqlite3
-                sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+                sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
                 from erpclaw_lib.response import ok, err
 
                 def add_thing(conn):
@@ -287,7 +287,7 @@ def violation_module(tmp_path):
             # Direct INSERT INTO gl_entry
             db_query = textwrap.dedent("""\
                 import os, sys, json, sqlite3
-                sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+                sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
                 from erpclaw_lib.response import ok, err
 
                 def post_entries(conn):
@@ -345,7 +345,7 @@ def violation_module(tmp_path):
             # Hardcoded password/API key in code
             db_query = textwrap.dedent("""\
                 import os, sys, json
-                sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+                sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
                 from erpclaw_lib.response import ok, err
 
                 password = "SuperSecret123!"

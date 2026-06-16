@@ -24,7 +24,7 @@ def isolated_credentials(tmp_path, monkeypatch):
     to a per-test tmp dir, then seeds a fixture Stripe credential. No
     test touches the real ~/.config/erpclaw/.
     """
-    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     import erpclaw_lib.credentials as creds_mod
     import erpclaw_lib.master_key as mk_mod
 

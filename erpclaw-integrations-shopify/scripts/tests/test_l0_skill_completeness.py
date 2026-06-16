@@ -35,7 +35,7 @@ META_ACTIONS = {"status"}
 
 @pytest.fixture(scope="module")
 def router_actions():
-    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     sys.path.insert(0, SCRIPTS_DIR)
     from accounts import ACTIONS as A
     from sync import ACTIONS as S

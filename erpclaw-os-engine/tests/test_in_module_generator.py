@@ -73,7 +73,7 @@ def temp_db_query(tmp_path):
         from datetime import datetime, timezone
         from decimal import Decimal, InvalidOperation
 
-        sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
         from erpclaw_lib.response import ok, err
         from erpclaw_lib.query import Q, P, Table, Field, dynamic_update
 
@@ -128,7 +128,7 @@ def temp_module_dir(tmp_path):
         import sys
         import json
 
-        sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
         from erpclaw_lib.response import ok, err
         from erpclaw_lib.query import Q, P, Table, Field, dynamic_update
 

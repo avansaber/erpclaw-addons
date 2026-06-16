@@ -12,7 +12,7 @@ import argparse
 import os
 import sqlite3
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 _DROP_ORDER = [
     "plaid_transaction", "plaid_linked_account",
     "stripe_payment_intent", "stripe_webhook_event", "s3_backup_record",

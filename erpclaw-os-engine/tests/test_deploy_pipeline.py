@@ -24,7 +24,7 @@ FOUNDATION_OS_DIR = os.path.abspath(FOUNDATION_OS_DIR)
 if FOUNDATION_OS_DIR not in sys.path:
     sys.path.insert(0, FOUNDATION_OS_DIR)
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.db import setup_pragmas
 
 from deploy_pipeline import run_pipeline, handle_deploy_module
@@ -88,7 +88,7 @@ A test module.
     (mod_dir / "init_db.py").write_text('''#!/usr/bin/env python3
 """TestClaw schema."""
 import sqlite3, sys, os
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 def create_module_tables(db_path=None):
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path)
