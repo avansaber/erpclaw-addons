@@ -17,7 +17,7 @@ OS_DIR = os.path.dirname(SCRIPT_DIR)
 if OS_DIR not in sys.path:
     sys.path.insert(0, OS_DIR)
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.db import setup_pragmas
 
 from semantic_engine import (

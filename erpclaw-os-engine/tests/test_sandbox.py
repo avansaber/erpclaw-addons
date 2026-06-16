@@ -610,7 +610,7 @@ class TestSandboxRunner:
         # Write the inline test as a separate file for clarity
         gl_test_code = '''
 import sqlite3, os, sys, uuid
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.db import setup_pragmas
 
 def test_gl_insert():

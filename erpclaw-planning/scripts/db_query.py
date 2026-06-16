@@ -10,7 +10,7 @@ import os
 import sys
 
 # Shared library
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 # Domain modules (same directory)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 

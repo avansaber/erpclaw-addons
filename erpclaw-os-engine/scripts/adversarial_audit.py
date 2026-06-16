@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
 
 # ---------------------------------------------------------------------------

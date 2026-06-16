@@ -8,7 +8,7 @@ import re
 import sys
 import uuid
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit

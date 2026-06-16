@@ -39,7 +39,7 @@ if _HERE not in sys.path:
 from dispatcher import dispatch_command
 from shopify_helpers import decrypt_token
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DEFAULT_WORKER_URL = "https://shopify.erpclaw.ai"
 BACKOFF_SEQUENCE = [1, 2, 4, 8, 15]  # seconds
 CONNECT_TIMEOUT = 10

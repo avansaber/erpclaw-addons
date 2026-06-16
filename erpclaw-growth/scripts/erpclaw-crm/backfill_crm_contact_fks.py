@@ -30,7 +30,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.db import get_connection, DEFAULT_DB_PATH
 from erpclaw_lib.audit import audit
 

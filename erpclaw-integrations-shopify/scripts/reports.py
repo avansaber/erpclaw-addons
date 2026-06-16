@@ -10,7 +10,7 @@ import sys
 from decimal import Decimal, ROUND_HALF_UP
 
 try:
-    sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.decimal_utils import to_decimal, round_currency, amounts_equal
     from erpclaw_lib.gl_posting import get_account_balance
     from erpclaw_lib.response import ok, err, row_to_dict

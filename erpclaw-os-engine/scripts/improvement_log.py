@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 
 # Add shared lib to path
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.pagination import paginate

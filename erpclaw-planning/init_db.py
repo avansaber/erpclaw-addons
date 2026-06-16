@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 
-DB_PATH = os.environ.get("ERPCLAW_DB_PATH", os.path.expanduser("~/.openclaw/erpclaw/data.sqlite"))
+DB_PATH = os.environ.get("ERPCLAW_DB_PATH", os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite"))
 
 
 def init_planning_schema(db_path: str = DB_PATH) -> dict:

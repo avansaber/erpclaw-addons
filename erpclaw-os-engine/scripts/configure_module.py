@@ -18,7 +18,7 @@ import sys
 import uuid
 
 # Add shared lib to path
-sys.path.insert(0, os.path.expanduser("~/.openclaw/erpclaw/lib"))
+sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 # Import industry configs (same package)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +42,7 @@ def _get_connection(db_path=None):
             os.environ.pop("ERPCLAW_DB_PATH", None)
         return conn
     except ImportError:
-        path = db_path or os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
+        path = db_path or os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
         from erpclaw_lib.db import setup_pragmas as _sp
