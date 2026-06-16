@@ -35,6 +35,59 @@ ACTION_MAP = {
     "list-activities": "erpclaw-crm",
     "pipeline-report": "erpclaw-crm",
 
+    # === CRM — Contacts & Companies (Wave 1B F1, 12 actions) ===
+    "add-crm-contact": "erpclaw-crm",
+    "update-crm-contact": "erpclaw-crm",
+    "get-crm-contact": "erpclaw-crm",
+    "list-crm-contacts": "erpclaw-crm",
+    "remove-crm-contact": "erpclaw-crm",
+    "add-crm-company": "erpclaw-crm",
+    "update-crm-company": "erpclaw-crm",
+    "get-crm-company": "erpclaw-crm",
+    "list-crm-companies": "erpclaw-crm",
+    "link-contact-to-company": "erpclaw-crm",
+    "merge-crm-contacts": "erpclaw-crm",
+    "promote-contact-to-customer": "erpclaw-crm",
+
+    # === CRM — Tasks (Wave 1B F2, 8 actions) ===
+    "add-crm-task": "erpclaw-crm",
+    "update-crm-task": "erpclaw-crm",
+    "get-crm-task": "erpclaw-crm",
+    "list-crm-tasks": "erpclaw-crm",
+    "complete-crm-task": "erpclaw-crm",
+    "cancel-crm-task": "erpclaw-crm",
+    "link-task-to-entity": "erpclaw-crm",
+    "unlink-task-from-entity": "erpclaw-crm",
+
+    # === CRM — Pipeline stages (Wave 1B F3, 6 actions) ===
+    "add-crm-pipeline": "erpclaw-crm",
+    "add-crm-pipeline-stage": "erpclaw-crm",
+    "update-crm-pipeline-stage": "erpclaw-crm",
+    "list-crm-pipelines": "erpclaw-crm",
+    "list-crm-pipeline-stages": "erpclaw-crm",
+    "set-opportunity-pipeline-stage": "erpclaw-crm",
+
+    # === CRM — Saved views (Wave 1B F4, 6 actions) ===
+    "add-crm-saved-view": "erpclaw-crm",
+    "update-crm-saved-view": "erpclaw-crm",
+    "get-crm-saved-view": "erpclaw-crm",
+    "list-crm-saved-views": "erpclaw-crm",
+    "delete-crm-saved-view": "erpclaw-crm",
+    "apply-saved-view": "erpclaw-crm",
+
+    # === CRM — Global search (Wave 1B F5, 1 action) ===
+    "global-crm-search": "erpclaw-crm",
+
+    # === CRM — CSV Import / Export (Wave 1B F6, 8 actions) ===
+    "import-leads": "erpclaw-crm",
+    "import-opportunities": "erpclaw-crm",
+    "import-crm-contacts": "erpclaw-crm",
+    "import-crm-companies": "erpclaw-crm",
+    "export-leads": "erpclaw-crm",
+    "export-opportunities": "erpclaw-crm",
+    "export-crm-contacts": "erpclaw-crm",
+    "export-crm-companies": "erpclaw-crm",
+
     # === Analytics (26 actions) ===
     "status": "erpclaw-analytics",
     "available-metrics": "erpclaw-analytics",
