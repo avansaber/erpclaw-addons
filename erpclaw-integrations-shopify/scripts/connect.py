@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 
 # Make erpclaw_lib importable the same way as every other action.
-LIB_PATH = os.path.expanduser("~/.openclaw/erpclaw/lib")
+LIB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
 if LIB_PATH not in sys.path:
     sys.path.insert(0, LIB_PATH)
 

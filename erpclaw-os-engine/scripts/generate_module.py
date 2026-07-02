@@ -968,7 +968,7 @@ INIT_SCHEMA_PATH = os.path.join(SETUP_DIR, "init_schema.py")
 MODULE_INIT_PATH = os.path.join(ROOT_DIR, "init_db.py")
 
 # Make erpclaw_lib importable
-ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
+ERPCLAW_LIB = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
 if ERPCLAW_LIB not in sys.path:
     sys.path.insert(0, ERPCLAW_LIB)
 

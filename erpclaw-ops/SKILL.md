@@ -1,6 +1,6 @@
 ---
 name: erpclaw-ops
-version: 2.1.0
+version: 2.2.0
 description: >
   Operations suite for ERPClaw. Manufacturing (BOMs, work orders, MRP),
   advanced manufacturing (shop floor, tools, ECOs, recipes),
@@ -110,7 +110,7 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `add-routing` | Create routing with operation sequence |
 | `add-bom` / `update-bom` / `get-bom` / `list-boms` | BOM CRUD |
 | `add-bom-output` / `list-bom-outputs` | BOM co-products/by-products |
-| `add-bom-substitute` / `list-bom-substitutes` | BOM item substitutes |
+| `add-bom-substitute` / `list-bom-substitutes` | BOM item substitutes. When a BOM line has no substitute of its own, `add-bom-substitute` also surfaces the item-global alternatives (inventory's `item_alternative`, S7) for that line's primary item via a read-only cross-module lookup |
 | `update-item-procurement-type` | Set item procurement (buy/make/subcontract) |
 | `explode-bom` | Flatten multi-level BOM recursively |
 | `add-work-order` / `get-work-order` / `list-work-orders` | Work order CRUD |
@@ -118,10 +118,18 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `create-job-card` / `complete-job-card` | Shop floor execution |
 | `create-production-plan` / `run-mrp` / `get-production-plan` | Production planning & MRP |
 | `generate-work-orders` / `generate-purchase-requests` | Auto-generate from production plan |
-| `add-subcontracting-order` | Outsource production to supplier |
-| `status` | Manufacturing dashboard |
+| `add-subcontracting-order` | Outsource production to supplier (creates a draft) |
+| `submit-subcontracting-order` | Validate (BOM lists the service item) + transition draft -> submitted |
+| `transfer-materials-to-subcontractor` | Ship BOM raw materials to the supplier sub-store; emits a `send_to_subcontractor` stock entry (SLE + GL). Only stock items move; the service line is not shipped. Partial transfers via repeated calls |
+| `receive-subcontracted-items` | Receive finished goods; posts exactly ONE FG stock entry valued at raw-material cost + (`--subcontract-charge-rate` x received qty), generates a draft subcontract-charge purchase invoice, advances status partially_received -> completed (sets `final_received_at`) |
+| `cancel-subcontracting-order` | Cancel a subcontracting order (only before any materials are transferred) |
+| `cancel-subcontract-transfer` | Reverse a materials-transfer stock entry (cancel = reverse; allowed only before any receipt) |
+| `get-subcontracting-order` / `list-subcontracting-orders` | Read a subcontracting order (with outstanding transfer/receive qty) / list with filters |
+| `status` | Manufacturing dashboard (includes the subcontracting-order lifecycle aggregate) |
 
 Work order lifecycle: Draft -> Not Started -> In Process -> Completed. Cancel posts reversal entries.
+
+Subcontracting lifecycle: draft -> submitted -> partially_received -> completed. FG cost on receipt = raw-material cost + subcontract charge; the FG receipt posts a single balanced GL/SLE set (immutable; cancel = reverse). A `create-purchase-receipt` linked to a subcontracting order DEFERS to `receive-subcontracted-items` so the finished goods are posted exactly once.
 
 ### Advanced Manufacturing (35 actions)
 

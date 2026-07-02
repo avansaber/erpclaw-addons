@@ -56,7 +56,7 @@ def run_regression(module_path, db_path=None, affected_modules=None, timeout=300
         env["ERPCLAW_DB_PATH"] = db_path
 
     # Add erpclaw_lib to PYTHONPATH
-    lib_path = os.path.expanduser("~/.openclaw/erpclaw/lib")
+    lib_path = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
     if os.path.isdir(lib_path):
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{lib_path}:{existing}" if existing else lib_path

@@ -301,6 +301,92 @@ def seed_gl_with_dimensions(conn, company_id: str, account_id: str,
     conn.commit()
 
 
+def seed_item(conn, *, name="Widget", is_stock_item=1) -> str:
+    """Insert an item and return its ID."""
+    iid = _uuid()
+    conn.execute(
+        """INSERT INTO item (id, item_code, item_name, is_stock_item, stock_uom)
+           VALUES (?, ?, ?, ?, 'Nos')""",
+        (iid, f"{name}-{iid[:8]}", f"{name} {iid[:6]}", is_stock_item),
+    )
+    conn.commit()
+    return iid
+
+
+def seed_warehouse(conn, company_id: str, name="Main WH") -> str:
+    """Insert a warehouse and return its ID."""
+    wid = _uuid()
+    conn.execute(
+        "INSERT INTO warehouse (id, name, warehouse_type, company_id) "
+        "VALUES (?, ?, 'stores', ?)",
+        (wid, f"{name} {wid[:6]}", company_id),
+    )
+    conn.commit()
+    return wid
+
+
+def seed_sle(conn, item_id: str, warehouse_id: str, *, actual_qty: str,
+             posting_date: str = "2026-01-10") -> str:
+    """Insert a single (non-cancelled) stock_ledger_entry contributing actual_qty
+    to the item/warehouse on-hand balance. Returns the SLE ID."""
+    sid = _uuid()
+    conn.execute(
+        """INSERT INTO stock_ledger_entry
+           (id, posting_date, item_id, warehouse_id, actual_qty,
+            qty_after_transaction, voucher_type, voucher_id, is_cancelled)
+           VALUES (?, ?, ?, ?, ?, ?, 'stock_entry', ?, 0)""",
+        (sid, posting_date, item_id, warehouse_id, actual_qty, actual_qty, _uuid()),
+    )
+    conn.commit()
+    return sid
+
+
+def seed_reservation(conn, company_id: str, item_id: str, warehouse_id: str, *,
+                     reserved_qty: str, status: str = "active") -> str:
+    """Insert a stock_reservation_entry (M5). Returns the reservation ID."""
+    rid = _uuid()
+    conn.execute(
+        """INSERT INTO stock_reservation_entry
+           (id, voucher_type, voucher_id, item_id, warehouse_id, reserved_qty,
+            status, company_id)
+           VALUES (?, 'manual', ?, ?, ?, ?, ?, ?)""",
+        (rid, _uuid(), item_id, warehouse_id, reserved_qty, status, company_id),
+    )
+    conn.commit()
+    return rid
+
+
+def seed_subcontracting_order(conn, company_id: str, *, qty: str,
+                              materials_transferred: str, received_qty: str,
+                              status: str = "partially_received") -> str:
+    """Insert a subcontracting_order (S5) with explicit transferred/received
+    figures, seeding its NOT NULL supplier / service item / finished item / BOM
+    prerequisites. Returns the subcontracting_order ID."""
+    supplier_id = _uuid()
+    conn.execute(
+        "INSERT INTO supplier (id, name, company_id) VALUES (?, ?, ?)",
+        (supplier_id, f"Subco {supplier_id[:6]}", company_id),
+    )
+    service_item_id = seed_item(conn, name="Assembly Service", is_stock_item=0)
+    finished_item_id = seed_item(conn, name="Finished Good", is_stock_item=1)
+    bom_id = _uuid()
+    conn.execute(
+        "INSERT INTO bom (id, item_id, quantity, company_id) VALUES (?, ?, '1', ?)",
+        (bom_id, finished_item_id, company_id),
+    )
+    oid = _uuid()
+    conn.execute(
+        """INSERT INTO subcontracting_order
+           (id, supplier_id, service_item_id, finished_item_id, bom_id, qty,
+            status, materials_transferred, received_qty, company_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (oid, supplier_id, service_item_id, finished_item_id, bom_id, qty,
+         status, materials_transferred, received_qty, company_id),
+    )
+    conn.commit()
+    return oid
+
+
 def build_env(conn) -> dict:
     """Create a full AI engine test environment with GL data."""
     cid = seed_company(conn)

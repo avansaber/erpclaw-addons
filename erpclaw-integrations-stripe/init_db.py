@@ -26,7 +26,7 @@ def create_stripe_tables(db_path=None):
     conn = sqlite3.connect(db_path)
 
     # Add erpclaw_lib to path for setup_pragmas
-    lib_path = os.path.expanduser("~/.openclaw/erpclaw/lib")
+    lib_path = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
     if lib_path not in sys.path:
         sys.path.insert(0, lib_path)
     from erpclaw_lib.db import setup_pragmas

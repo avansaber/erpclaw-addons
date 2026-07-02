@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 
-LIB_PATH = os.path.expanduser("~/.openclaw/erpclaw/lib")
+LIB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
 if LIB_PATH not in sys.path:
     sys.path.insert(0, LIB_PATH)
 

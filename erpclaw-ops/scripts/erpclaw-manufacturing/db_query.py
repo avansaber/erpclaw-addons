@@ -3097,6 +3097,739 @@ def add_subcontracting_order(conn, args):
 
 
 # ---------------------------------------------------------------------------
+# 23b. Subcontracting lifecycle (Wave 2 S5)
+#
+# Finishes the subcontracting workflow on top of add-subcontracting-order:
+#   draft → submitted → partially_received → completed   (plus cancel paths).
+#
+# GL/SLE invariants honored throughout:
+#   - Money is Decimal/TEXT (ROUND_HALF_UP via round_currency); ids are UUID4 TEXT.
+#   - Every receipt is a SINGLE SQLite transaction (commit only at the end; any
+#     failure leaves conn dirty and the top-level handler rolls back fully).
+#   - The FG SLE + its perpetual GL flow through insert_sle_entries /
+#     insert_gl_entries (the latter runs the 12-step validation internally).
+#   - GL/SLE are immutable: cancel = reverse (mirror entries), never edit. The
+#     materials-transfer SLE is reversed via inventory's cancel-stock-entry
+#     (the owning module of stock_entry); a post-receipt cancel is BLOCKED.
+#   - EXACTLY ONE FG SLE/GL set per receipt event (§Decision 6): the buying-side
+#     create-purchase-receipt DEFERS to receive-subcontracted-items and never
+#     posts the FG receipt itself.
+# ---------------------------------------------------------------------------
+
+def _load_subcontracting_order(conn, order_id: str):
+    """Fetch a subcontracting_order row (by id or naming_series) or error."""
+    sco_t = Table("subcontracting_order")
+    sco_q = (Q.from_(sco_t).select(sco_t.star)
+             .where((sco_t.id == P()) | (sco_t.naming_series == P())))
+    row = conn.execute(sco_q.get_sql(), (order_id, order_id)).fetchone()
+    if not row:
+        err(f"Subcontracting order {order_id} not found")
+    return row_to_dict(row)
+
+
+def _subcontract_raw_cost_per_unit(conn, sco):
+    """Per-finished-unit raw-material cost for a subcontracting order.
+
+    Sums (bom_item.quantity * valuation_rate) over the BOM's input items, scaled
+    by the BOM base qty so the result is a per-FG-unit figure. Valuation rate is
+    the live moving-average rate of the raw material at the SUPPLIER warehouse
+    (where the transferred stock now sits); falls back to the BOM line's stored
+    rate, then to the item standard rate, when no SLE history exists yet. All
+    arithmetic is Decimal; the result is rounded once at the end.
+    """
+    bom_id = sco["bom_id"]
+    supplier_wh = sco.get("supplier_warehouse_id")
+
+    bom_hdr_t = Table("bom")
+    bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
+    bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
+    bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
+    if bom_base_qty <= 0:
+        bom_base_qty = Decimal("1")
+
+    bi_t = Table("bom_item")
+    bi_q = Q.from_(bi_t).select(bi_t.star).where(bi_t.bom_id == P())
+    bom_items = conn.execute(bi_q.get_sql(), (bom_id,)).fetchall()
+
+    total_raw = Decimal("0")
+    for bi_row in bom_items:
+        bi = row_to_dict(bi_row)
+        line_qty = to_decimal(bi["quantity"])
+        if line_qty <= 0:
+            continue
+        rate = Decimal("0")
+        try:
+            vr = get_valuation_rate(conn, bi["item_id"], supplier_wh)
+            rate = to_decimal(str(vr)) if vr else Decimal("0")
+        except Exception:
+            rate = Decimal("0")
+        if rate <= 0:
+            rate = to_decimal(bi.get("rate", "0"))
+        total_raw += line_qty * rate
+
+    return round_currency(total_raw / bom_base_qty)
+
+
+def submit_subcontracting_order(conn, args):
+    """Submit a draft subcontracting order: validate + transition draft→submitted.
+
+    Required: --id (subcontracting_order id or naming_series)
+
+    Validates the finished-item BOM lists the order's service_item as a service
+    input (the subcontracting fee is a BOM service line). No GL/SLE — materials
+    move at transfer time, costs roll up at receipt time. Single transaction.
+    """
+    if not args.id:
+        err("--id is required")
+
+    sco = _load_subcontracting_order(conn, args.id)
+    if sco["status"] != "draft":
+        err(f"Cannot submit: subcontracting order is '{sco['status']}' (must be 'draft')")
+
+    # Validate the BOM lists the service_item as an input line (the service the
+    # subcontractor performs). add-subcontracting-order falls back service_item =
+    # finished_item when none was supplied; in that case the check is vacuously
+    # satisfied (the FG item is the BOM's own output, a degenerate service line).
+    service_item_id = sco["service_item_id"]
+    finished_item_id = sco["finished_item_id"]
+    if service_item_id != finished_item_id:
+        bi_t = Table("bom_item")
+        bi_q = (Q.from_(bi_t).select(fn.Count("*"))
+                .where(bi_t.bom_id == P())
+                .where(bi_t.item_id == P()))
+        cnt = conn.execute(bi_q.get_sql(), (sco["bom_id"], service_item_id)).fetchone()[0]
+        if cnt == 0:
+            err(f"Cannot submit: BOM {sco['bom_id']} does not list service item "
+                f"{service_item_id} as an input. A subcontracting order's service "
+                f"item must be a BOM service line.")
+
+    sco_t = Table("subcontracting_order")
+    upd_q = (Q.update(sco_t)
+             .set(sco_t.status, ValueWrapper("submitted"))
+             .set(sco_t.updated_at, now())
+             .where(sco_t.id == P()))
+    conn.execute(upd_q.get_sql(), (sco["id"],))
+
+    audit(conn, "erpclaw-manufacturing", "submit-subcontracting-order",
+          "subcontracting_order", sco["id"], new_values={"status": "submitted"})
+    conn.commit()
+
+    ok({
+        "subcontracting_order_id": sco["id"],
+        "naming_series": sco["naming_series"],
+        "status": "submitted",
+    })
+
+
+def transfer_materials_to_subcontractor(conn, args):
+    """Transfer raw materials to the subcontractor's sub-store (S6 dispatch path).
+
+    Required: --order (subcontracting_order id or naming_series)
+    Optional: --qty-override (Decimal — units of FG to transfer materials for;
+              defaults to the full outstanding qty), --posting-date
+
+    Emits a `send_to_subcontractor` stock_entry (via inventory's add/submit
+    stock-entry actions, S6's shipped dispatch) moving each BOM input item OUT of
+    its source warehouse INTO the supplier sub-store. Updates
+    materials_transferred. Repeated calls allowed while materials_transferred < qty
+    (partial transfers accumulate). The SLE/GL come from the stock-entry submit
+    (immutable; cancel = reverse via cancel-subcontract-transfer).
+    """
+    if not args.order:
+        err("--order is required")
+
+    sco = _load_subcontracting_order(conn, args.order)
+    if sco["status"] not in ("submitted", "partially_received"):
+        err(f"Cannot transfer materials: subcontracting order is '{sco['status']}' "
+            f"(must be 'submitted' or 'partially_received').")
+
+    supplier_wh = sco.get("supplier_warehouse_id")
+    if not supplier_wh:
+        err("Subcontracting order has no supplier warehouse. Set "
+            "--supplier-warehouse-id on add-subcontracting-order.")
+
+    order_qty = to_decimal(sco["qty"])
+    already = to_decimal(sco["materials_transferred"])
+    remaining = order_qty - already
+    if remaining <= 0:
+        err(f"Materials already fully transferred ({already} of {order_qty}).")
+
+    transfer_units = to_decimal(args.qty_override) if args.qty_override else remaining
+    if transfer_units <= 0:
+        err("--qty-override must be greater than 0")
+    if transfer_units > remaining:
+        err(f"Cannot transfer materials for {transfer_units} units: only "
+            f"{remaining} outstanding (order {order_qty}, already transferred "
+            f"{already}).")
+
+    # Resolve the BOM input lines into a stock-entry items payload, scaled to the
+    # FG units being transferred. Each line moves from its source warehouse to the
+    # supplier sub-store; inventory forces the to-warehouse to the validated
+    # supplier warehouse (see add_stock_entry send_to_subcontractor handling).
+    bom_id = sco["bom_id"]
+    bom_hdr_t = Table("bom")
+    bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
+    bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
+    bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
+    if bom_base_qty <= 0:
+        bom_base_qty = Decimal("1")
+
+    bi_t = Table("bom_item")
+    bi_q = Q.from_(bi_t).select(bi_t.star).where(bi_t.bom_id == P())
+    bom_items = conn.execute(bi_q.get_sql(), (bom_id,)).fetchall()
+    if not bom_items:
+        err(f"BOM {bom_id} has no input items to transfer.")
+
+    item_t = Table("item")
+    se_items = []
+    for bi_row in bom_items:
+        bi = row_to_dict(bi_row)
+        # Skip non-stock lines: the BOM's service item (the subcontractor's labor)
+        # is a BOM line for cost/validation purposes but is NEVER physically
+        # shipped — it is billed via the purchase invoice at receipt time. Only
+        # stock items move to the subcontractor's sub-store.
+        is_stock_row = conn.execute(
+            Q.from_(item_t).select(item_t.is_stock_item).where(item_t.id == P()).get_sql(),
+            (bi["item_id"],),
+        ).fetchone()
+        if not is_stock_row or to_decimal(str(is_stock_row["is_stock_item"] or 0)) <= 0:
+            continue
+        per_fg = to_decimal(bi["quantity"]) / bom_base_qty
+        line_qty = round_currency(per_fg * transfer_units)
+        if line_qty <= 0:
+            continue
+        line = {
+            "item_id": bi["item_id"],
+            "qty": str(line_qty),
+        }
+        src_wh = bi.get("source_warehouse_id")
+        if src_wh:
+            line["from_warehouse_id"] = src_wh
+        se_items.append(line)
+
+    if not se_items:
+        err("No stock material lines resolved for transfer (check BOM input "
+            "quantities; the service line is not transferred).")
+
+    posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
+    db_path = args.db_path or DEFAULT_DB_PATH
+
+    # --- Emit the send_to_subcontractor stock entry via S6's inventory path. ---
+    # Cross-skill subprocess (manufacturing must NOT write inventory-owned tables
+    # directly). add-stock-entry creates the draft; submit-stock-entry posts the
+    # SLE+GL. Both run inside inventory's own single transaction.
+    from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
+    try:
+        add_resp = call_skill_action(
+            "erpclaw", "add-stock-entry",
+            args={
+                "--entry-type": "send_to_subcontractor",
+                "--company-id": sco["company_id"],
+                "--posting-date": posting_date,
+                "--supplier-warehouse-id": supplier_wh,
+                "--items": json.dumps(se_items),
+            },
+            db_path=db_path,
+        )
+        stock_entry_id = add_resp.get("stock_entry_id") or add_resp.get("id")
+        if not stock_entry_id:
+            err(f"Stock entry creation returned no id: {add_resp}")
+        # submit-stock-entry is a high-impact action gated by the foundation
+        # router (--user-confirmed). The user already confirmed the parent
+        # transfer-materials-to-subcontractor action, which is the trust boundary;
+        # the internal SLE/GL post is pre-authorized, so pass the flag through.
+        call_skill_action(
+            "erpclaw", "submit-stock-entry",
+            args={"--stock-entry-id": stock_entry_id, "--user-confirmed": None},
+            db_path=db_path,
+        )
+    except CrossSkillError as e:
+        err(f"Material transfer to subcontractor failed: {e}")
+
+    # Update the order's transferred total + status.
+    new_transferred = round_currency(already + transfer_units)
+    sco_t = Table("subcontracting_order")
+    upd_q = (Q.update(sco_t)
+             .set(sco_t.materials_transferred, P())
+             .set(sco_t.updated_at, now())
+             .where(sco_t.id == P()))
+    conn.execute(upd_q.get_sql(), (str(new_transferred), sco["id"]))
+
+    audit(conn, "erpclaw-manufacturing", "transfer-materials-to-subcontractor",
+          "subcontracting_order", sco["id"],
+          new_values={
+              "stock_entry_id": stock_entry_id,
+              "materials_transferred": str(new_transferred),
+              "transferred_units": str(round_currency(transfer_units)),
+          })
+    conn.commit()
+
+    ok({
+        "subcontracting_order_id": sco["id"],
+        "naming_series": sco["naming_series"],
+        "stock_entry_id": stock_entry_id,
+        "transferred_units": str(round_currency(transfer_units)),
+        "materials_transferred": str(new_transferred),
+        "status": sco["status"],
+    })
+
+
+def receive_subcontracted_items(conn, args):
+    """Receive finished goods back from the subcontractor.
+
+    Required: --order (subcontracting_order id or naming_series),
+              --received-qty Q
+    Optional: --bin (free-text warehouse hint), --posting-date,
+              --subcontract-charge-rate (Decimal per-unit fee; persisted on the
+              order on first receipt if not already set)
+
+    FG cost = raw-material cost + (subcontract_charge_rate × received_qty), all
+    Decimal. Posts EXACTLY ONE FG SLE (material_receipt into the supplier
+    warehouse) + its perpetual GL, then generates a draft purchase_invoice for the
+    subcontract charge (the AP side). Updates received_qty; status →
+    'partially_received' (<qty) or 'completed' (==qty, sets final_received_at).
+    Partial receipts accumulate across calls. Single transaction; §Decision 6
+    single-post — buying defers to this action and never posts a second FG receipt.
+    """
+    if not args.order:
+        err("--order is required")
+    if not args.received_qty:
+        err("--received-qty is required")
+
+    sco = _load_subcontracting_order(conn, args.order)
+    if sco["status"] not in ("submitted", "partially_received"):
+        err(f"Cannot receive: subcontracting order is '{sco['status']}' (must be "
+            f"'submitted' or 'partially_received').")
+
+    received_qty = to_decimal(args.received_qty)
+    if received_qty <= 0:
+        err("--received-qty must be greater than 0")
+
+    order_qty = to_decimal(sco["qty"])
+    already_received = to_decimal(sco["received_qty"])
+    if round_currency(already_received + received_qty) > order_qty:
+        err(f"Cannot receive {received_qty}: cumulative received "
+            f"{round_currency(already_received + received_qty)} would exceed order "
+            f"qty {order_qty} (already received {already_received}).")
+
+    transferred = to_decimal(sco["materials_transferred"])
+    if transferred <= 0:
+        err("Cannot receive: no materials have been transferred to the "
+            "subcontractor yet (run transfer-materials-to-subcontractor first).")
+
+    supplier_wh = sco.get("supplier_warehouse_id")
+    if not supplier_wh:
+        err("Subcontracting order has no supplier warehouse to receive into.")
+
+    company_id = sco["company_id"]
+    finished_item_id = sco["finished_item_id"]
+    posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
+    fiscal_year = _get_fiscal_year(conn, posting_date)
+    cost_center_id = _get_cost_center(conn, company_id)
+
+    # --- Resolve the per-unit subcontract charge rate ---
+    # Precedence: explicit flag (persisted if the column is empty) > already-stored
+    # rate on the order. Either way it is Decimal-as-text.
+    stored_rate = sco.get("subcontract_charge_rate")
+    if args.subcontract_charge_rate is not None:
+        charge_rate = to_decimal(args.subcontract_charge_rate)
+        if charge_rate < 0:
+            err("--subcontract-charge-rate must not be negative")
+    elif stored_rate not in (None, ""):
+        charge_rate = to_decimal(stored_rate)
+    else:
+        charge_rate = Decimal("0")
+
+    # --- FG cost = raw-material cost + subcontract charge ---
+    raw_per_unit = _subcontract_raw_cost_per_unit(conn, sco)
+    raw_cost = round_currency(raw_per_unit * received_qty)
+    subcontract_charge = round_currency(charge_rate * received_qty)
+    fg_total_cost = round_currency(raw_cost + subcontract_charge)
+    fg_rate = round_currency(fg_total_cost / received_qty) if received_qty > 0 else Decimal("0")
+
+    # --- THE single FG SLE: material_receipt of the finished item into the
+    # supplier warehouse, valued at fg_rate (raw + charge rolled into the cost). ---
+    # Voucher type is 'purchase_receipt' (a registered voucher_type for both
+    # stock_ledger_entry and gl_entry): a subcontract FG receipt IS a receipt of
+    # finished goods from a supplier — the same economic event buying's own
+    # submit-purchase-receipt posts. 'subcontracting_order' is NOT a registered
+    # voucher type, so insert_sle_entries/insert_gl_entries (which enforce
+    # voucher_type_registry membership) would reject it. Traceability back to the
+    # order is preserved via the order id embedded in voucher_id; nothing
+    # downstream keys on the voucher_type label.
+    FG_VOUCHER_TYPE = "purchase_receipt"
+    voucher_id = f"{sco['id']}:receive:{uuid.uuid4().hex[:8]}"
+    sle_entries = [{
+        "item_id": finished_item_id,
+        "warehouse_id": supplier_wh,
+        "actual_qty": str(round_currency(received_qty)),
+        "incoming_rate": str(fg_rate),
+        "fiscal_year": fiscal_year,
+        "require_rate": True,
+    }]
+
+    try:
+        sle_ids = insert_sle_entries(
+            conn, sle_entries,
+            voucher_type=FG_VOUCHER_TYPE,
+            voucher_id=voucher_id,
+            posting_date=posting_date,
+            company_id=company_id,
+        )
+    except (ValueError, NotImplementedError) as e:
+        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+        err(f"SLE posting failed: {e}")
+
+    # Fetch the posted SLE rows for GL generation.
+    sle_t = Table("stock_ledger_entry")
+    sle_q = (Q.from_(sle_t).select(sle_t.star)
+             .where(sle_t.voucher_type == P())
+             .where(sle_t.voucher_id == P())
+             .where(sle_t.is_cancelled == 0))
+    sle_rows = conn.execute(sle_q.get_sql(), (FG_VOUCHER_TYPE, voucher_id)).fetchall()
+    sle_dicts = [row_to_dict(r) for r in sle_rows]
+
+    try:
+        gl_entries = create_perpetual_inventory_gl(
+            conn, sle_dicts,
+            voucher_type=FG_VOUCHER_TYPE,
+            voucher_id=voucher_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            cost_center_id=cost_center_id,
+        )
+    except (ValueError, NotImplementedError) as e:
+        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+        err(f"GL posting failed: {e}")
+
+    gl_ids = []
+    if gl_entries:
+        if fiscal_year:
+            for gle in gl_entries:
+                gle["fiscal_year"] = fiscal_year
+        try:
+            # insert_gl_entries runs the 12-step validation internally.
+            gl_ids = insert_gl_entries(
+                conn, gl_entries,
+                voucher_type=FG_VOUCHER_TYPE,
+                voucher_id=voucher_id,
+                posting_date=posting_date,
+                company_id=company_id,
+                remarks=f"Subcontract FG receipt for {sco['naming_series']}",
+            )
+        except (ValueError, NotImplementedError) as e:
+            sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+            err(f"GL posting failed: {e}")
+
+    # --- Update the order: received_qty + status machine. ---
+    new_received = round_currency(already_received + received_qty)
+    is_complete = new_received >= order_qty
+    new_status = "completed" if is_complete else "partially_received"
+    final_received_ts = (datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                         if is_complete else None)
+
+    sco_t = Table("subcontracting_order")
+    upd = (Q.update(sco_t)
+           .set(sco_t.received_qty, P())
+           .set(sco_t.status, P())
+           .set(sco_t.updated_at, now()))
+    upd_params = [str(new_received), new_status]
+    # Persist the charge rate on first use so later partial receipts inherit it.
+    if stored_rate in (None, "") and args.subcontract_charge_rate is not None:
+        upd = upd.set(sco_t.subcontract_charge_rate, P())
+        upd_params.append(str(charge_rate))
+    if is_complete:
+        upd = upd.set(sco_t.final_received_at, P())
+        upd_params.append(final_received_ts)
+    upd = upd.where(sco_t.id == P())
+    upd_params.append(sco["id"])
+    conn.execute(upd.get_sql(), tuple(upd_params))
+
+    audit(conn, "erpclaw-manufacturing", "receive-subcontracted-items",
+          "subcontracting_order", sco["id"],
+          new_values={
+              "status": new_status,
+              "received_qty": str(new_received),
+              "raw_cost": str(raw_cost),
+              "subcontract_charge": str(subcontract_charge),
+              "fg_total_cost": str(fg_total_cost),
+              "fg_rate": str(fg_rate),
+          })
+    # Commit the ATOMIC receipt now: the single FG SLE/GL post + the order state
+    # are the receipt event (§Decision 6, one GL/SLE per receipt). Committing here
+    # releases the write lock BEFORE the purchase-invoice subprocess opens its own
+    # connection (an open parent write tx would lock that subprocess out — SQLite
+    # single-writer). The charge invoice is a separate DRAFT document (no GL until
+    # someone submits it), so it is not part of this transaction's GL atomicity.
+    conn.commit()
+
+    # --- Generate the draft purchase invoice for the subcontract charge (AP). ---
+    # A service-only line for the service item; created as a draft (no GL until
+    # someone submits it — a separate, deliberate AP step). This is NOT a second FG
+    # post. Skipped when the charge is zero (nothing to bill). Runs AFTER the commit
+    # above so the cross-skill subprocess can acquire the write lock.
+    purchase_invoice_id = None
+    if subcontract_charge > 0:
+        from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
+        db_path = args.db_path or DEFAULT_DB_PATH
+        pi_items = [{
+            "item_id": sco["service_item_id"],
+            "qty": str(round_currency(received_qty)),
+            "rate": str(charge_rate),
+        }]
+        try:
+            pi_resp = call_skill_action(
+                "erpclaw", "create-purchase-invoice",
+                args={
+                    "--supplier-id": sco["supplier_id"],
+                    "--company-id": company_id,
+                    "--posting-date": posting_date,
+                    "--items": json.dumps(pi_items),
+                },
+                db_path=db_path,
+            )
+            purchase_invoice_id = pi_resp.get("purchase_invoice_id")
+        except CrossSkillError as e:
+            err(f"Subcontract charge invoice generation failed: {e}")
+
+    ok({
+        "subcontracting_order_id": sco["id"],
+        "naming_series": sco["naming_series"],
+        "status": new_status,
+        "received_qty": str(new_received),
+        "received_this_event": str(round_currency(received_qty)),
+        "raw_cost": str(raw_cost),
+        "subcontract_charge": str(subcontract_charge),
+        "fg_total_cost": str(fg_total_cost),
+        "fg_rate": str(fg_rate),
+        "sle_count": len(sle_ids),
+        "gl_count": len(gl_ids),
+        "purchase_invoice_id": purchase_invoice_id,
+        "final_received_at": final_received_ts,
+    })
+
+
+def cancel_subcontracting_order(conn, args):
+    """Cancel a subcontracting order BEFORE any materials are transferred.
+
+    Required: --id
+    Optional: --reason
+
+    Only permitted while materials_transferred = 0 (nothing has been dispatched,
+    so there are no SLE/GL to reverse). After a transfer, use
+    cancel-subcontract-transfer (cancel = reverse) first; after a receipt the
+    order is locked. Status → cancelled.
+    """
+    if not args.id:
+        err("--id is required")
+
+    sco = _load_subcontracting_order(conn, args.id)
+    if sco["status"] in ("completed", "cancelled"):
+        err(f"Cannot cancel: subcontracting order is '{sco['status']}'.")
+    if to_decimal(sco["materials_transferred"]) > 0:
+        err("Cannot cancel: materials have already been transferred to the "
+            "subcontractor. Reverse the transfer with cancel-subcontract-transfer "
+            "first (a received order cannot be cancelled at all).")
+    if to_decimal(sco["received_qty"]) > 0:
+        err("Cannot cancel: finished goods have already been received.")
+
+    sco_t = Table("subcontracting_order")
+    upd_q = (Q.update(sco_t)
+             .set(sco_t.status, ValueWrapper("cancelled"))
+             .set(sco_t.updated_at, now())
+             .where(sco_t.id == P()))
+    conn.execute(upd_q.get_sql(), (sco["id"],))
+
+    audit(conn, "erpclaw-manufacturing", "cancel-subcontracting-order",
+          "subcontracting_order", sco["id"],
+          new_values={"status": "cancelled", "reason": args.reason})
+    conn.commit()
+
+    ok({
+        "subcontracting_order_id": sco["id"],
+        "naming_series": sco["naming_series"],
+        "status": "cancelled",
+    })
+
+
+def cancel_subcontract_transfer(conn, args):
+    """Reverse a materials-transfer stock entry (cancel = reverse, immutable GL).
+
+    Required: --stock-entry SE (the send_to_subcontractor stock_entry id),
+              --order O (the subcontracting order it belongs to), --reason
+    Optional: --posting-date
+
+    Allowed ONLY before any finished goods have been received. Delegates the SLE+GL
+    reversal to inventory's cancel-stock-entry (stock_entry's owning module), which
+    inserts mirror entries — never edits the submitted ones. Decrements
+    materials_transferred and walks the order back to 'submitted' when nothing
+    remains transferred.
+    """
+    if not args.stock_entry:
+        err("--stock-entry is required")
+    if not args.order:
+        err("--order is required")
+    if not args.reason:
+        err("--reason is required (cancellations must be justified)")
+
+    sco = _load_subcontracting_order(conn, args.order)
+    if to_decimal(sco["received_qty"]) > 0:
+        err("Cannot reverse the transfer: finished goods have already been "
+            "received against this order. A received order is locked.")
+
+    # Identify how many FG-equivalent units this stock entry moved, so we can
+    # decrement materials_transferred by exactly that amount. We re-derive it from
+    # the entry's outgoing lines against the BOM per-unit quantities.
+    se_t = Table("stock_entry")
+    se_q = Q.from_(se_t).select(se_t.star).where(se_t.id == P())
+    se_row = conn.execute(se_q.get_sql(), (args.stock_entry,)).fetchone()
+    if not se_row:
+        err(f"Stock entry {args.stock_entry} not found")
+    se = row_to_dict(se_row)
+    if se["stock_entry_type"] != "send_to_subcontractor":
+        err(f"Stock entry {args.stock_entry} is type '{se['stock_entry_type']}', "
+            f"not a subcontractor transfer.")
+    if se["status"] != "submitted":
+        err(f"Cannot reverse: stock entry is '{se['status']}' (must be 'submitted').")
+
+    # FG-equivalent units = (line qty / per-FG qty) for the first resolvable BOM
+    # input line. Deterministic for the proportional transfers this module emits.
+    bom_id = sco["bom_id"]
+    bom_hdr_t = Table("bom")
+    bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
+    bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
+    bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
+    if bom_base_qty <= 0:
+        bom_base_qty = Decimal("1")
+
+    sei_t = Table("stock_entry_item")
+    sei_q = (Q.from_(sei_t).select(sei_t.star)
+             .where(sei_t.stock_entry_id == P()))
+    se_items = conn.execute(sei_q.get_sql(), (args.stock_entry,)).fetchall()
+
+    bi_t = Table("bom_item")
+    fg_units = Decimal("0")
+    for sei_row in se_items:
+        sei = row_to_dict(sei_row)
+        bi_q = (Q.from_(bi_t).select(bi_t.quantity)
+                .where(bi_t.bom_id == P()).where(bi_t.item_id == P()))
+        bi = conn.execute(bi_q.get_sql(), (bom_id, sei["item_id"])).fetchone()
+        if not bi:
+            continue
+        per_fg = to_decimal(bi["quantity"]) / bom_base_qty
+        if per_fg > 0:
+            fg_units = round_currency(to_decimal(sei["quantity"]) / per_fg)
+            break
+
+    posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
+    db_path = args.db_path or DEFAULT_DB_PATH
+
+    # Delegate the SLE+GL reversal to inventory (owning module; cancel = reverse).
+    # cancel-stock-entry is foundation-router-gated (--user-confirmed); the user
+    # confirmed the parent cancel-subcontract-transfer (the trust boundary), so
+    # pass the flag through to the pre-authorized reversal.
+    from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
+    try:
+        call_skill_action(
+            "erpclaw", "cancel-stock-entry",
+            args={"--stock-entry-id": args.stock_entry, "--user-confirmed": None},
+            db_path=db_path,
+        )
+    except CrossSkillError as e:
+        err(f"Transfer reversal failed: {e}")
+
+    # Walk back materials_transferred (never below zero) + status.
+    new_transferred = round_currency(to_decimal(sco["materials_transferred"]) - fg_units)
+    if new_transferred < 0:
+        new_transferred = Decimal("0")
+    new_status = sco["status"]
+    if new_transferred <= 0 and sco["status"] == "partially_received":
+        # Receipts would have moved received_qty>0; guarded above. Safe to reset.
+        new_status = "submitted"
+    elif new_transferred <= 0 and sco["status"] in ("submitted", "partially_received"):
+        new_status = "submitted"
+
+    sco_t = Table("subcontracting_order")
+    upd_q = (Q.update(sco_t)
+             .set(sco_t.materials_transferred, P())
+             .set(sco_t.status, P())
+             .set(sco_t.updated_at, now())
+             .where(sco_t.id == P()))
+    conn.execute(upd_q.get_sql(), (str(new_transferred), new_status, sco["id"]))
+
+    audit(conn, "erpclaw-manufacturing", "cancel-subcontract-transfer",
+          "subcontracting_order", sco["id"],
+          new_values={
+              "stock_entry_id": args.stock_entry,
+              "reversed_units": str(fg_units),
+              "materials_transferred": str(new_transferred),
+              "reason": args.reason,
+          })
+    conn.commit()
+
+    ok({
+        "subcontracting_order_id": sco["id"],
+        "stock_entry_id": args.stock_entry,
+        "reversed_units": str(fg_units),
+        "materials_transferred": str(new_transferred),
+        "status": new_status,
+    })
+
+
+def get_subcontracting_order(conn, args):
+    """Read a subcontracting order with its lifecycle fields.
+
+    Required: --id (id or naming_series)
+    """
+    if not args.id:
+        err("--id is required")
+    sco = _load_subcontracting_order(conn, args.id)
+    order_qty = to_decimal(sco["qty"])
+    transferred = to_decimal(sco["materials_transferred"])
+    received = to_decimal(sco["received_qty"])
+    sco["outstanding_transfer_qty"] = str(round_currency(order_qty - transferred))
+    sco["outstanding_receive_qty"] = str(round_currency(order_qty - received))
+    ok(sco)
+
+
+def list_subcontracting_orders(conn, args):
+    """List subcontracting orders with optional filters.
+
+    Optional: --status S, --supplier-id S, --from-date D, --to-date D,
+              --company-id C, --limit, --offset
+    """
+    sco_t = Table("subcontracting_order")
+    q = Q.from_(sco_t).select(sco_t.star)
+    params = []
+    if args.status:
+        q = q.where(sco_t.status == P())
+        params.append(args.status)
+    if args.supplier_id:
+        q = q.where(sco_t.supplier_id == P())
+        params.append(args.supplier_id)
+    if args.company_id:
+        q = q.where(sco_t.company_id == P())
+        params.append(args.company_id)
+    if args.from_date:
+        q = q.where(sco_t.created_at >= P())
+        params.append(args.from_date)
+    if args.to_date:
+        q = q.where(sco_t.created_at <= P())
+        params.append(args.to_date)
+    try:
+        limit = int(args.limit)
+        offset = int(args.offset)
+    except (TypeError, ValueError):
+        limit, offset = 20, 0
+    q = q.orderby(sco_t.created_at, order=Order.desc).limit(limit).offset(offset)
+    rows = conn.execute(q.get_sql(), tuple(params)).fetchall()
+    ok({
+        "subcontracting_orders": [row_to_dict(r) for r in rows],
+        "count": len(rows),
+    })
+
+
+# ---------------------------------------------------------------------------
 # 24. status
 # ---------------------------------------------------------------------------
 
@@ -3193,6 +3926,31 @@ def status_action(conn, args):
 # 25. add-bom-substitute  (Feature #7: Material Substitution)
 # ---------------------------------------------------------------------------
 
+def _item_alternative_fallback(conn, primary_item_id):
+    """Read item-global alternatives (S7's item_alternative, inventory-owned) for a
+    primary item, ordered by priority ASC. This is a permitted CROSS-MODULE READ:
+    any module may READ any table; only erpclaw-inventory WRITES item_alternative.
+    Manufacturing never writes it — it composes over it (composition over
+    duplication) when a BOM line has no BOM-specific substitute of its own.
+
+    Returns a list of dicts (possibly empty). Gracefully returns [] if the table is
+    absent (e.g. an older DB not yet migrated to 027)."""
+    try:
+        rows = conn.execute(
+            "SELECT ia.id, ia.alternative_item_id, ia.priority, ia.conversion_factor, "
+            "ia.notes, i.item_code AS alternative_item_code, "
+            "i.item_name AS alternative_item_name "
+            "FROM item_alternative ia "
+            "LEFT JOIN item i ON i.id = ia.alternative_item_id "
+            "WHERE ia.item_id = ? AND ia.is_active = 1 "
+            "ORDER BY ia.priority ASC, ia.created_at ASC",
+            (primary_item_id,),
+        ).fetchall()
+    except Exception:
+        return []
+    return [row_to_dict(r) for r in rows]
+
+
 def add_bom_substitute(conn, args):
     """Add a substitute item for a BOM line item.
 
@@ -3201,6 +3959,11 @@ def add_bom_substitute(conn, args):
 
     The substitute can be used in material transfers when the primary item
     has insufficient stock.
+
+    Composition over duplication (S7): when a BOM line has NO BOM-specific
+    substitute of its own, the response also surfaces the item-global alternatives
+    (item_alternative, inventory-owned) for the BOM line's primary item, via a
+    cross-module READ. Manufacturing reads, never writes, item_alternative.
     """
     if not args.bom_item_id:
         err("--bom-item-id is required")
@@ -3237,6 +4000,14 @@ def add_bom_substitute(conn, args):
     if dup:
         err(f"Substitute item {args.substitute_item_id} already exists for this BOM item")
 
+    # Was this BOM line's substitute set EMPTY before this add? If so, the line
+    # had been inheriting its substitutes from the item-global table — surface
+    # them in the response (cross-module READ; manufacturing never writes it).
+    had_existing = conn.execute(
+        Q.from_(bis_t).select(fn.Count("*")).where(bis_t.bom_item_id == P()).get_sql(),
+        (args.bom_item_id,),
+    ).fetchone()[0] > 0
+
     sub_id = str(uuid.uuid4())
     ins_q = (Q.into(bis_t).columns(
         "id", "bom_item_id", "substitute_item_id", "conversion_factor", "priority"
@@ -3255,13 +4026,19 @@ def add_bom_substitute(conn, args):
            })
     conn.commit()
 
-    ok({
+    payload = {
         "substitute_id": sub_id,
         "bom_item_id": args.bom_item_id,
         "substitute_item_id": args.substitute_item_id,
         "conversion_factor": str(round_currency(conversion_factor)),
         "priority": priority,
-    })
+    }
+    if not had_existing:
+        fallback = _item_alternative_fallback(conn, bi_dict["item_id"])
+        if fallback:
+            payload["item_alternative_fallback"] = fallback
+            payload["item_alternative_fallback_source"] = "item_alternative (item-global, S7)"
+    ok(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -3470,6 +4247,13 @@ ACTIONS = {
     "generate-work-orders": generate_work_orders,
     "generate-purchase-requests": generate_purchase_requests,
     "add-subcontracting-order": add_subcontracting_order,
+    "submit-subcontracting-order": submit_subcontracting_order,
+    "transfer-materials-to-subcontractor": transfer_materials_to_subcontractor,
+    "receive-subcontracted-items": receive_subcontracted_items,
+    "cancel-subcontracting-order": cancel_subcontracting_order,
+    "cancel-subcontract-transfer": cancel_subcontract_transfer,
+    "get-subcontracting-order": get_subcontracting_order,
+    "list-subcontracting-orders": list_subcontracting_orders,
     "add-bom-substitute": add_bom_substitute,
     "list-bom-substitutes": list_bom_substitutes,
     "add-bom-output": add_bom_output,
@@ -3539,6 +4323,16 @@ def main():
     parser.add_argument("--supplier-id")
     parser.add_argument("--service-item-id")
     parser.add_argument("--supplier-warehouse-id")
+
+    # Subcontracting lifecycle (Wave 2 S5)
+    parser.add_argument("--id")                     # subcontracting_order id / naming_series
+    parser.add_argument("--order")                  # subcontracting_order id / naming_series
+    parser.add_argument("--received-qty", dest="received_qty")
+    parser.add_argument("--qty-override", dest="qty_override")
+    parser.add_argument("--bin")                    # free-text warehouse hint
+    parser.add_argument("--stock-entry", dest="stock_entry")
+    parser.add_argument("--subcontract-charge-rate", dest="subcontract_charge_rate")
+    parser.add_argument("--reason")
 
     # Production planning
     parser.add_argument("--planning-horizon-days")

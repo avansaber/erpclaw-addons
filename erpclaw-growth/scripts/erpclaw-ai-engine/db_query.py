@@ -48,6 +48,8 @@ VALID_ANOMALY_TYPES = {
     "inventory_shrinkage", "payment_pattern_shift",
     # Wave 1 AI1: asset book-value invariant + dimension-tagging consistency
     "asset_book_value_drift", "dimension_tag_drift",
+    # Wave 2 AI1: reservation-vs-stock headroom + subcontract receipt/transfer parity
+    "reservation_over_available", "subcontract_receipt_mismatch",
 }
 
 VALID_SEVERITY = {"info", "warning", "critical"}
@@ -161,6 +163,183 @@ def _insert_anomaly(conn, anomaly_type, severity, entity_type, entity_id,
          'new'),
     )
     return anomaly_id
+
+
+def _table_exists(conn, table_name):
+    """True if a base table exists (dialect-aware). Guards the Wave 2 inventory
+    detectors so detect-anomalies still runs on DBs where the M5/S5 migrations
+    (foundation 025/026) have not yet been applied — the detector simply
+    contributes zero anomalies instead of failing the whole sweep. table_name is
+    an internal literal, never user input."""
+    if os.environ.get("ERPCLAW_DB_DIALECT", "sqlite") == "postgresql":
+        row = conn.execute("SELECT to_regclass(?)", (table_name,)).fetchone()
+        return bool(row) and row[0] is not None
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _detect_reservation_over_available(conn, company_id, from_date, to_date):
+    """Wave 2 AI1 detector: reservation_over_available.
+
+    Flags any (item, warehouse) whose SUM of ACTIVE stock_reservation_entry
+    reserved_qty exceeds the on-hand balance (SUM of SLE actual_qty). When
+    reserved > on-hand the reservations cannot all be fulfilled -> a stock-out is
+    predicted. Reads M5's stock_reservation_entry (owned by erpclaw-inventory) +
+    the shared stock_ledger_entry; WRITES only growth's anomaly table via
+    _insert_anomaly. Point-in-time state check (reservations carry no posting
+    window), so it ignores the date range. Returns a list of
+    {"id","type","severity"} for each inserted anomaly.
+
+    All quantities are Decimal-as-text; comparison + arithmetic use Decimal.
+    """
+    emitted = []
+    if not _table_exists(conn, "stock_reservation_entry"):
+        return emitted
+
+    # Active reservations for this company, grouped in Python (dialect-safe: no
+    # GROUP BY / decimal aggregate in SQL). Company scope via the reservation's
+    # own company_id column.
+    res_rows = conn.execute(
+        "SELECT item_id, warehouse_id, reserved_qty "
+        "FROM stock_reservation_entry "
+        "WHERE company_id = ? AND status = 'active'",
+        (company_id,),
+    ).fetchall()
+
+    reserved_by_pair = {}
+    for r in res_rows:
+        d = row_to_dict(r)
+        key = (d["item_id"], d["warehouse_id"])
+        reserved_by_pair[key] = reserved_by_pair.get(key, Decimal("0")) + to_decimal(
+            str(d["reserved_qty"] or "0"))
+
+    for (item_id, warehouse_id), reserved in sorted(reserved_by_pair.items()):
+        if reserved <= 0:
+            continue
+        # On-hand = SUM of non-cancelled SLE actual_qty for the pair. Summed in
+        # Python from raw rows (dialect-safe).
+        sle_rows = conn.execute(
+            "SELECT actual_qty FROM stock_ledger_entry "
+            "WHERE item_id = ? AND warehouse_id = ? AND is_cancelled = 0",
+            (item_id, warehouse_id),
+        ).fetchall()
+        on_hand = sum((to_decimal(str(s["actual_qty"] or "0")) for s in sle_rows),
+                      Decimal("0"))
+        if reserved <= on_hand:
+            continue  # enough stock on hand to cover the reservations
+
+        shortfall = round_currency(reserved - on_hand)
+        # Fraction of the reserved qty that cannot be covered.
+        coverage_gap = (shortfall / reserved * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # Nothing on hand at all is the more severe stock-out signal.
+        severity = "critical" if on_hand <= 0 else "warning"
+        aid = _insert_anomaly(
+            conn, "reservation_over_available", severity,
+            "item", f"{item_id}:{warehouse_id}",
+            f"Active reservations ({reserved}) exceed on-hand stock ({round_currency(on_hand)}) "
+            f"for item {item_id} in warehouse {warehouse_id}: short by {shortfall} "
+            f"({coverage_gap}% of reservations unfulfillable).",
+            {"company_id": company_id, "item_id": item_id,
+             "warehouse_id": warehouse_id, "shortfall": str(shortfall)},
+            baseline={"on_hand_qty": str(round_currency(on_hand))},
+            actual={"reserved_qty": str(round_currency(reserved))},
+            deviation_pct=str(coverage_gap),
+        )
+        if aid:
+            emitted.append({"id": aid, "type": "reservation_over_available",
+                            "severity": severity})
+    return emitted
+
+
+# Fractional tolerance (percent) for the subcontract receipt/transfer parity check.
+SUBCONTRACT_MISMATCH_TOLERANCE_PCT = Decimal("5")
+
+
+def _detect_subcontract_receipt_mismatch(conn, company_id, from_date, to_date):
+    """Wave 2 AI1 detector: subcontract_receipt_mismatch.
+
+    Flags a subcontracting_order whose finished-goods received_qty diverges from
+    the materials_transferred (both are FG-unit measures in S5) beyond
+    SUBCONTRACT_MISMATCH_TOLERANCE_PCT. The hard validation only caps cumulative
+    received at the order qty; it does NOT enforce received <= transferred, so
+    receiving more FG than the transferred raw materials could yield (phantom
+    production) slips through — that over-receipt is the primary signal here. For
+    a 'completed' order the reverse divergence (materials shipped materially
+    exceed FG returned = yield loss / missing goods) is also flagged. Reads S5's
+    subcontracting_order (owned by erpclaw-manufacturing); WRITES only growth's
+    anomaly table via _insert_anomaly. Point-in-time state check (orders carry no
+    posting window), so it ignores the date range. Returns a list of
+    {"id","type","severity"} for each inserted anomaly.
+
+    All quantities are Decimal-as-text; comparison + arithmetic use Decimal.
+    """
+    emitted = []
+    if not _table_exists(conn, "subcontracting_order"):
+        return emitted
+
+    rows = conn.execute(
+        "SELECT id, status, materials_transferred, received_qty "
+        "FROM subcontracting_order "
+        "WHERE company_id = ? AND status IN ('partially_received', 'completed')",
+        (company_id,),
+    ).fetchall()
+
+    for row in rows:
+        o = row_to_dict(row)
+        transferred = to_decimal(str(o["materials_transferred"] or "0"))
+        received = to_decimal(str(o["received_qty"] or "0"))
+        if transferred <= 0 or received <= 0:
+            continue  # no comparable activity on both sides yet
+
+        divergence = received - transferred
+        divergence_pct = (divergence / transferred * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if received > transferred and divergence_pct > SUBCONTRACT_MISMATCH_TOLERANCE_PCT:
+            # Over-receipt: more FG received than the transferred materials support.
+            aid = _insert_anomaly(
+                conn, "subcontract_receipt_mismatch", "critical",
+                "subcontracting_order", o["id"],
+                f"Subcontract received qty ({received}) exceeds materials "
+                f"transferred ({transferred}) by {divergence_pct}% "
+                f"(over tolerance {SUBCONTRACT_MISMATCH_TOLERANCE_PCT}%): more finished "
+                f"goods received than the transferred materials can yield.",
+                {"company_id": company_id, "subcontracting_order_id": o["id"],
+                 "direction": "over_receipt"},
+                baseline={"materials_transferred": str(round_currency(transferred))},
+                actual={"received_qty": str(round_currency(received))},
+                deviation_pct=str(divergence_pct),
+            )
+            if aid:
+                emitted.append({"id": aid, "type": "subcontract_receipt_mismatch",
+                                "severity": "critical"})
+        elif o["status"] == "completed":
+            shortfall_pct = (-divergence / transferred * Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if shortfall_pct > SUBCONTRACT_MISMATCH_TOLERANCE_PCT:
+                # Completed order where transferred materials materially exceed the
+                # FG returned: yield loss / unaccounted materials.
+                aid = _insert_anomaly(
+                    conn, "subcontract_receipt_mismatch", "warning",
+                    "subcontracting_order", o["id"],
+                    f"Completed subcontract received qty ({received}) is "
+                    f"{shortfall_pct}% below materials transferred ({transferred}) "
+                    f"(over tolerance {SUBCONTRACT_MISMATCH_TOLERANCE_PCT}%): possible "
+                    f"yield loss or unaccounted materials.",
+                    {"company_id": company_id, "subcontracting_order_id": o["id"],
+                     "direction": "under_receipt"},
+                    baseline={"materials_transferred": str(round_currency(transferred))},
+                    actual={"received_qty": str(round_currency(received))},
+                    deviation_pct=str(shortfall_pct),
+                )
+                if aid:
+                    emitted.append({"id": aid, "type": "subcontract_receipt_mismatch",
+                                    "severity": "warning"})
+    return emitted
 
 
 # ============================================================================
@@ -1289,6 +1468,18 @@ def detect_anomalies(conn, args):
                     new_anomalies.append(aid)
                     by_type["dimension_tag_drift"] = by_type.get("dimension_tag_drift", 0) + 1
                     by_severity["warning"] = by_severity.get("warning", 0) + 1
+
+    # --- Heuristics 8 + 9: Wave 2 AI1 inventory hooks ---
+    # reservation_over_available (reads M5 stock_reservation_entry + SLE) and
+    # subcontract_receipt_mismatch (reads S5 subcontracting_order). Each detector
+    # emits through _insert_anomaly and returns the anomalies it inserted so the
+    # sweep's roll-up counters stay consistent.
+    for detector in (_detect_reservation_over_available,
+                     _detect_subcontract_receipt_mismatch):
+        for a in detector(conn, company_id, from_date, to_date):
+            new_anomalies.append(a["id"])
+            by_type[a["type"]] = by_type.get(a["type"], 0) + 1
+            by_severity[a["severity"]] = by_severity.get(a["severity"], 0) + 1
 
     conn.commit()
     ok({

@@ -16,6 +16,8 @@ if _TESTS_DIR not in sys.path:
 from ai_helpers import (
     call_action, ns, is_ok, is_error, load_db_query, _uuid,
     seed_asset_category, seed_asset, seed_gl_with_dimensions,
+    seed_item, seed_warehouse, seed_sle, seed_reservation,
+    seed_subcontracting_order,
 )
 
 MOD = load_db_query()
@@ -517,3 +519,154 @@ class TestAI1DimensionTagDrift:
         r = self._detect(conn, env["company_id"])
         assert is_ok(r)
         assert r["by_type"].get("dimension_tag_drift", 0) == 0
+
+
+# ===========================================================================
+# AI1 — reservation_over_available + subcontract_receipt_mismatch  (Wave 2)
+# ===========================================================================
+
+def _find_anomaly(conn, company_id, anomaly_type):
+    """Return the first list-anomalies row of a given type, or None."""
+    rows = call_action(MOD.list_anomalies, conn, ns(
+        company_id=company_id, severity=None, status=None,
+        limit="50", offset="0",
+    ))
+    for a in rows["anomalies"]:
+        if a["anomaly_type"] == anomaly_type:
+            return a
+    return None
+
+
+class TestAI1ReservationOverAvailable:
+    def _detect(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id,
+            from_date="2026-01-01", to_date="2026-03-31",
+        ))
+
+    def test_reservations_exceed_on_hand_raises(self, conn, env):
+        """Active reservations (100) above on-hand stock (40) for an
+        item/warehouse raise reservation_over_available with exact figures."""
+        item_id = seed_item(conn)
+        wh_id = seed_warehouse(conn, env["company_id"])
+        seed_sle(conn, item_id, wh_id, actual_qty="40")          # on hand 40
+        seed_reservation(conn, env["company_id"], item_id, wh_id,
+                         reserved_qty="100")                      # reserved 100
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("reservation_over_available", 0) == 1
+        assert r["by_severity"].get("warning", 0) >= 1
+
+        a = _find_anomaly(conn, env["company_id"], "reservation_over_available")
+        assert a is not None
+        assert a["severity"] == "warning"          # on-hand > 0
+        assert a["entity_type"] == "item"
+        assert a["entity_id"] == f"{item_id}:{wh_id}"
+        assert json.loads(a["baseline"]) == {"on_hand_qty": "40.00"}
+        assert json.loads(a["actual"]) == {"reserved_qty": "100.00"}
+        assert a["deviation_pct"] == "60.00"        # 60 short / 100 reserved
+        assert json.loads(a["evidence"])["shortfall"] == "60.00"
+
+    def test_zero_on_hand_is_critical(self, conn, env):
+        """Reservations against an item with NO stock at all => critical."""
+        item_id = seed_item(conn)
+        wh_id = seed_warehouse(conn, env["company_id"])
+        seed_reservation(conn, env["company_id"], item_id, wh_id,
+                         reserved_qty="25")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        a = _find_anomaly(conn, env["company_id"], "reservation_over_available")
+        assert a is not None
+        assert a["severity"] == "critical"
+
+    def test_sufficient_stock_no_anomaly(self, conn, env):
+        """NEGATIVE CONTROL: on-hand (100) >= reserved (30) must NOT fire."""
+        item_id = seed_item(conn)
+        wh_id = seed_warehouse(conn, env["company_id"])
+        seed_sle(conn, item_id, wh_id, actual_qty="100")
+        seed_reservation(conn, env["company_id"], item_id, wh_id,
+                         reserved_qty="30")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("reservation_over_available", 0) == 0
+
+    def test_released_reservation_ignored(self, conn, env):
+        """NEGATIVE CONTROL: a non-active (released) reservation is not counted."""
+        item_id = seed_item(conn)
+        wh_id = seed_warehouse(conn, env["company_id"])
+        seed_sle(conn, item_id, wh_id, actual_qty="0")
+        seed_reservation(conn, env["company_id"], item_id, wh_id,
+                         reserved_qty="80", status="released")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("reservation_over_available", 0) == 0
+
+
+class TestAI1SubcontractReceiptMismatch:
+    def _detect(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id,
+            from_date="2026-01-01", to_date="2026-03-31",
+        ))
+
+    def test_over_receipt_raises_critical(self, conn, env):
+        """Received FG (100) far exceeds materials transferred (10) => a critical
+        subcontract_receipt_mismatch with exact figures."""
+        oid = seed_subcontracting_order(
+            conn, env["company_id"], qty="100",
+            materials_transferred="10", received_qty="100",
+            status="partially_received")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("subcontract_receipt_mismatch", 0) == 1
+        assert r["by_severity"].get("critical", 0) >= 1
+
+        a = _find_anomaly(conn, env["company_id"], "subcontract_receipt_mismatch")
+        assert a is not None
+        assert a["severity"] == "critical"
+        assert a["entity_type"] == "subcontracting_order"
+        assert a["entity_id"] == oid
+        assert json.loads(a["baseline"]) == {"materials_transferred": "10.00"}
+        assert json.loads(a["actual"]) == {"received_qty": "100.00"}
+        assert a["deviation_pct"] == "900.00"       # (100-10)/10 * 100
+        assert json.loads(a["evidence"])["direction"] == "over_receipt"
+
+    def test_completed_under_receipt_warns(self, conn, env):
+        """A completed order where transferred (100) materially exceeds received
+        (90) => a warning (yield loss). 10 short / 100 = 10% > 5% tolerance."""
+        seed_subcontracting_order(
+            conn, env["company_id"], qty="90",
+            materials_transferred="100", received_qty="90",
+            status="completed")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("subcontract_receipt_mismatch", 0) == 1
+
+        a = _find_anomaly(conn, env["company_id"], "subcontract_receipt_mismatch")
+        assert a is not None
+        assert a["severity"] == "warning"
+        assert a["deviation_pct"] == "10.00"
+        assert json.loads(a["evidence"])["direction"] == "under_receipt"
+
+    def test_within_tolerance_no_anomaly(self, conn, env):
+        """NEGATIVE CONTROL: received (98) vs transferred (100) = 2% divergence,
+        within the 5% tolerance, must NOT fire."""
+        seed_subcontracting_order(
+            conn, env["company_id"], qty="98",
+            materials_transferred="100", received_qty="98",
+            status="completed")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("subcontract_receipt_mismatch", 0) == 0
+
+    def test_partial_under_receipt_not_flagged(self, conn, env):
+        """NEGATIVE CONTROL: an in-progress (partially_received) order with
+        received (40) below transferred (100) is legitimate mid-flow and must NOT
+        fire (under-receipt is only checked on completed orders)."""
+        seed_subcontracting_order(
+            conn, env["company_id"], qty="100",
+            materials_transferred="100", received_qty="40",
+            status="partially_received")
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("subcontract_receipt_mismatch", 0) == 0
