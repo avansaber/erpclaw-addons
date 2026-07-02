@@ -7,7 +7,7 @@
 Free, open-source, self-hosted connectors that sync every transaction directly into your ERPClaw general ledger. Your data stays on your own ERPClaw instance.
 
 ### Stripe (`erpclaw-integrations-stripe`)
-Deep Stripe integration. <!-- SYNC:value:module.erpclaw-integrations-stripe.actions -->67<!-- /SYNC --> actions across 10 domains: account management, charges/refunds/disputes/payouts/subscriptions sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports (revenue, MRR, fees, disputes).
+Deep Stripe integration. <!-- SYNC:value:module.erpclaw-integrations-stripe.actions -->66<!-- /SYNC --> actions across 10 domains: account management, charges/refunds/disputes/payouts/subscriptions sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports (revenue, MRR, fees, disputes).
 
 ```
 install-module erpclaw-integrations-stripe
@@ -28,13 +28,13 @@ OAuth tokens are forwarded once to your ERPClaw during pairing and deleted from 
 ## Modules
 
 ### Growth Suite (`erpclaw-growth`)
-CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis. <!-- SYNC:value:module.erpclaw-growth.actions -->110<!-- /SYNC --> actions across 4 sub-modules: CRM, CRM Advanced, Analytics, AI Engine.
+CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis. <!-- SYNC:value:module.erpclaw-growth.actions -->159<!-- /SYNC --> actions across 4 sub-modules: CRM, CRM Advanced, Analytics, AI Engine.
 
 ### Operations Suite (`erpclaw-ops`)
-Manufacturing (BOMs, work orders, MRP), advanced manufacturing (shop floor, tools, ECOs), projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal), quality (inspections, NCRs), and support (issues, SLAs, warranty). <!-- SYNC:value:module.erpclaw-ops.actions -->135<!-- /SYNC --> actions across 6 sub-modules.
+Manufacturing (BOMs, work orders, MRP), advanced manufacturing (shop floor, tools, ECOs), projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal), quality (inspections, NCRs), and support (issues, SLAs, warranty). <!-- SYNC:value:module.erpclaw-ops.actions -->142<!-- /SYNC --> actions across 6 sub-modules.
 
 ### Integration Connectors (`erpclaw-integrations`)
-Connector configs, field mappings, sync logs, and webhook registrations for booking, delivery, real estate, financial, and productivity platforms. <!-- SYNC:value:module.erpclaw-integrations.actions -->80<!-- /SYNC --> actions across 9 domains. (For Stripe and Shopify, use the dedicated deep-integration modules above.)
+Connector configs, field mappings, sync logs, and webhook registrations for booking, delivery, real estate, financial, and productivity platforms. <!-- SYNC:value:module.erpclaw-integrations.actions -->91<!-- /SYNC --> actions across 9 domains. (For Stripe and Shopify, use the dedicated deep-integration modules above.)
 
 ### OS Engine (developer tooling) (`erpclaw-os-engine`)
 Optional addon for developers authoring new ERPClaw vertical modules and inspecting OS-level health. Sandbox-first module generation; user approval required before any deploy. Not installed by default. Required only if you are authoring modules or running ERPClaw in power-user mode where the OS proposes patterns over time. See [erpclaw-os-engine/README.md](erpclaw-os-engine/README.md) for the full action catalog and install path.
@@ -53,7 +53,7 @@ Optional addon for developers authoring new ERPClaw vertical modules and inspect
 | `erpclaw-logistics` | Transportation and logistics -- shipments, carriers, routes, freight charges, carrier invoicing. <!-- SYNC:value:module.erpclaw-logistics.actions -->34<!-- /SYNC --> actions. |
 | `erpclaw-maintenance` | Equipment maintenance -- preventive schedules, work orders, checklists, downtime tracking. |
 | `erpclaw-planning` | Financial planning -- budgets, scenario modeling, forecasting, variance analysis. |
-| `erpclaw-pos` | Point of sale -- register sessions, transactions, cart operations, payments, receipts. <!-- SYNC:value:module.erpclaw-pos.actions -->28<!-- /SYNC --> actions. |
+| `erpclaw-pos` | Point of sale -- register sessions, transactions, cart operations, payments, receipts. <!-- SYNC:value:module.erpclaw-pos.actions -->29<!-- /SYNC --> actions. |
 | `erpclaw-selfservice` | Self-service permission layer -- scoped portal access for employees, clients, tenants, patients, vendors. <!-- SYNC:value:module.erpclaw-selfservice.actions -->25<!-- /SYNC --> actions. |
 | `erpclaw-treasury` | Treasury management -- bank accounts, cash positions, forecasts, investments, inter-company transfers. |
 
