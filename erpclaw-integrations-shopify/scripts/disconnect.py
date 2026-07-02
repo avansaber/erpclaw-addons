@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 def _utc_iso_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-LIB_PATH = os.path.expanduser("~/.openclaw/erpclaw/lib")
+LIB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
 if LIB_PATH not in sys.path:
     sys.path.insert(0, LIB_PATH)
 

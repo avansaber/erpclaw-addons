@@ -34,7 +34,7 @@ def _self_check_foundation():
     if env_home:
         candidates.append(os.path.join(env_home, "scripts", "erpclaw-setup", "lib"))
     # Production install path (foundation lib)
-    candidates.append(os.path.expanduser("~/.openclaw/erpclaw/lib"))
+    candidates.append(os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     # Dev / source-relative fallback (5 levels up: scripts -> erpclaw-os-engine -> erpclaw-addons -> source -> repo, then into foundation source)
     here = os.path.abspath(os.path.dirname(__file__))
     repo_lib = os.path.normpath(os.path.join(here, "..", "..", "..", "erpclaw", "scripts", "erpclaw-setup", "lib"))

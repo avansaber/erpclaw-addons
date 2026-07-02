@@ -1,6 +1,6 @@
 ---
 name: erpclaw-growth
-version: 2.6.0
+version: 2.7.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module
   analytics, and AI-powered business analysis for ERPClaw. 135 actions across 4 domains: lead

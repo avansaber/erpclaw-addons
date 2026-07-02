@@ -40,6 +40,13 @@ ACTION_MAP = {
     "generate-work-orders": "erpclaw-manufacturing",
     "generate-purchase-requests": "erpclaw-manufacturing",
     "add-subcontracting-order": "erpclaw-manufacturing",
+    "submit-subcontracting-order": "erpclaw-manufacturing",
+    "transfer-materials-to-subcontractor": "erpclaw-manufacturing",
+    "receive-subcontracted-items": "erpclaw-manufacturing",
+    "cancel-subcontracting-order": "erpclaw-manufacturing",
+    "cancel-subcontract-transfer": "erpclaw-manufacturing",
+    "get-subcontracting-order": "erpclaw-manufacturing",
+    "list-subcontracting-orders": "erpclaw-manufacturing",
     "status": "erpclaw-manufacturing",
 
     # === Projects (19 actions) ===

@@ -230,7 +230,7 @@ def run_in_sandbox(
         test_env = os.environ.copy()
         test_env["ERPCLAW_DB_PATH"] = db_path
         # Ensure erpclaw_lib is importable
-        erpclaw_lib = os.path.expanduser("~/.openclaw/erpclaw/lib")
+        erpclaw_lib = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
         if "PYTHONPATH" in test_env:
             test_env["PYTHONPATH"] = erpclaw_lib + os.pathsep + test_env["PYTHONPATH"]
         else:
