@@ -26,6 +26,8 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared reconciliation-run fetch (M31 H6 dedup).
+    from erpclaw_lib.integration_actions import get_reconciliation_run_action
 except ImportError:
     pass
 
@@ -561,19 +563,8 @@ def list_unreconciled(conn, args):
 # ---------------------------------------------------------------------------
 def get_reconciliation_run(conn, args):
     """Get details of a specific reconciliation run."""
-    reconciliation_run_id = getattr(args, "reconciliation_run_id", None)
-    if not reconciliation_run_id:
-        err("--reconciliation-run-id is required")
-
-    t = Table("stripe_reconciliation_run")
-    row = conn.execute(
-        Q.from_(t).select("*").where(t.id == P()).get_sql(),
-        (reconciliation_run_id,)
-    ).fetchone()
-    if not row:
-        err(f"Reconciliation run {reconciliation_run_id} not found")
-
-    ok(row_to_dict(row))
+    get_reconciliation_run_action(
+        conn, args, "stripe_reconciliation_run", "reconciliation_run_id")
 
 
 # ---------------------------------------------------------------------------

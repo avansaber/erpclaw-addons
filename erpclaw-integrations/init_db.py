@@ -472,85 +472,22 @@ def create_integration_tables(db_path=None):
     indexes_created += 3
 
     # ==================================================================
-    # PLAID -- Bank Integration (3 tables)
+    # PLAID / STRIPE / S3 -- config + scaffolding tables (all removed)
     # ==================================================================
-
-    # TABLE 18: plaid_config
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS plaid_config (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            client_id       TEXT NOT NULL,
-            secret          TEXT NOT NULL,
-            environment     TEXT NOT NULL DEFAULT 'sandbox'
-                            CHECK(environment IN ('sandbox','development','production')),
-            status          TEXT NOT NULL DEFAULT 'active'
-                            CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(company_id)
-        )
-    """)
-    tables_created += 1
-
-    # plaid_linked_account / plaid_transaction removed 2026-06-01 (audit P2): dead
-    # scaffolding for an unbuilt Plaid connector (zero code/doc references). Dropped
-    # from existing DBs by this module's migration 001.
-
-    # ==================================================================
-    # STRIPE -- Payment Gateway (3 tables)
-    # ==================================================================
-
-    # TABLE 21: stripe_config
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_config (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            publishable_key TEXT NOT NULL,
-            secret_key      TEXT NOT NULL,
-            webhook_secret  TEXT,
-            mode            TEXT NOT NULL DEFAULT 'test'
-                            CHECK(mode IN ('test','live')),
-            status          TEXT NOT NULL DEFAULT 'active'
-                            CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(company_id)
-        )
-    """)
-    tables_created += 1
-
-    # stripe_payment_intent / stripe_webhook_event removed 2026-06-01 (audit P2):
-    # dead scaffolding (zero code/doc references) superseded by the dedicated live
-    # erpclaw-integrations-stripe addon. stripe_config kept (referenced). Dropped
-    # from existing DBs by this module's migration 001.
-
-    # ==================================================================
-    # S3 -- Cloud Backup (2 tables)
-    # ==================================================================
-
-    # TABLE 24: s3_config
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS s3_config (
-            id              TEXT PRIMARY KEY,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            bucket_name     TEXT NOT NULL,
-            region          TEXT NOT NULL DEFAULT 'us-east-1',
-            access_key_id   TEXT NOT NULL,
-            secret_access_key TEXT NOT NULL,
-            prefix          TEXT DEFAULT 'erpclaw-backups/',
-            status          TEXT NOT NULL DEFAULT 'active'
-                            CHECK(status IN ('active','disabled')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(company_id)
-        )
-    """)
-    tables_created += 1
-
-    # s3_backup_record removed 2026-06-01 (audit P2): dead scaffolding (zero
-    # code/doc references); s3_config kept (referenced). Dropped from existing DBs
-    # by this module's migration 001.
+    #
+    # plaid_config / stripe_config / s3_config removed 2026-07-02 (M31 H2 / audit
+    # B7): the "KEPT (referenced)" rationale from migration 001 is overturned. The
+    # register (writers=[], readers=[]) confirms zero writers/readers ever; the
+    # sole reference was the erpclaw-meta ownership map (SKILL_TABLES), a runtime-
+    # computed doc-map, not a persistence path. All three also normalized plaintext
+    # secrets, contradicting the typed-credential mechanism (crypto.encrypt_field /
+    # integration_credential) that the live connectors actually use. Dropped from
+    # existing DBs by this module's migration 002.
+    #
+    # Earlier siblings removed 2026-06-01 (audit P2) by migration 001:
+    #   plaid_linked_account / plaid_transaction (unbuilt Plaid connector),
+    #   stripe_payment_intent / stripe_webhook_event (superseded by the dedicated
+    #   erpclaw-integrations-stripe addon), s3_backup_record (unbuilt S3 backup).
 
     conn.commit()
     conn.close()

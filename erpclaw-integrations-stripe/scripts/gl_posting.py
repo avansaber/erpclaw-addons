@@ -37,6 +37,8 @@ if _SCRIPTS_DIR not in sys.path:
 
 from stripe_helpers import (
     SKILL, now_iso, validate_stripe_account,
+    # GL-posting helpers single-sourced in stripe_helpers (M31 H6).
+    _resolve_cost_center_id, _get_stripe_account_gl, _create_journal_entry,
 )
 
 
@@ -47,32 +49,6 @@ from stripe_helpers import (
 def _today():
     """Return today's date as YYYY-MM-DD string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _resolve_cost_center_id(conn, company_id, explicit_cc_id=None):
-    """Resolve cost_center_id: use explicit value if given, else company default.
-
-    P&L accounts (expense, income) require a cost_center_id for GL validation
-    Step 6. This function auto-resolves from the company table when no explicit
-    value is provided, so users don't need to know cost center IDs.
-
-    Returns the cost_center_id string, or calls err() if none can be resolved.
-    """
-    if explicit_cc_id:
-        return explicit_cc_id
-
-    t = Table("company")
-    row = conn.execute(
-        Q.from_(t).select(t.default_cost_center_id)
-        .where(t.id == P()).get_sql(),
-        (company_id,)
-    ).fetchone()
-
-    if row and row["default_cost_center_id"]:
-        return row["default_cost_center_id"]
-
-    err("No cost_center_id provided and company has no default_cost_center_id. "
-        "Set a default cost center on the company or pass --cost-center-id.")
 
 
 def _call_silently(fn, conn, args):
@@ -94,31 +70,6 @@ def _call_silently(fn, conn, args):
         if e.code == 0 or e.code is None:
             return
         raise
-
-
-def _get_stripe_account_gl(conn, stripe_account_id):
-    """Load the stripe_account row and return GL account mapping dict.
-
-    Returns dict with keys: stripe_clearing_account_id, stripe_fees_account_id,
-    stripe_payout_account_id, dispute_expense_account_id,
-    unearned_revenue_account_id, platform_revenue_account_id, company_id.
-    """
-    t = Table("stripe_account")
-    row = conn.execute(
-        Q.from_(t).select(
-            t.company_id,
-            t.stripe_clearing_account_id,
-            t.stripe_fees_account_id,
-            t.stripe_payout_account_id,
-            t.dispute_expense_account_id,
-            t.unearned_revenue_account_id,
-            t.platform_revenue_account_id,
-        ).where(t.id == P()).get_sql(),
-        (stripe_account_id,)
-    ).fetchone()
-    if not row:
-        err(f"Stripe account {stripe_account_id} not found")
-    return dict(row)
 
 
 def _find_customer_for_charge(conn, stripe_account_id, customer_stripe_id):
@@ -181,36 +132,6 @@ def _create_payment_entry(conn, company_id, payment_type, posting_date,
         company_id, now, now,
     ))
     return pe_id
-
-
-def _create_journal_entry(conn, company_id, posting_date, total_amount,
-                          entry_type="journal", remark=None, currency="USD"):
-    """Insert a journal_entry row and return its ID.
-
-    The Stripe module creates journal entries directly as the voucher
-    document for GL posting (disputes, connect fees).
-
-    `currency` is the transaction currency (ISO 4217). exchange_rate is
-    always "1": ERPClaw books in transaction currency, never converts.
-    """
-    je_id = str(uuid.uuid4())
-    now = now_iso()
-
-    sql, _ = insert_row("journal_entry", {
-        "id": P(), "posting_date": P(), "entry_type": P(),
-        "total_debit": P(), "total_credit": P(),
-        "currency": P(), "exchange_rate": P(), "remark": P(),
-        "status": P(), "company_id": P(),
-        "created_at": P(), "updated_at": P(),
-    })
-    conn.execute(sql, (
-        je_id, posting_date, entry_type,
-        str(round_currency(total_amount)), str(round_currency(total_amount)),
-        (currency or "USD").upper(), "1", remark or "",
-        "submitted", company_id,
-        now, now,
-    ))
-    return je_id
 
 
 def _mark_balance_transactions_reconciled(conn, stripe_account_id,

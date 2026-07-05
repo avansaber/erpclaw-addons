@@ -396,8 +396,8 @@ ACTION_REQUIREMENTS = {
     "headcount-analytics": ["erpclaw-hr"],
     "payroll-analytics": ["erpclaw-payroll"],
     "leave-utilization": ["erpclaw-hr"],
-    "project-profitability": ["erpclaw-projects"],
-    "quality-dashboard": ["erpclaw-quality"],
+    "project-profitability-analytics": ["erpclaw-projects"],
+    "quality-analytics": ["erpclaw-quality"],
     "support-metrics": ["erpclaw-support"],
     "executive-dashboard": [],
     "company-scorecard": [],
@@ -1592,11 +1592,15 @@ def action_leave_utilization(conn, args):
 
 
 # ===========================================================================
-# ACTION: project-profitability
+# ACTION: project-profitability-analytics
 # ===========================================================================
 
 def action_project_profitability(conn, args):
-    """Project profitability analysis (requires erpclaw-projects)."""
+    """Company-wide project-profitability analytics roll-up (requires
+    erpclaw-projects). Lists every project's profit/margin for a company, with
+    --project-id optional. Distinct from erpclaw-ops' domain-owner
+    `project-profitability`, which requires --project-id and returns a single
+    project's deep report with per-employee timesheet breakdown."""
     _require_company(args)
 
     dep = check_required_tables(conn, ["project"])
@@ -1661,11 +1665,14 @@ def action_project_profitability(conn, args):
 
 
 # ===========================================================================
-# ACTION: quality-dashboard
+# ACTION: quality-analytics
 # ===========================================================================
 
 def action_quality_dashboard(conn, args):
-    """Quality metrics dashboard (requires erpclaw-quality)."""
+    """Company-wide quality analytics roll-up (requires erpclaw-quality):
+    inspection pass/fail rate + non-conformance count over a period. Distinct
+    from erpclaw-ops' domain-owner `quality-dashboard`, which also breaks out
+    NCRs by severity and quality-goal progress."""
     _require_company(args)
 
     dep = check_required_tables(conn, ["quality_inspection"])
@@ -2387,9 +2394,10 @@ ACTIONS = {
     "headcount-analytics": action_headcount_analytics,
     "payroll-analytics": action_payroll_analytics,
     "leave-utilization": action_leave_utilization,
-    # Operations
-    "project-profitability": action_project_profitability,
-    "quality-dashboard": action_quality_dashboard,
+    # Operations (analytics roll-ups; distinct from the domain-owner reports of
+    # the same concept in erpclaw-ops — see the docstrings / M31-H4 rename)
+    "project-profitability-analytics": action_project_profitability,
+    "quality-analytics": action_quality_dashboard,
     "support-metrics": action_support_metrics,
     # Dashboards & trends
     "executive-dashboard": action_executive_dashboard,

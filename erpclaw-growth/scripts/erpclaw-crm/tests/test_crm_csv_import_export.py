@@ -35,6 +35,16 @@ MOD = load_db_query()
 _REPO_ROOT = os.path.dirname(SRC_DIR)
 _FIXTURES = os.path.join(_REPO_ROOT, "testing", "fixtures", "csv")
 
+# The committed CSV import/export fixtures live at the monorepo's
+# testing/fixtures/csv/ (outside the published erpclaw-growth tree). In a
+# standalone checkout that directory is absent, so the whole module skips
+# rather than failing with "File not found"; in the monorepo it resolves and
+# every test runs.
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(_FIXTURES),
+    reason="testing/fixtures/csv not present — CRM CSV import/export tests need "
+           "the monorepo fixture set")
+
 
 def fx(name):
     return os.path.join(_FIXTURES, name)

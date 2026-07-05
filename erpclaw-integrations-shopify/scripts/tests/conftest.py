@@ -10,6 +10,27 @@ import pytest
 from shopify_test_helpers import init_all_tables, get_conn, build_env, seed_company
 
 
+@pytest.fixture(autouse=True)
+def isolated_master_key(tmp_path, monkeypatch):
+    """Per-test isolated master key for at-rest token encryption.
+
+    M31 H6 replaced the addon's bespoke XOR token cipher with AES-256-GCM keyed
+    by the foundation per-machine master key (erpclaw_lib.master_key). Redirect
+    CONFIG_DIR / MASTER_KEY_PATH to a per-test tmp dir so encrypt_token /
+    decrypt_token round-trip on an isolated key and never touch the real
+    ~/.config/erpclaw/. Mirrors the Stripe suite's isolated_credentials fixture.
+    """
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import erpclaw_lib.master_key as mk_mod
+
+    config_dir = tmp_path / ".config" / "erpclaw"
+    config_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(mk_mod, "CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(mk_mod, "MASTER_KEY_PATH", str(config_dir / "master.key"))
+    yield
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Per-test fresh SQLite database with foundation + shopify schema."""

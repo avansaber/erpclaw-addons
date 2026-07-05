@@ -21,6 +21,11 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared sync-job lifecycle helpers (M31 H6 dedup).
+    from erpclaw_lib.integration_actions import (
+        fail_sync_job, cancel_sync_job_action,
+        get_sync_job_action, list_sync_jobs_action,
+    )
 except ImportError:
     pass
 
@@ -88,16 +93,8 @@ def _complete_sync_job(conn, job_id, records_processed, records_created=0,
 
 
 def _fail_sync_job(conn, job_id, error_message, records_processed=0):
-    """Mark a sync job as failed with error details."""
-    now = now_iso()
-    sql, params = dynamic_update("shopify_sync_job", {
-        "status": "failed",
-        "records_processed": records_processed,
-        "error_message": str(error_message)[:2000],
-        "completed_at": now,
-    }, {"id": job_id})
-    conn.execute(sql, params)
-    conn.commit()
+    """Mark a sync job as failed with error details (delegates to shared helper)."""
+    fail_sync_job(conn, "shopify_sync_job", job_id, error_message, records_processed)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,22 +1024,7 @@ def start_full_sync(conn, args):
 # ---------------------------------------------------------------------------
 def get_sync_job(conn, args):
     """Get details of a specific sync job."""
-    sync_job_id = getattr(args, "sync_job_id", None)
-    if not sync_job_id:
-        err("--sync-job-id is required")
-
-    t = Table("shopify_sync_job")
-    row = conn.execute(
-        Q.from_(t).select("*").where(t.id == P()).get_sql(),
-        (sync_job_id,)
-    ).fetchone()
-    if not row:
-        err(f"Sync job {sync_job_id} not found")
-
-    data = row_to_dict(row)
-    # Rename 'status' to 'sync_status' to avoid collision with ok() response status
-    data["sync_status"] = data.pop("status", None)
-    ok(data)
+    get_sync_job_action(conn, args, "shopify_sync_job")
 
 
 # ---------------------------------------------------------------------------
@@ -1050,36 +1032,11 @@ def get_sync_job(conn, args):
 # ---------------------------------------------------------------------------
 def list_sync_jobs(conn, args):
     """List sync jobs for a Shopify account with optional filters."""
-    shopify_account_id = getattr(args, "shopify_account_id", None)
-    if not shopify_account_id:
-        err("--shopify-account-id is required")
-
-    t = Table("shopify_sync_job")
-    q = Q.from_(t).select("*").where(
-        t.shopify_account_id == P()
-    ).orderby(t.created_at, order=Order.desc)
-
-    params = [shopify_account_id]
-
-    status = getattr(args, "status", None)
-    if status:
-        q = q.where(t.status == P())
-        params.append(status)
-
-    sync_type = getattr(args, "sync_type", None)
-    if sync_type:
-        q = q.where(t.sync_type == P())
-        params.append(sync_type)
-
-    limit = getattr(args, "limit", 50) or 50
-    offset = getattr(args, "offset", 0) or 0
-    q = q.limit(limit).offset(offset)
-
-    rows = conn.execute(q.get_sql(), tuple(params)).fetchall()
-    ok({
-        "sync_jobs": rows_to_list(rows),
-        "count": len(rows),
-    })
+    list_sync_jobs_action(
+        conn, args, "shopify_sync_job",
+        "shopify_account_id", "shopify_account_id",
+        extra_filter=("sync_type", "sync_type"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1087,33 +1044,7 @@ def list_sync_jobs(conn, args):
 # ---------------------------------------------------------------------------
 def cancel_sync_job(conn, args):
     """Cancel a running or pending sync job."""
-    sync_job_id = getattr(args, "sync_job_id", None)
-    if not sync_job_id:
-        err("--sync-job-id is required")
-
-    t = Table("shopify_sync_job")
-    row = conn.execute(
-        Q.from_(t).select(t.id, t.status).where(t.id == P()).get_sql(),
-        (sync_job_id,)
-    ).fetchone()
-    if not row:
-        err(f"Sync job {sync_job_id} not found")
-
-    if row["status"] in ("completed", "failed", "cancelled"):
-        err(f"Cannot cancel sync job in '{row['status']}' state")
-
-    now = now_iso()
-    sql, params = dynamic_update("shopify_sync_job", {
-        "status": "cancelled",
-        "completed_at": now,
-    }, {"id": sync_job_id})
-    conn.execute(sql, params)
-
-    audit(conn, SKILL, "shopify-cancel-sync-job", "shopify_sync_job", sync_job_id,
-          new_values={"status": "cancelled"})
-    conn.commit()
-
-    ok({"sync_job_id": sync_job_id, "status": "cancelled"})
+    cancel_sync_job_action(conn, args, "shopify_sync_job", SKILL, "shopify-cancel-sync-job")
 
 
 # ---------------------------------------------------------------------------

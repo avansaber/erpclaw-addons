@@ -107,13 +107,17 @@ ACTION_MAP = {
     "headcount-analytics": "erpclaw-analytics",
     "payroll-analytics": "erpclaw-analytics",
     "leave-utilization": "erpclaw-analytics",
-    "project-profitability": "erpclaw-analytics",
-    "quality-dashboard": "erpclaw-analytics",
+    "project-profitability-analytics": "erpclaw-analytics",
+    "quality-analytics": "erpclaw-analytics",
     "support-metrics": "erpclaw-analytics",
     "executive-dashboard": "erpclaw-analytics",
     "company-scorecard": "erpclaw-analytics",
     "metric-trend": "erpclaw-analytics",
     "period-comparison": "erpclaw-analytics",
+    # M31 router union (2026-07-02): defined + tested in erpclaw-analytics but
+    # missing from this map, so the router returned "Unknown action". Restored
+    # by the same dispatchability sweep as foundation's 27; L0 gate now guards.
+    "analyze-query-performance": "erpclaw-analytics",
 
     # === AI Engine (22 actions) ===
     "detect-anomalies": "erpclaw-ai-engine",

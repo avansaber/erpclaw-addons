@@ -1,6 +1,6 @@
 ---
 name: erpclaw-integrations
-version: 2.1.0
+version: 2.2.0
 description: Integration Connectors -- manage connector configs, field mappings, sync logs, webhook registrations, and platform-specific connectors for booking, delivery, real estate, financial, and productivity platforms. 80 actions across 9 domains. Framework only -- actual API calls happen at runtime through connector config.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons

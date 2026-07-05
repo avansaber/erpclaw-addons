@@ -20,6 +20,8 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared GL-rule soft-delete (M31 H6 dedup + response-shape convergence).
+    from erpclaw_lib.integration_actions import soft_delete_gl_rule
 except ImportError:
     pass
 
@@ -214,35 +216,11 @@ def list_gl_rules(conn, args):
 # 4. stripe-delete-gl-rule
 # ---------------------------------------------------------------------------
 def delete_gl_rule(conn, args):
-    """Soft-delete a GL rule by setting is_active=0."""
-    gl_rule_id = getattr(args, "gl_rule_id", None)
-    if not gl_rule_id:
-        err("--gl-rule-id is required")
+    """Soft-delete a GL rule by setting is_active=0.
 
-    t = Table("stripe_gl_rule")
-    existing = conn.execute(
-        Q.from_(t).select(t.id, t.is_active).where(t.id == P()).get_sql(),
-        (gl_rule_id,)
-    ).fetchone()
-    if not existing:
-        err(f"GL rule {gl_rule_id} not found")
-
-    if existing["is_active"] == 0:
-        err(f"GL rule {gl_rule_id} is already deleted")
-
-    sql, params = dynamic_update("stripe_gl_rule", {
-        "is_active": 0,
-    }, {"id": gl_rule_id})
-    conn.execute(sql, params)
-
-    audit(conn, SKILL, "stripe-delete-gl-rule", "stripe_gl_rule", gl_rule_id,
-          new_values={"is_active": 0})
-    conn.commit()
-
-    ok({
-        "gl_rule_id": gl_rule_id,
-        "status": "deleted",
-    })
+    Response shape: {"gl_rule_id": <id>, "is_active": 0} (shared/converged, M31 H6).
+    """
+    soft_delete_gl_rule(conn, args, "stripe_gl_rule", SKILL, "stripe-delete-gl-rule")
 
 
 # ---------------------------------------------------------------------------

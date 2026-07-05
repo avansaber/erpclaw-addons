@@ -23,6 +23,16 @@ SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR)))  # sourc
 REPO_ROOT = os.path.dirname(SRC_DIR)
 FIXTURES = os.path.join(REPO_ROOT, "testing", "fixtures", "bank")
 
+# The committed bank-statement fixtures live at the monorepo's testing/fixtures/
+# bank/ (a repo-relative path outside the published erpclaw-integrations tree).
+# In a standalone checkout that directory is absent, so the whole module skips
+# rather than failing with "File not found"; in the monorepo it resolves and
+# every test runs.
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(FIXTURES),
+    reason="testing/fixtures/bank not present — bank-import tests need the "
+           "monorepo fixture set")
+
 sys.path.insert(0, MODULE_DIR)
 import parsers  # noqa: E402
 

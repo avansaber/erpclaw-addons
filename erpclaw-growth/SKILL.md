@@ -1,6 +1,6 @@
 ---
 name: erpclaw-growth
-version: 2.7.0
+version: 2.8.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module
   analytics, and AI-powered business analysis for ERPClaw. 135 actions across 4 domains: lead
@@ -237,8 +237,8 @@ Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules
 | `headcount-analytics` | `--company-id` | `--as-of-date`, `--group-by` |
 | `payroll-analytics` | `--company-id`, `--from-date`, `--to-date` | `--department-id` |
 | `leave-utilization` | `--company-id` | `--from-date`, `--to-date` |
-| `project-profitability` | `--company-id` | `--project-id`, `--from-date`, `--to-date` |
-| `quality-dashboard` | `--company-id` | `--from-date`, `--to-date` |
+| `project-profitability-analytics` | `--company-id` | `--project-id`, `--from-date`, `--to-date` |
+| `quality-analytics` | `--company-id` | `--from-date`, `--to-date` |
 | `support-metrics` | `--company-id` | `--from-date`, `--to-date` |
 | `executive-dashboard` | `--company-id` | `--from-date`, `--to-date` |
 | `company-scorecard` | `--company-id` | `--as-of-date` |

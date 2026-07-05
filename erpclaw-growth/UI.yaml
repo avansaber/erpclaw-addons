@@ -20,10 +20,6 @@ domains:
   label: Campaign
   entities:
   - campaign
-- key: communication
-  label: Communication
-  entities:
-  - communication
 - key: conversation_context
   label: Conversation Context
   entities:
@@ -702,107 +698,6 @@ entities:
         label: Notes
         order: 4
         columns: 1
-  communication:
-    label: Communication
-    label_plural: Communications
-    table: communication
-    id_col: id
-    name_col: id
-    primary_field: id
-    identifier_field: id
-    fields:
-      id:
-        type: text
-        label: ID
-        read_only: true
-        hidden: true
-      communication_type:
-        type: select
-        label: Communication Type
-        required: true
-        options:
-        - value: email
-          label: Email
-        - value: sms
-          label: Sms
-        - value: call
-          label: Call
-        - value: chat
-          label: Chat
-        in_form_view: true
-        form_group: details
-        form_order: 1
-      subject:
-        type: text
-        label: Subject
-        in_form_view: true
-        form_group: details
-        form_order: 2
-      content:
-        type: text
-        label: Content
-        in_form_view: true
-        form_group: details
-        form_order: 3
-      sender:
-        type: text
-        label: Sender
-        in_form_view: true
-        form_group: details
-        form_order: 4
-      recipients:
-        type: text
-        label: Recipients
-        in_form_view: true
-        form_group: details
-        form_order: 5
-      reference_type:
-        type: text
-        label: Reference Type
-        in_form_view: true
-        form_group: details
-        form_order: 6
-      reference_id:
-        type: link
-        label: Reference ID
-        link_entity: reference
-        link_display_field: name
-        link_search_action: list-references
-        in_form_view: true
-        form_group: references
-        form_order: 7
-      sent_or_received:
-        type: select
-        label: Sent Or Received
-        required: true
-        options:
-        - value: sent
-          label: Sent
-        - value: received
-          label: Received
-        in_form_view: true
-        form_group: details
-        form_order: 8
-      communication_date:
-        type: date
-        label: Communication Date
-        in_list_view: true
-        in_form_view: true
-        form_group: header
-        form_order: 9
-    form_groups:
-      header:
-        label: Basic Information
-        order: 1
-        columns: 2
-      details:
-        label: Details
-        order: 2
-        columns: 2
-      references:
-        label: References
-        order: 3
-        columns: 2
   anomaly:
     label: Anomaly
     label_plural: Anomalies
@@ -1851,10 +1746,10 @@ action_map:
   profitability-ratios:
     component: FormView
     mode: create
-  project-profitability:
+  project-profitability-analytics:
     component: FormView
     mode: create
-  quality-dashboard:
+  quality-analytics:
     component: FormView
     mode: create
   revenue-by-customer:

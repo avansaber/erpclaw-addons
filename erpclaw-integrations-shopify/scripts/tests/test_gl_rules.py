@@ -103,6 +103,10 @@ class TestGLRules:
             gl_rule_id=add_result["id"],
         ))
         assert is_ok(result), result
+        # M31 H6: delete_gl_rule response converged to the shared shape
+        # {"gl_rule_id": <id>, "is_active": 0} (key was "id" before). The
+        # envelope's status stays "ok"; the row's new state is carried by is_active.
+        assert result["gl_rule_id"] == add_result["id"]
         assert result["is_active"] == 0
 
         # Verify double-delete fails

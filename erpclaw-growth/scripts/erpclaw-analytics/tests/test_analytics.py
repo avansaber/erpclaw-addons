@@ -319,8 +319,10 @@ class TestLeaveUtilization:
 # ===========================================================================
 
 class TestProjectProfitability:
-    def test_project_profitability(self, conn, env):
-        r = call_action(MOD.project_profitability, conn, ns(
+    # Renamed project-profitability -> project-profitability-analytics (M31-H4)
+    # to clear the erpclaw-ops collision; the underscore attr follows the key.
+    def test_project_profitability_analytics(self, conn, env):
+        r = call_action(MOD.project_profitability_analytics, conn, ns(
             company_id=env["company_id"],
             from_date="2026-01-01", to_date="2026-03-31",
         ))
@@ -328,8 +330,9 @@ class TestProjectProfitability:
 
 
 class TestQualityDashboard:
-    def test_quality_dashboard(self, conn, env):
-        r = call_action(MOD.quality_dashboard, conn, ns(
+    # Renamed quality-dashboard -> quality-analytics (M31-H4).
+    def test_quality_analytics(self, conn, env):
+        r = call_action(MOD.quality_analytics, conn, ns(
             company_id=env["company_id"],
             from_date="2026-01-01", to_date="2026-03-31",
         ))

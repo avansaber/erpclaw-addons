@@ -24,6 +24,8 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared reconciliation-run fetch (M31 H6 dedup).
+    from erpclaw_lib.integration_actions import get_reconciliation_run_action
 except ImportError:
     pass
 
@@ -369,19 +371,8 @@ def list_reconciliations(conn, args):
 # ---------------------------------------------------------------------------
 def get_reconciliation(conn, args):
     """Get details of a specific reconciliation run."""
-    reconciliation_id = getattr(args, "reconciliation_id", None)
-    if not reconciliation_id:
-        err("--reconciliation-id is required")
-
-    t = Table("shopify_reconciliation_run")
-    row = conn.execute(
-        Q.from_(t).select("*").where(t.id == P()).get_sql(),
-        (reconciliation_id,)
-    ).fetchone()
-    if not row:
-        err(f"Reconciliation run {reconciliation_id} not found")
-
-    ok(row_to_dict(row))
+    get_reconciliation_run_action(
+        conn, args, "shopify_reconciliation_run", "reconciliation_id")
 
 
 # ---------------------------------------------------------------------------

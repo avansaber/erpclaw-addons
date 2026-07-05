@@ -28,6 +28,17 @@ if _HERE not in sys.path:
 import subcontract_helpers as sc  # noqa: E402
 from mfg_helpers import init_all_tables, get_conn  # noqa: E402
 
+# Every test here drives real cross-skill subprocesses against the foundation
+# router (transfer/receive/cancel resolve source/erpclaw/scripts/db_query.py via
+# a symlinked deployed-skills layout). In a standalone erpclaw-ops/addons
+# checkout the foundation tree is absent, so the whole module skips instead of
+# failing with "erpclaw is not installed"; in the monorepo the router resolves
+# and every test runs.
+pytestmark = pytest.mark.skipif(
+    not os.path.exists(sc._FOUND_ROUTER),
+    reason="erpclaw foundation router not present — subcontracting lifecycle "
+           "needs the foundation tree (monorepo-only cross-skill subprocesses)")
+
 
 @pytest.fixture
 def db_path(tmp_path):

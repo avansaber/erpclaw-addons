@@ -4,8 +4,6 @@ Provides encryption/decryption for access tokens, Shopify amount conversion
 (string -> Decimal), GraphQL request helper, and common imports used by all
 domain modules.
 """
-import base64
-import hashlib
 import os
 import subprocess
 import sys
@@ -32,6 +30,13 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared, err()-exit validators (hoisted from this module in M31 H6).
+    # Re-exported so existing `from shopify_helpers import validate_*` sites work.
+    from erpclaw_lib.action_validators import (
+        validate_company, validate_account_exists, validate_enum,
+    )
+    # Shared at-rest secret encryption (AES-256-GCM + legacy XOR read-back).
+    from erpclaw_lib.integration_secrets import encrypt_secret, decrypt_secret
 
     ENTITY_PREFIXES.setdefault("shopify_account", "SHPFY-")
     ENTITY_PREFIXES.setdefault("shopify_sync_job", "SHPSYNC-")
@@ -75,31 +80,23 @@ def mask_token(token):
 
 
 def encrypt_token(plaintext):
-    """Encrypt access token for storage using XOR with machine-specific salt.
+    """Encrypt an access token / secret for at-rest storage (AES-256-GCM).
 
-    Uses base64 encoding over XOR cipher with a salt derived from the
-    user's home directory path. This provides basic obfuscation -- tokens
-    are not stored in plaintext but this is not cryptographic-grade
-    encryption. For production, use a proper secrets manager.
+    Thin wrapper over the shared erpclaw_lib.integration_secrets primitive.
+    Used for both the access token and the HMAC secret columns. New writes
+    always use authenticated encryption (``enc:v2:...``); legacy XOR values
+    are still readable by decrypt_token().
     """
-    if not plaintext:
-        return ""
-    salt = hashlib.sha256(os.path.expanduser("~").encode()).digest()
-    encrypted = bytes(b ^ salt[i % len(salt)] for i, b in enumerate(plaintext.encode()))
-    return base64.b64encode(encrypted).decode()
+    return encrypt_secret(plaintext)
 
 
 def decrypt_token(ciphertext):
-    """Decrypt access token from storage.
+    """Decrypt a stored access token / secret.
 
-    Reverses the encrypt_token() operation.
+    Reads the current GCM format and transparently falls back to the pre-M31
+    XOR-salt format so existing installs keep working.
     """
-    if not ciphertext:
-        return ""
-    salt = hashlib.sha256(os.path.expanduser("~").encode()).digest()
-    decoded = base64.b64decode(ciphertext.encode())
-    decrypted = bytes(b ^ salt[i % len(salt)] for i, b in enumerate(decoded))
-    return decrypted.decode()
+    return decrypt_secret(ciphertext)
 
 
 def graphql_request(shop_domain, access_token, query, variables=None):
@@ -156,32 +153,6 @@ def get_shopify_client(conn, shopify_account_id):
     }
 
 
-def validate_company(conn, company_id):
-    """Validate that a company exists. Calls err() and exits if not found."""
-    if not company_id:
-        err("--company-id is required")
-    t = Table("company")
-    row = conn.execute(
-        Q.from_(t).select(t.id).where(t.id == P()).get_sql(),
-        (company_id,)
-    ).fetchone()
-    if not row:
-        err(f"Company {company_id} not found")
-
-
-def validate_account_exists(conn, account_id, label="Account"):
-    """Validate that a GL account exists. Calls err() and exits if not found."""
-    if not account_id:
-        return  # Optional field
-    t = Table("account")
-    row = conn.execute(
-        Q.from_(t).select(t.id).where(t.id == P()).get_sql(),
-        (account_id,)
-    ).fetchone()
-    if not row:
-        err(f"{label} {account_id} not found in chart of accounts")
-
-
 def validate_shopify_account(conn, shopify_account_id):
     """Validate that a shopify_account exists. Returns the row or calls err()."""
     if not shopify_account_id:
@@ -194,9 +165,3 @@ def validate_shopify_account(conn, shopify_account_id):
     if not row:
         err(f"Shopify account {shopify_account_id} not found")
     return row
-
-
-def validate_enum(value, valid_values, field_name):
-    """Validate that a value is in the allowed set. Calls err() if invalid."""
-    if value and value not in valid_values:
-        err(f"Invalid {field_name}: {value}. Must be one of: {', '.join(valid_values)}")

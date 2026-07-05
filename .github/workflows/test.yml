@@ -14,7 +14,12 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install pytest
-        run: pip install pytest pypika
+        # cryptography: stripe + alerts read secrets via erpclaw_lib.credentials
+        #   → erpclaw_lib.crypto → the `cryptography` package.
+        # jinja2 + markdown-it-py: erpclaw-documents renders templates
+        #   (jinja2.sandbox) and converts markdown bodies (markdown_it). The PDF
+        #   seam (weasyprint) is mocked in tests, so it is NOT required here.
+        run: pip install pytest pypika cryptography jinja2 markdown-it-py
       - name: Setup erpclaw_lib and init_schema
         run: |
           git clone --depth 1 --filter=blob:none --sparse \

@@ -47,6 +47,15 @@ ACTION_MAP = {
     "cancel-subcontract-transfer": "erpclaw-manufacturing",
     "get-subcontracting-order": "erpclaw-manufacturing",
     "list-subcontracting-orders": "erpclaw-manufacturing",
+    # M31 router union (2026-07-02): defined + tested in erpclaw-manufacturing
+    # (BOM co-products/by-products, material substitution, procurement type) but
+    # missing from this map, so the router returned "Unknown action". Restored by
+    # the same dispatchability sweep as foundation's 27; L0 gate now guards.
+    "add-bom-output": "erpclaw-manufacturing",
+    "list-bom-outputs": "erpclaw-manufacturing",
+    "add-bom-substitute": "erpclaw-manufacturing",
+    "list-bom-substitutes": "erpclaw-manufacturing",
+    "update-item-procurement-type": "erpclaw-manufacturing",
     "status": "erpclaw-manufacturing",
 
     # === Projects (19 actions) ===

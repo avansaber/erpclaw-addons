@@ -19,6 +19,8 @@ try:
         Q, P, Table, Field, fn, Order,
         insert_row, update_row, dynamic_update,
     )
+    # Shared GL-rule soft-delete (M31 H6 dedup + response-shape convergence).
+    from erpclaw_lib.integration_actions import soft_delete_gl_rule
 except ImportError:
     pass
 
@@ -191,30 +193,14 @@ def list_gl_rules(conn, args):
 # 4. shopify-delete-gl-rule
 # ---------------------------------------------------------------------------
 def delete_gl_rule(conn, args):
-    """Soft-delete a GL routing rule (set is_active=0)."""
-    gl_rule_id = getattr(args, "gl_rule_id", None)
-    if not gl_rule_id:
-        err("--gl-rule-id is required")
+    """Soft-delete a GL routing rule (set is_active=0).
 
-    t = Table("shopify_gl_rule")
-    existing = conn.execute(
-        Q.from_(t).select(t.id, t.is_active).where(t.id == P()).get_sql(),
-        (gl_rule_id,)
-    ).fetchone()
-    if not existing:
-        err(f"GL rule {gl_rule_id} not found")
-
-    if existing["is_active"] == 0:
-        err(f"GL rule {gl_rule_id} is already inactive")
-
-    sql, params = dynamic_update("shopify_gl_rule",
-                                  {"is_active": 0}, {"id": gl_rule_id})
-    conn.execute(sql, params)
-    audit(conn, SKILL, "shopify-delete-gl-rule", "shopify_gl_rule", gl_rule_id,
-          new_values={"is_active": 0})
-    conn.commit()
-
-    ok({"id": gl_rule_id, "is_active": 0})
+    M31 H6: response converged to the shared shape
+    {"gl_rule_id": <id>, "is_active": 0} (was {"id": <id>, "is_active": 0}); the
+    already-inactive error message changed from "is already inactive" to
+    "is already deleted".
+    """
+    soft_delete_gl_rule(conn, args, "shopify_gl_rule", SKILL, "shopify-delete-gl-rule")
 
 
 # ---------------------------------------------------------------------------
