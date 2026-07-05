@@ -273,6 +273,15 @@ class TestPostConnectFeeGLMulticurrency:
 # ---------------------------------------------------------------------------
 # Currency-mismatch validation (core erpclaw-payments)
 # ---------------------------------------------------------------------------
+_FOUNDATION_PAYMENTS = os.path.abspath(os.path.join(
+    os.path.dirname(_SCRIPTS_DIR), "..", "..",
+    "erpclaw", "scripts", "erpclaw-payments", "db_query.py"))
+
+
+@pytest.mark.skipif(
+    not os.path.exists(_FOUNDATION_PAYMENTS),
+    reason="erpclaw foundation tree not present — currency-mismatch validation "
+           "imports core erpclaw-payments (monorepo-only cross-skill path)")
 class TestCurrencyMismatchValidation:
     """The submit-payment action must reject a payment whose payment_currency
     differs from the allocated invoice's currency. ERPClaw does not convert.

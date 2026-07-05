@@ -9,6 +9,7 @@ Tests cover:
   6. Subscription-aware charge posting (gl_posting.py modification)
 """
 import os
+import pytest
 import sys
 from decimal import Decimal
 
@@ -27,6 +28,22 @@ from stripe_test_helpers import (
 )
 from rev_rec import ACTIONS as REV_REC_ACTIONS
 from gl_posting import ACTIONS as GL_POSTING_ACTIONS
+
+# Cross-repo guard (M31 H5 pattern): the recognition/status/change flows delegate
+# to the foundation's erpclaw-accounting-adv/revenue.py (advacct table owner).
+# In a standalone avansaber/erpclaw-addons checkout the foundation tree is absent,
+# the whole module skips with a reason instead of failing "Cannot find revenue.py";
+# in the monorepo the path resolves and every test runs.
+_FOUNDATION_REVENUE = os.path.normpath(os.path.join(
+    os.path.dirname(_SCRIPTS_DIR), "..", "..",
+    "erpclaw", "scripts", "erpclaw-accounting-adv", "revenue.py"))
+pytestmark = pytest.mark.skipif(
+    not os.path.exists(_FOUNDATION_REVENUE),
+    reason="erpclaw foundation tree not present — the whole ASC 606 bridge "
+           "delegates to erpclaw-accounting-adv/revenue.py (advacct table owner; "
+           "monorepo-only cross-skill path). CI-verified: all six classes fail "
+           "standalone, incl. error-path tests that would false-pass on the "
+           "wrong error.")
 
 
 # ===========================================================================
