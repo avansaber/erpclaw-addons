@@ -1,6 +1,6 @@
 ---
 name: erpclaw-growth
-version: 2.9.0
+version: 2.9.1
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis for ERPClaw.
   137 actions across 4 domains: lead management, lead sources, opportunity pipeline, saved views, global search, CSV import/export, email campaigns,
@@ -46,10 +46,7 @@ lead scoring, nurture sequence, marketing automation, campaign ROI, funnel analy
 
 ### Setup
 
-Requires `erpclaw` base package. Run `status` to verify:
-```
-python3 {baseDir}/scripts/db_query.py --action status
-```
+Requires `erpclaw` base package. Verify: `python3 {baseDir}/scripts/db_query.py --action status`
 
 ## Quick Start (Tier 1)
 
@@ -57,10 +54,12 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 
 ### CRM Pipeline
 ```
---action add-lead --lead-name "Jane Smith" --company-name "Acme Corp" --email "jane@acme.com" --source website
+--action add-lead-source --name "Referral"            # reusable dropdown option; list-lead-sources shows all
+--action add-lead --lead-name "Jane Smith" --company-name "Acme Corp" --email "jane@acme.com" --lead-source-id <id>
 --action convert-lead-to-opportunity --lead-id <id> --opportunity-name "Acme Widget Deal" --expected-revenue "50000.00"
 --action pipeline-report
 ```
+Prefer `--lead-source-id` (structured, feeds the dropdown + reports); `--source` free-text is legacy.
 
 ### Analytics Dashboard
 ```
