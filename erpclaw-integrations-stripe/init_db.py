@@ -96,7 +96,7 @@ def create_stripe_tables(db_path=None):
             sync_type           TEXT NOT NULL
                                 CHECK(sync_type IN ('full','incremental','webhook','historical_import')),
             object_type         TEXT NOT NULL
-                                CHECK(object_type IN ('balance_transaction','charge','refund','dispute','payout','customer','invoice','subscription','all')),
+                                CHECK(object_type IN ('balance_transaction','charge','refund','dispute','payout','customer','invoice','subscription','transfer','credit_note','all')),
             status              TEXT NOT NULL DEFAULT 'pending'
                                 CHECK(status IN ('pending','running','completed','failed','cancelled')),
             records_fetched     INTEGER NOT NULL DEFAULT 0,

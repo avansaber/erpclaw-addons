@@ -16,11 +16,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Action → domain mapping (111 unique actions + 4 status aliases)
 # Only collision: `status` in all 4 domains → routes to analytics.
 ACTION_MAP = {
-    # === CRM (18 actions) ===
+    # === CRM (20 actions) ===
     "add-lead": "erpclaw-crm",
     "update-lead": "erpclaw-crm",
     "get-lead": "erpclaw-crm",
     "list-leads": "erpclaw-crm",
+    "add-lead-source": "erpclaw-crm",
+    "list-lead-sources": "erpclaw-crm",
     "convert-lead-to-opportunity": "erpclaw-crm",
     "add-opportunity": "erpclaw-crm",
     "update-opportunity": "erpclaw-crm",

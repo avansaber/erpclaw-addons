@@ -1,7 +1,7 @@
 ---
 name: erpclaw-integrations-stripe
-version: 2.1.0
-description: Deep Stripe integration -- 67 actions across 10 domains. Account management, transaction sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports.
+version: 2.2.0
+description: Deep Stripe integration -- 68 actions across 10 domains. Account management, transaction sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports.
 author: avansaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -60,7 +60,7 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 --action stripe-revenue-report --stripe-account-id {id}
 ```
 
-## All 67 Actions
+## All 68 Actions
 
 ### Account Management (6 actions)
 | Action | Description |
@@ -82,7 +82,7 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 | `stripe-cancel-sync` | Cancel running sync |
 | `stripe-status` | Overall Stripe status |
 
-### Transaction Browse (10 actions)
+### Transaction Browse (11 actions)
 | Action | Description |
 |--------|-------------|
 | `stripe-list-charges` | List synced charges |
@@ -93,6 +93,7 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 | `stripe-get-payout` | Get payout with transactions |
 | `stripe-list-invoices` | List Stripe invoices |
 | `stripe-list-subscriptions` | List subscriptions |
+| `stripe-list-credit-notes` | List synced credit notes |
 | `stripe-list-webhook-events` | List webhook events |
 | `stripe-health-check` | Stripe health check |
 

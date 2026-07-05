@@ -73,29 +73,44 @@ def run_reconciliation(conn, args):
     total_payouts = len(payouts)
     payouts_matched = 0
     payouts_unmatched = 0
+    payouts_no_data = 0
     payout_discrepancies = []
 
     for p in payouts:
         expected_net = shopify_amount_to_decimal(p["net_amount"])
-        # Sum transactions for this payout
+
+        # A payout with zero synced transactions cannot be reconciled — it must
+        # NOT be reported as a clean match (that would be a vacuous pass that
+        # hides un-synced transaction detail). Count it distinctly instead.
+        txn_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM shopify_payout_transaction WHERE shopify_payout_id_local = ?",
+            (p["id"],)
+        ).fetchone()["cnt"]
+
+        if txn_count == 0:
+            payouts_no_data += 1
+            payout_discrepancies.append({
+                "payout_id": p["id"],
+                "expected": str(expected_net),
+                "actual": "0",
+                "diff": str(expected_net),
+                "reason": "no_transaction_data_synced",
+            })
+            continue
+
+        # Sum transaction net amounts with Decimal precision (money is Decimal,
+        # never float) — the sum is load-bearing now that real transaction rows
+        # exist. `decimal_sum` is the module's established money aggregate.
         txn_row = conn.execute(
-            """SELECT COALESCE(SUM(CAST(net_amount AS REAL)), 0) as txn_sum
+            """SELECT COALESCE(decimal_sum(net_amount), '0') as txn_sum
                FROM shopify_payout_transaction
                WHERE shopify_payout_id_local = ?""",
             (p["id"],)
         ).fetchone()
-        txn_sum = to_decimal(str(txn_row["txn_sum"])) if txn_row else Decimal("0")
+        txn_sum = (to_decimal(str(txn_row["txn_sum"]))
+                   if txn_row and txn_row["txn_sum"] is not None else Decimal("0"))
 
-        # If no transactions exist, consider the payout self-consistent
-        has_txns = conn.execute(
-            "SELECT COUNT(*) as cnt FROM shopify_payout_transaction WHERE shopify_payout_id_local = ?",
-            (p["id"],)
-        ).fetchone()
-
-        if has_txns["cnt"] == 0:
-            # No transactions to reconcile -- mark as matched (self-consistent)
-            payouts_matched += 1
-        elif amounts_equal(txn_sum, expected_net):
+        if amounts_equal(txn_sum, expected_net):
             payouts_matched += 1
         else:
             payouts_unmatched += 1
@@ -170,8 +185,12 @@ def run_reconciliation(conn, args):
     expected_clearing = posted_orders_sum - posted_payouts_sum - posted_refunds_sum
     discrepancy = clearing_balance - expected_clearing
 
-    # Determine status
-    if payouts_unmatched > 0 or not amounts_equal(discrepancy, Decimal("0")):
+    # Determine status. A run is only "completed" (clean) when every payout was
+    # genuinely reconciled. Payouts whose transaction detail was never synced
+    # (payouts_no_data) are NOT a clean match — they leave reconciliation
+    # incomplete, so the run reports "discrepancy" rather than vacuously passing.
+    if (payouts_unmatched > 0 or payouts_no_data > 0
+            or not amounts_equal(discrepancy, Decimal("0"))):
         run_status = "discrepancy"
     else:
         run_status = "completed"
@@ -216,6 +235,7 @@ def run_reconciliation(conn, args):
         "orders_unmatched": orders_unmatched,
         "payouts_matched": payouts_matched,
         "payouts_unmatched": payouts_unmatched,
+        "payouts_no_data": payouts_no_data,
         "expected_clearing_balance": str(round_currency(expected_clearing)),
         "actual_clearing_balance": str(round_currency(clearing_balance)),
         "discrepancy_amount": str(round_currency(discrepancy)),

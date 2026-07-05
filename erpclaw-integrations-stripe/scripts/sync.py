@@ -42,13 +42,16 @@ from stripe_helpers import (
 VALID_OBJECT_TYPES = (
     "balance_transaction", "charge", "refund", "dispute",
     "payout", "customer", "invoice", "subscription",
+    "transfer", "credit_note",
 )
 
 # Order matters for full sync — customers first so matching can work,
-# then transactional objects in dependency order.
+# then transactional objects in dependency order. Connect transfers and
+# credit notes are independent of the local match graph, so they sync last.
 FULL_SYNC_ORDER = (
     "customer", "charge", "refund", "dispute",
     "payout", "balance_transaction", "invoice", "subscription",
+    "transfer", "credit_note",
 )
 
 
@@ -139,6 +142,42 @@ def _sync_balance_transactions(conn, stripe_client, acct_id, company_id, since=N
                 company_id,
             )
         )
+
+        # Expand balance_transaction.fee_details[] into stripe_fee_detail rows,
+        # keyed by the balance transaction's local id. Graceful when the API
+        # omits the expansion (fee_details is None / not a list).
+        fee_details = getattr(bt, "fee_details", None)
+        if isinstance(fee_details, list) and fee_details:
+            # INSERT OR REPLACE above may have kept an existing row id via
+            # COALESCE — resolve the actual stored id before writing children.
+            bt_row = conn.execute(
+                "SELECT id FROM stripe_balance_transaction WHERE stripe_id = ?",
+                (bt.id,)
+            ).fetchone()
+            if bt_row:
+                bt_local_id = bt_row["id"]
+                # Idempotent re-sync: clear prior fee_detail rows for this bt.
+                conn.execute(
+                    "DELETE FROM stripe_fee_detail WHERE balance_transaction_id = ?",
+                    (bt_local_id,)
+                )
+                for fd in fee_details:
+                    fd_amount = getattr(fd, "amount", None)
+                    conn.execute(
+                        """INSERT INTO stripe_fee_detail
+                            (id, balance_transaction_id, fee_type, amount,
+                             currency, description, application, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                        (
+                            str(uuid.uuid4()), bt_local_id,
+                            getattr(fd, "type", None) or "unknown",
+                            str(cents_to_decimal(fd_amount if fd_amount is not None else 0)),
+                            getattr(fd, "currency", None) or bt.currency,
+                            getattr(fd, "description", None) or "",
+                            getattr(fd, "application", None),
+                        )
+                    )
+
         count += 1
     return count
 
@@ -476,6 +515,77 @@ def _sync_subscriptions(conn, stripe_client, acct_id, company_id, since=None):
     return count
 
 
+def _sync_transfers(conn, stripe_client, acct_id, company_id, since=None):
+    """Sync Connect transfer objects from Stripe into stripe_transfer."""
+    params = {"limit": 100}
+    if since:
+        params["created"] = {"gte": int(since)}
+
+    count = 0
+    for tr in stripe_client.Transfer.list(**params).auto_paging_iter():
+        row_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT OR REPLACE INTO stripe_transfer
+                (id, stripe_id, stripe_account_id, amount, currency,
+                 destination_account, description, reversed,
+                 company_id, created_stripe, created_at)
+            VALUES (
+                COALESCE((SELECT id FROM stripe_transfer WHERE stripe_id=?), ?),
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, datetime('now'))""",
+            (
+                tr.id, row_id,
+                tr.id, acct_id,
+                str(cents_to_decimal(tr.amount)),
+                tr.currency,
+                getattr(tr, "destination", None) or "",
+                getattr(tr, "description", None) or "",
+                1 if getattr(tr, "reversed", False) else 0,
+                company_id,
+                timestamp_to_iso(tr.created),
+            )
+        )
+        count += 1
+    return count
+
+
+def _sync_credit_notes(conn, stripe_client, acct_id, company_id, since=None):
+    """Sync credit_note objects from Stripe into stripe_credit_note."""
+    params = {"limit": 100}
+    if since:
+        params["created"] = {"gte": int(since)}
+
+    count = 0
+    for cn in stripe_client.CreditNote.list(**params).auto_paging_iter():
+        row_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT OR REPLACE INTO stripe_credit_note
+                (id, stripe_id, stripe_account_id, invoice_stripe_id,
+                 customer_stripe_id, amount, currency, reason, status,
+                 company_id, created_stripe, created_at)
+            VALUES (
+                COALESCE((SELECT id FROM stripe_credit_note WHERE stripe_id=?), ?),
+                ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, datetime('now'))""",
+            (
+                cn.id, row_id,
+                cn.id, acct_id,
+                getattr(cn, "invoice", None) or "",
+                getattr(cn, "customer", None) or "",
+                str(cents_to_decimal(getattr(cn, "amount", 0))),
+                cn.currency,
+                getattr(cn, "reason", None) or "",
+                getattr(cn, "status", "issued") or "issued",
+                company_id,
+                timestamp_to_iso(cn.created),
+            )
+        )
+        count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
@@ -489,6 +599,8 @@ _SYNC_HANDLERS = {
     "customer": _sync_customers,
     "invoice": _sync_invoices,
     "subscription": _sync_subscriptions,
+    "transfer": _sync_transfers,
+    "credit_note": _sync_credit_notes,
 }
 
 

@@ -240,6 +240,47 @@ query($cursor: String) {
 }
 """
 
+_PAYOUT_TRANSACTIONS_QUERY = """
+query($payoutId: ID!, $cursor: String) {
+  shopifyPaymentsAccount {
+    balanceTransactions(first: 100, after: $cursor, payoutId: $payoutId) {
+      edges {
+        cursor
+        node {
+          id
+          type
+          amount { amount }
+          fee { amount }
+          net { amount }
+          transactionDate
+          sourceType
+          associatedOrder { legacyResourceId }
+        }
+      }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+
+# Map ShopifyPayments balance-transaction types (lowercased) onto the
+# shopify_payout_transaction.transaction_type CHECK enum
+# ('charge','refund','dispute','reserve','adjustment','payout'). Unknown /
+# anomaly types fall back to 'adjustment' so a new Shopify enum value never
+# breaks the sync with a CHECK violation.
+_TXN_TYPE_MAP = {
+    "charge": "charge",
+    "refund": "refund",
+    "dispute": "dispute",
+    "dispute_reversal": "dispute",
+    "reserve": "reserve",
+    "reserved_funds": "reserve",
+    "payout": "payout",
+    "payout_failure": "payout",
+    "payout_cancellation": "payout",
+    "adjustment": "adjustment",
+}
+
 _DISPUTES_QUERY = """
 query($cursor: String) {
   shopifyPaymentsAccount {
@@ -568,8 +609,97 @@ def _sync_customers(conn, client, acct_id, company_id, sync_job_id):
     return total
 
 
+def _sync_payout_transactions(conn, client, acct_id, company_id,
+                              payout_gid, payout_local_id):
+    """Sync one payout's individual balance transactions into
+    shopify_payout_transaction. Idempotent per (payout, balance-transaction id);
+    graceful when the shop has no ShopifyPayments account or the API returns no
+    transactions. Returns the number of NEW rows written."""
+    if not payout_gid:
+        return 0
+
+    cursor = None
+    written = 0
+    now = now_iso()
+
+    while True:
+        variables = {"payoutId": payout_gid}
+        if cursor:
+            variables["cursor"] = cursor
+        data = graphql_request(
+            client["shop_domain"], client["access_token"],
+            _PAYOUT_TRANSACTIONS_QUERY, variables,
+        )
+        payments_acct = data.get("shopifyPaymentsAccount") or {}
+        txns_data = payments_acct.get("balanceTransactions", {}) or {}
+        edges = txns_data.get("edges", []) or []
+
+        for edge in edges:
+            node = edge.get("node", {})
+            cursor = edge.get("cursor")
+            balance_txn_id = node.get("id", "")
+            if not balance_txn_id:
+                continue
+
+            # Idempotent: skip a transaction already written for this payout.
+            existing = conn.execute(
+                "SELECT id FROM shopify_payout_transaction "
+                "WHERE shopify_payout_id_local = ? AND shopify_balance_txn_id = ?",
+                (payout_local_id, balance_txn_id)
+            ).fetchone()
+            if existing:
+                continue
+
+            txn_type = _TXN_TYPE_MAP.get(
+                (node.get("type") or "").lower(), "adjustment")
+            gross = _safe_money(node.get("amount"))
+            fee = _safe_money(node.get("fee"))
+            net = _safe_money(node.get("net"))
+
+            # Resolve the local order id (when the transaction is tied to an
+            # order we have synced) so reconciliation Layer 2 (order coverage)
+            # can match; otherwise leave it null.
+            source_order_local = None
+            assoc = node.get("associatedOrder") or {}
+            order_legacy = assoc.get("legacyResourceId") if isinstance(assoc, dict) else None
+            if order_legacy:
+                o_row = conn.execute(
+                    "SELECT id FROM shopify_order "
+                    "WHERE shopify_account_id = ? AND shopify_order_id = ?",
+                    (acct_id, str(order_legacy))
+                ).fetchone()
+                if o_row:
+                    source_order_local = o_row["id"]
+
+            sql, _ = insert_row("shopify_payout_transaction", {
+                "id": P(), "shopify_payout_id_local": P(),
+                "shopify_balance_txn_id": P(), "transaction_type": P(),
+                "gross_amount": P(), "fee_amount": P(), "net_amount": P(),
+                "source_order_id": P(), "source_type": P(),
+                "processed_at": P(), "company_id": P(), "created_at": P(),
+            })
+            conn.execute(sql, (
+                str(uuid.uuid4()), payout_local_id, balance_txn_id, txn_type,
+                str(gross), str(fee), str(net),
+                source_order_local,
+                node.get("sourceType") or ("order" if source_order_local else None),
+                node.get("transactionDate") or "",
+                company_id, now,
+            ))
+            written += 1
+
+        conn.commit()
+
+        page_info = txns_data.get("pageInfo", {})
+        if not page_info.get("hasNextPage", False) or not edges:
+            break
+
+    return written
+
+
 def _sync_payouts(conn, client, acct_id, company_id, sync_job_id):
-    """Sync ShopifyPayments payouts with summary breakdown."""
+    """Sync ShopifyPayments payouts with summary breakdown + per-payout
+    balance transactions."""
     cursor = None
     total = 0
     now = now_iso()
@@ -592,6 +722,7 @@ def _sync_payouts(conn, client, acct_id, company_id, sync_job_id):
             node = edge.get("node", {})
             cursor = edge.get("cursor")
             shopify_payout_id = node.get("legacyResourceId", "")
+            payout_gid = node.get("id", "")
 
             # Check if payout already exists
             existing = conn.execute(
@@ -600,45 +731,50 @@ def _sync_payouts(conn, client, acct_id, company_id, sync_job_id):
             ).fetchone()
 
             if existing:
-                total += 1
-                continue
+                payout_local_id = existing["id"]
+            else:
+                payout_local_id = str(uuid.uuid4())
+                gross = _safe_money(node.get("gross"))
+                net = _safe_money(node.get("net"))
+                fee = gross - net
 
-            payout_local_id = str(uuid.uuid4())
-            gross = _safe_money(node.get("gross"))
-            net = _safe_money(node.get("net"))
-            fee = gross - net
+                summary = node.get("summary", {})
 
-            summary = node.get("summary", {})
-
-            sql, _ = insert_row("shopify_payout", {
-                "id": P(), "shopify_account_id": P(), "shopify_payout_id": P(),
-                "issued_at": P(), "status": P(),
-                "gross_amount": P(), "fee_amount": P(), "net_amount": P(),
-                "charges_gross": P(), "charges_fee": P(),
-                "refunds_gross": P(), "refunds_fee": P(),
-                "adjustments_gross": P(), "adjustments_fee": P(),
-                "reserved_funds_gross": P(), "reserved_funds_fee": P(),
-                "gl_status": P(), "reconciliation_status": P(),
-                "company_id": P(), "created_at": P(),
-            })
-            conn.execute(sql, (
-                payout_local_id, acct_id, shopify_payout_id,
-                node.get("issuedAt", ""),
-                (node.get("status", "SCHEDULED") or "SCHEDULED").lower(),
-                str(gross), str(fee), str(net),
-                str(_safe_money(summary.get("chargesGross"))),
-                str(_safe_money(summary.get("chargesFee"))),
-                # refundsGross removed in API 2026-04; column stays at 0.
-                "0",
-                str(_safe_money(summary.get("refundsFee"))),
-                str(_safe_money(summary.get("adjustmentsGross"))),
-                str(_safe_money(summary.get("adjustmentsFee"))),
-                str(_safe_money(summary.get("reservedFundsGross"))),
-                str(_safe_money(summary.get("reservedFundsFee"))),
-                "pending", "unreconciled",
-                company_id, now,
-            ))
+                sql, _ = insert_row("shopify_payout", {
+                    "id": P(), "shopify_account_id": P(), "shopify_payout_id": P(),
+                    "issued_at": P(), "status": P(),
+                    "gross_amount": P(), "fee_amount": P(), "net_amount": P(),
+                    "charges_gross": P(), "charges_fee": P(),
+                    "refunds_gross": P(), "refunds_fee": P(),
+                    "adjustments_gross": P(), "adjustments_fee": P(),
+                    "reserved_funds_gross": P(), "reserved_funds_fee": P(),
+                    "gl_status": P(), "reconciliation_status": P(),
+                    "company_id": P(), "created_at": P(),
+                })
+                conn.execute(sql, (
+                    payout_local_id, acct_id, shopify_payout_id,
+                    node.get("issuedAt", ""),
+                    (node.get("status", "SCHEDULED") or "SCHEDULED").lower(),
+                    str(gross), str(fee), str(net),
+                    str(_safe_money(summary.get("chargesGross"))),
+                    str(_safe_money(summary.get("chargesFee"))),
+                    # refundsGross removed in API 2026-04; column stays at 0.
+                    "0",
+                    str(_safe_money(summary.get("refundsFee"))),
+                    str(_safe_money(summary.get("adjustmentsGross"))),
+                    str(_safe_money(summary.get("adjustmentsFee"))),
+                    str(_safe_money(summary.get("reservedFundsGross"))),
+                    str(_safe_money(summary.get("reservedFundsFee"))),
+                    "pending", "unreconciled",
+                    company_id, now,
+                ))
             total += 1
+
+            # Sync this payout's individual balance transactions (idempotent).
+            # These make Layer-1 reconciliation load-bearing instead of a
+            # vacuous zero-transaction pass.
+            _sync_payout_transactions(
+                conn, client, acct_id, company_id, payout_gid, payout_local_id)
 
         conn.commit()
 

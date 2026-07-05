@@ -1,12 +1,10 @@
 ---
 name: erpclaw-growth
-version: 2.8.0
+version: 2.9.0
 description: >
-  CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module
-  analytics, and AI-powered business analysis for ERPClaw. 135 actions across 4 domains: lead
-  management, opportunity pipeline, saved views, global search, CSV import/export, email
-  campaigns, territories, contracts, automation, KPI dashboards, anomaly detection, cash flow
-  forecasting, and relationship scoring.
+  CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis for ERPClaw.
+  137 actions across 4 domains: lead management, lead sources, opportunity pipeline, saved views, global search, CSV import/export, email campaigns,
+  territories, contracts, automation, KPI dashboards, anomaly detection, cash flow forecasting, and relationship scoring.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -79,14 +77,16 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 
 ## All Actions (Tier 2)
 
-### CRM — Leads (5 actions)
+### CRM — Leads & Sources (7 actions)
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `add-lead` | `--lead-name` | `--company-name`, `--email`, `--phone`, `--source`, `--territory`, `--industry`, `--assigned-to`, `--notes` |
-| `update-lead` | `--lead-id` | `--lead-name`, `--company-name`, `--email`, `--phone`, `--source`, `--territory`, `--industry`, `--status`, `--assigned-to`, `--notes` |
+| `add-lead` | `--lead-name` | `--company-name`, `--email`, `--phone`, `--source`, `--lead-source-id`, `--territory`, `--industry`, `--assigned-to`, `--notes` |
+| `update-lead` | `--lead-id` | `--lead-name`, `--company-name`, `--email`, `--phone`, `--source`, `--lead-source-id`, `--territory`, `--industry`, `--status`, `--assigned-to`, `--notes` |
 | `get-lead` | `--lead-id` | |
 | `list-leads` | | `--status`, `--source`, `--search`, `--saved-view-id`, `--limit`, `--offset` |
+| `add-lead-source` | `--name` | `--description` |
+| `list-lead-sources` | | `--search`, `--limit`, `--offset` |
 | `convert-lead-to-opportunity` | `--lead-id`, `--opportunity-name` | `--expected-revenue`, `--probability`, `--opportunity-type`, `--expected-closing-date` |
 
 ### CRM — Opportunities (7 actions)
@@ -284,11 +284,11 @@ Analytics degrade gracefully when optional modules are missing; AI and CRM actio
 
 ### Architecture
 - **Router**: `scripts/db_query.py` dispatches to 4 domain scripts (crm, analytics, ai-engine, crm-adv)
-- **Domains**: crm (44 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
+- **Domains**: crm (46 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
 - **Database**: Single SQLite at `~/.openclaw/erpclaw/data.sqlite` (shared with erpclaw)
 
 ### Tables Owned (39)
-CRM (Wave 1B F1, growth-owned): crm_contact, crm_company, crm_contact_role. CRM (Wave 1B F2, growth-owned): crm_task, crm_task_link. CRM (Wave 1B F3, growth-owned): crm_pipeline, crm_pipeline_stage. CRM (Wave 1B F4, growth-owned): crm_saved_view. CRM (foundation-owned, read here): lead_source, lead, opportunity (writes opportunity.pipeline_stage_id per ADR-0023), campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence, crmadv_drip_sequence, crmadv_drip_sequence_step, crmadv_drip_enrollment. Analytics: none (read-only).
+CRM (Wave 1B F1, growth-owned): crm_contact, crm_company, crm_contact_role. CRM (Wave 1B F2, growth-owned): crm_task, crm_task_link. CRM (Wave 1B F3, growth-owned): crm_pipeline, crm_pipeline_stage. CRM (Wave 1B F4, growth-owned): crm_saved_view. CRM (foundation-owned DDL, growth-written per ADR-0023): lead_source (add/list-lead-sources), lead, opportunity (writes opportunity.pipeline_stage_id), campaign, campaign_lead, crm_activity, communication. AI-Engine: anomaly, cash_flow_forecast, correlation, scenario, business_rule, categorization_rule, relationship_score, conversation_context, pending_decision, audit_conversation. CRM-Adv: crmadv_campaign_template, crmadv_recipient_list, crmadv_email_campaign, crmadv_campaign_event, crmadv_territory, crmadv_territory_assignment, crmadv_territory_quota, crmadv_contract, crmadv_contract_obligation, crmadv_automation_workflow, crmadv_lead_score_rule, crmadv_nurture_sequence, crmadv_drip_sequence, crmadv_drip_sequence_step, crmadv_drip_enrollment. Analytics: none (read-only).
 
 ### Data Conventions
 Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601). CRM naming series: `LEAD-{YEAR}-{SEQ}`, `OPP-{YEAR}-{SEQ}`. CRM-Adv naming series: `EMCAMP-{YEAR}-{SEQ}`, `TERR-{YEAR}-{SEQ}`, `CTR-{YEAR}-{SEQ}`, `AWFL-{YEAR}-{SEQ}`, `ANUR-{YEAR}-{SEQ}`. GL entries and stock ledger entries are immutable. All queries use parameterized statements.

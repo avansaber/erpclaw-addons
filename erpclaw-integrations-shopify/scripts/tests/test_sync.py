@@ -248,6 +248,29 @@ MOCK_PAYOUTS_RESPONSE = {
     }
 }
 
+MOCK_PAYOUT_TXNS_RESPONSE = {
+    "shopifyPaymentsAccount": {
+        "balanceTransactions": {
+            "edges": [
+                {
+                    "cursor": "cursor_ptx_1",
+                    "node": {
+                        "id": "gid://shopify/ShopifyPaymentsBalanceTransaction/70001",
+                        "type": "CHARGE",
+                        "amount": {"amount": "194.00"},
+                        "fee": {"amount": "5.62"},
+                        "net": {"amount": "188.38"},
+                        "transactionDate": "2026-03-16T00:00:00Z",
+                        "sourceType": "charge",
+                        "associatedOrder": {"legacyResourceId": "5001"},
+                    },
+                },
+            ],
+            "pageInfo": {"hasNextPage": False},
+        },
+    }
+}
+
 MOCK_DISPUTES_RESPONSE = {
     "shopifyPaymentsAccount": {
         "disputes": {
@@ -275,8 +298,12 @@ MOCK_DISPUTES_RESPONSE = {
 def _mock_graphql_request(response_map):
     """Create a mock graphql_request that returns canned responses based on query content."""
     def _mock(shop_domain, access_token, query, variables=None):
-        # Determine which response to return based on query content
-        if "orders(" in query:
+        # Determine which response to return based on query content.
+        # balanceTransactions is checked before payouts because the payout-
+        # transactions query filters by payoutId (distinct query).
+        if "balanceTransactions(" in query:
+            return response_map.get("payout_txns", {})
+        elif "orders(" in query:
             return response_map.get("orders", {})
         elif "products(" in query:
             return response_map.get("products", {})
@@ -659,3 +686,87 @@ class TestSyncJobLifecycle:
             (pending_job_id,)
         ).fetchone()
         assert cancelled_job["status"] == "cancelled"
+
+
+# ===========================================================================
+# Test 11: test_sync_payout_transactions_writer  (B8 — payout txn writer)
+# ===========================================================================
+class TestSyncPayoutTransactionWriter:
+
+    def _map(self):
+        return {
+            "orders": MOCK_ORDERS_RESPONSE,
+            "payouts": MOCK_PAYOUTS_RESPONSE,
+            "payout_txns": MOCK_PAYOUT_TXNS_RESPONSE,
+        }
+
+    def test_payout_transactions_written_with_decimals(self, conn):
+        """Payout sync writes shopify_payout_transaction rows with exact Decimals
+        and resolves the associated order to its local id."""
+        env = build_shopify_env(conn)
+        mock_gql = _mock_graphql_request(self._map())
+
+        with patch("sync.graphql_request", side_effect=mock_gql):
+            # Orders first so the transaction's associatedOrder resolves locally.
+            call_action(ACTIONS["shopify-sync-orders"], conn, ns(
+                shopify_account_id=env["shopify_account_id"], sync_mode="full"))
+            result = call_action(ACTIONS["shopify-sync-payouts"], conn, ns(
+                shopify_account_id=env["shopify_account_id"], sync_mode="full"))
+
+        assert is_ok(result), f"Expected ok, got: {result}"
+
+        payout = conn.execute(
+            "SELECT id, net_amount FROM shopify_payout WHERE shopify_account_id = ?",
+            (env["shopify_account_id"],)
+        ).fetchone()
+        assert payout is not None
+
+        txns = conn.execute(
+            "SELECT * FROM shopify_payout_transaction WHERE shopify_payout_id_local = ?",
+            (payout["id"],)
+        ).fetchall()
+        assert len(txns) == 1
+        t = txns[0]
+        assert t["transaction_type"] == "charge"
+        assert Decimal(t["gross_amount"]) == Decimal("194.00")
+        assert Decimal(t["fee_amount"]) == Decimal("5.62")
+        assert Decimal(t["net_amount"]) == Decimal("188.38")
+
+        # associatedOrder resolved to the local order id
+        order = conn.execute(
+            "SELECT id FROM shopify_order WHERE shopify_order_id = '5001' AND shopify_account_id = ?",
+            (env["shopify_account_id"],)
+        ).fetchone()
+        assert t["source_order_id"] == order["id"]
+
+    def test_payout_transactions_idempotent(self, conn):
+        """Re-syncing payouts does not duplicate payout transaction rows."""
+        env = build_shopify_env(conn)
+        mock_gql = _mock_graphql_request(self._map())
+
+        with patch("sync.graphql_request", side_effect=mock_gql):
+            call_action(ACTIONS["shopify-sync-payouts"], conn, ns(
+                shopify_account_id=env["shopify_account_id"], sync_mode="full"))
+            # Second full sync of the same data.
+            call_action(ACTIONS["shopify-sync-payouts"], conn, ns(
+                shopify_account_id=env["shopify_account_id"], sync_mode="full"))
+
+        count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM shopify_payout_transaction"
+        ).fetchone()["cnt"]
+        assert count == 1
+
+    def test_payout_no_shopify_payments_graceful(self, conn):
+        """A shop with no ShopifyPayments account (null) writes no payout txns
+        and does not error."""
+        env, mock_gql = _env_and_mock(conn, payouts=False)
+
+        with patch("sync.graphql_request", side_effect=mock_gql):
+            result = call_action(ACTIONS["shopify-sync-payouts"], conn, ns(
+                shopify_account_id=env["shopify_account_id"], sync_mode="full"))
+
+        assert is_ok(result)
+        count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM shopify_payout_transaction"
+        ).fetchone()["cnt"]
+        assert count == 0

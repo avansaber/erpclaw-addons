@@ -101,7 +101,30 @@ def list_transfers(conn, args):
 
 
 # ---------------------------------------------------------------------------
-# 4. stripe-connect-revenue-report
+# 4. stripe-list-credit-notes
+# ---------------------------------------------------------------------------
+def list_credit_notes(conn, args):
+    """List Stripe credit notes synced for an account (ASC 606 adjustments)."""
+    stripe_account_id = getattr(args, "stripe_account_id", None)
+    if not stripe_account_id:
+        err("--stripe-account-id is required")
+    validate_stripe_account(conn, stripe_account_id)
+
+    t = Table("stripe_credit_note")
+    q = Q.from_(t).select("*").where(
+        t.stripe_account_id == P()
+    ).orderby(t.created_at, order=Order.desc)
+    params = [stripe_account_id]
+
+    limit = getattr(args, "limit", 50) or 50
+    q = q.limit(limit)
+
+    rows = conn.execute(q.get_sql(), tuple(params)).fetchall()
+    ok({"credit_notes": rows_to_list(rows), "count": len(rows)})
+
+
+# ---------------------------------------------------------------------------
+# 5. stripe-connect-revenue-report
 # ---------------------------------------------------------------------------
 def connect_revenue_report(conn, args):
     """Generate Connect platform revenue report: SUM application fees by month.
@@ -145,7 +168,7 @@ def connect_revenue_report(conn, args):
 
 
 # ---------------------------------------------------------------------------
-# 5. stripe-connect-payout-report
+# 6. stripe-connect-payout-report
 # ---------------------------------------------------------------------------
 def connect_payout_report(conn, args):
     """Generate Connect platform payout report: SUM transfers by month."""
@@ -186,7 +209,7 @@ def connect_payout_report(conn, args):
 
 
 # ---------------------------------------------------------------------------
-# 6. stripe-connect-fee-summary
+# 7. stripe-connect-fee-summary
 # ---------------------------------------------------------------------------
 def connect_fee_summary(conn, args):
     """Total platform fees earned as a Connect platform."""
@@ -225,6 +248,7 @@ ACTIONS = {
     "stripe-list-connected-accounts": list_connected_accounts,
     "stripe-list-application-fees": list_application_fees,
     "stripe-list-transfers": list_transfers,
+    "stripe-list-credit-notes": list_credit_notes,
     "stripe-connect-revenue-report": connect_revenue_report,
     "stripe-connect-payout-report": connect_payout_report,
     "stripe-connect-fee-summary": connect_fee_summary,

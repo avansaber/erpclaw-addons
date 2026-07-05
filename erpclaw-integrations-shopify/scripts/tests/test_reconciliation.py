@@ -258,3 +258,69 @@ class TestReconciliationLifecycle:
         assert is_ok(result), result
         # Expected clearing: 200 (order) - 150 (payout) - 50 (refund) = 0
         assert result["expected_clearing_balance"] == "0.00"
+
+
+class TestReconciliationHonesty:
+    """B8 — a payout with no synced transaction detail must NOT vacuous-match,
+    and the load-bearing transaction sum must be Decimal (not float)."""
+
+    def test_zero_transaction_payout_reports_no_data(self, conn, env):
+        """A payout with zero transactions is reported as no-data, NOT matched,
+        and the run does not vacuously claim a clean 'completed' match."""
+        seed_shopify_payout(
+            conn, env["shopify_account_id"], env["company_id"],
+            gross="300.00", fee="8.70", net="291.30",
+        )
+        # No transactions seeded for this payout.
+
+        result = call_action(mod.shopify_run_reconciliation, conn, ns(
+            shopify_account_id=env["shopify_account_id"],
+        ))
+        assert is_ok(result), result
+        assert result["total_payouts"] == 1
+        assert result["payouts_no_data"] == 1
+        assert result["payouts_matched"] == 0
+        assert result["payouts_unmatched"] == 0
+        # Must NOT claim a clean match when there is no data to reconcile.
+        assert result["run_status"] == "discrepancy"
+        reasons = {d.get("reason") for d in result["payout_discrepancies"]}
+        assert "no_transaction_data_synced" in reasons
+
+    def test_transaction_payout_matches_via_decimal_sum(self, conn, env):
+        """A payout whose transaction NETs sum exactly to its net reconciles as
+        matched (proves the Decimal aggregation path)."""
+        payout_id = seed_shopify_payout(
+            conn, env["shopify_account_id"], env["company_id"],
+            gross="200.00", fee="5.80", net="194.20",
+        )
+        _seed_payout_transaction(conn, payout_id, env["company_id"],
+                                 gross="120.00", fee="3.48", net="116.52")
+        _seed_payout_transaction(conn, payout_id, env["company_id"],
+                                 gross="80.00", fee="2.32", net="77.68")
+
+        result = call_action(mod.shopify_run_reconciliation, conn, ns(
+            shopify_account_id=env["shopify_account_id"],
+        ))
+        assert is_ok(result), result
+        assert result["payouts_matched"] == 1
+        assert result["payouts_no_data"] == 0
+        assert result["payouts_unmatched"] == 0
+
+    def test_penny_transactions_sum_exact_decimal(self, conn, env):
+        """Three $0.10 transaction nets sum to exactly $0.30 under Decimal
+        aggregation (a float SUM could drift and mis-flag a mismatch)."""
+        payout_id = seed_shopify_payout(
+            conn, env["shopify_account_id"], env["company_id"],
+            gross="0.30", fee="0.00", net="0.30",
+        )
+        for _ in range(3):
+            _seed_payout_transaction(conn, payout_id, env["company_id"],
+                                     gross="0.10", fee="0.00", net="0.10")
+
+        result = call_action(mod.shopify_run_reconciliation, conn, ns(
+            shopify_account_id=env["shopify_account_id"],
+        ))
+        assert is_ok(result), result
+        assert result["payouts_matched"] == 1
+        assert result["payouts_unmatched"] == 0
+        assert result["payouts_no_data"] == 0

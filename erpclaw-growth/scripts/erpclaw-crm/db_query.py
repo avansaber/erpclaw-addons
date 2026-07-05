@@ -72,6 +72,7 @@ _TASK_LINK_TABLE = {
 # ---------------------------------------------------------------------------
 _t_company = Table("company")
 _t_lead = Table("lead")
+_t_lead_source = Table("lead_source")
 _t_opportunity = Table("opportunity")
 _t_customer = Table("customer")
 _t_campaign = Table("campaign")
@@ -454,6 +455,15 @@ def _validate_lead_exists(conn, lead_id: str):
     return lead
 
 
+def _validate_lead_source_exists(conn, lead_source_id: str):
+    q = Q.from_(_t_lead_source).select(_t_lead_source.id).where(_t_lead_source.id == P())
+    src = conn.execute(q.get_sql(), (lead_source_id,)).fetchone()
+    if not src:
+        err(f"Lead source {lead_source_id} not found",
+             suggestion="Use 'list lead sources' to see available sources.")
+    return src
+
+
 def _validate_opportunity_exists(conn, opp_id: str):
     q = Q.from_(_t_opportunity).select(_t_opportunity.star).where(_t_opportunity.id == P())
     opp = conn.execute(q.get_sql(), (opp_id,)).fetchone()
@@ -487,8 +497,8 @@ def add_lead(conn, args):
     """Add a new lead.
 
     Required: --lead-name
-    Optional: --company-name, --email, --phone, --source, --territory,
-              --industry, --assigned-to, --notes
+    Optional: --company-name, --email, --phone, --source, --lead-source-id,
+              --territory, --industry, --assigned-to, --notes
     """
     if not args.lead_name:
         err("--lead-name is required")
@@ -501,19 +511,25 @@ def add_lead(conn, args):
     if args.email and not _EMAIL_RE.match(args.email):
         err(f"Invalid email format for --email: '{args.email}'")
 
+    # --lead-source-id is the structured FK to the lead_source dropdown table
+    # (legacy --source enum kept for back-compat; both may be set).
+    lead_source_id = getattr(args, "lead_source_id", None)
+    if lead_source_id:
+        _validate_lead_source_exists(conn, lead_source_id)
+
     company_id = _resolve_company_id(conn, args)
     lead_id = str(uuid.uuid4())
     naming = get_next_name(conn, "lead")
 
     sql, _ = insert_row("lead", {
         "id": P(), "naming_series": P(), "lead_name": P(), "company_name": P(),
-        "email": P(), "phone": P(), "source": P(), "territory": P(),
-        "industry": P(), "status": ValueWrapper("new"), "assigned_to": P(),
-        "notes": P(), "company_id": P(),
+        "email": P(), "phone": P(), "source": P(), "lead_source_id": P(),
+        "territory": P(), "industry": P(), "status": ValueWrapper("new"),
+        "assigned_to": P(), "notes": P(), "company_id": P(),
     })
     conn.execute(sql,
         (lead_id, naming, args.lead_name, args.company_name, args.email,
-         args.phone, args.source, args.territory, args.industry,
+         args.phone, args.source, lead_source_id, args.territory, args.industry,
          args.assigned_to, args.notes, company_id),
     )
 
@@ -531,6 +547,7 @@ def add_lead(conn, args):
             "email": args.email,
             "phone": args.phone,
             "source": args.source,
+            "lead_source_id": lead_source_id,
             "status": "new",
         },
         "message": f"Lead '{args.lead_name}' created ({naming})",
@@ -546,7 +563,8 @@ def update_lead(conn, args):
 
     Required: --lead-id
     Optional: --lead-name, --company-name, --email, --phone, --source,
-              --territory, --industry, --status, --assigned-to, --notes
+              --lead-source-id, --territory, --industry, --status,
+              --assigned-to, --notes
     """
     if not args.lead_id:
         err("--lead-id is required")
@@ -564,12 +582,17 @@ def update_lead(conn, args):
     if args.status and args.status not in VALID_LEAD_STATUSES:
         err(f"--status must be one of {VALID_LEAD_STATUSES}")
 
+    lead_source_id = getattr(args, "lead_source_id", None)
+    if lead_source_id:
+        _validate_lead_source_exists(conn, lead_source_id)
+
     field_map = {
         "lead_name": args.lead_name,
         "company_name": args.company_name,
         "email": args.email,
         "phone": args.phone,
         "source": args.source,
+        "lead_source_id": lead_source_id,
         "territory": args.territory,
         "industry": args.industry,
         "status": args.status,
@@ -660,6 +683,82 @@ def list_leads(conn, args):
         params.extend([f"%{args.search}%"] * 3)
 
     _exec_list_raw(conn, args, "lead", "lead", "lead.*", clauses, params, "leads")
+
+
+# ---------------------------------------------------------------------------
+# 4b. add-lead-source / list-lead-sources
+# ---------------------------------------------------------------------------
+# The lead_source table's DDL is foundation-owned (erpclaw-setup init_schema),
+# but growth's erpclaw-crm is the CRM writer (it already writes the foundation
+# `lead` table); these two actions retire the empty-dropdown orphan per ADR-0023.
+
+def add_lead_source(conn, args):
+    """Add a lead source (populates the CRM lead-source dropdown).
+
+    Required: --name (UNIQUE)
+    Optional: --description
+    """
+    if not args.name:
+        err("--name is required")
+
+    # UNIQUE(name) is enforced by the DDL; pre-check for a friendly message
+    # instead of surfacing a raw IntegrityError.
+    q = Q.from_(_t_lead_source).select(_t_lead_source.id).where(_t_lead_source.name == P())
+    if conn.execute(q.get_sql(), (args.name,)).fetchone():
+        err(f"Lead source '{args.name}' already exists",
+             suggestion="Use 'list lead sources' to see existing sources.")
+
+    source_id = str(uuid.uuid4())
+    sql, _ = insert_row("lead_source", {
+        "id": P(), "name": P(), "description": P(),
+    })
+    conn.execute(sql, (source_id, args.name, args.description))
+
+    audit(conn, "erpclaw-crm", "add-lead-source", "lead_source", source_id,
+           new_values={"name": args.name},
+           description=f"Created lead source: {args.name}")
+    conn.commit()
+
+    ok({
+        "lead_source": {
+            "id": source_id,
+            "name": args.name,
+            "description": args.description,
+        },
+        "message": f"Lead source '{args.name}' created",
+    })
+
+
+def list_lead_sources(conn, args):
+    """List lead sources (the CRM lead-source dropdown feed).
+
+    Optional: --search, --limit, --offset
+    """
+    t = _t_lead_source
+    q = Q.from_(t).select(t.id, t.name, t.description, t.created_at)
+    q_cnt = Q.from_(t).select(fn.Count("*").as_("cnt"))
+    params = []
+
+    search = getattr(args, "search", None)
+    if search:
+        q = q.where(t.name.like(P()))
+        q_cnt = q_cnt.where(t.name.like(P()))
+        params.append(f"%{search}%")
+
+    limit = int(getattr(args, "limit", None) or 20)
+    offset = int(getattr(args, "offset", None) or 0)
+    q = q.orderby(t.name).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [limit, offset]).fetchall()
+    total = conn.execute(q_cnt.get_sql(), params).fetchone()["cnt"]
+
+    ok({
+        "lead_sources": [row_to_dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + limit < total,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -4144,6 +4243,8 @@ ACTIONS = {
     "update-lead": update_lead,
     "get-lead": get_lead,
     "list-leads": list_leads,
+    "add-lead-source": add_lead_source,
+    "list-lead-sources": list_lead_sources,
     "convert-lead-to-opportunity": convert_lead_to_opportunity,
     "add-opportunity": add_opportunity,
     "update-opportunity": update_opportunity,
@@ -4231,6 +4332,7 @@ def main():
     parser.add_argument("--email")
     parser.add_argument("--phone")
     parser.add_argument("--source")
+    parser.add_argument("--lead-source-id")
     parser.add_argument("--territory")
     parser.add_argument("--industry")
     parser.add_argument("--assigned-to")

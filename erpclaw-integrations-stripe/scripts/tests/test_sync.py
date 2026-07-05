@@ -26,6 +26,7 @@ from stripe_test_helpers import (
     seed_stripe_account, seed_erpclaw_customer, build_stripe_env,
 )
 from sync import ACTIONS
+from connect import ACTIONS as CONNECT_ACTIONS
 from stripe_helpers import cents_to_decimal
 
 
@@ -231,9 +232,61 @@ MOCK_SUBSCRIPTIONS = [
 ]
 
 
+MOCK_TRANSFERS = [
+    {
+        "id": "tr_test001",
+        "amount": 15000,  # $150.00
+        "currency": "usd",
+        "destination": "acct_connected001",
+        "description": "Payout to connected account",
+        "reversed": False,
+        "created": 1760918900,
+    },
+]
+
+MOCK_CREDIT_NOTES = [
+    {
+        "id": "cn_test001",
+        "invoice": "in_test001",
+        "customer": "cus_test789",
+        "amount": 1200,  # $12.00
+        "currency": "usd",
+        "reason": "product_unsatisfactory",
+        "status": "issued",
+        "created": 1760919000,
+    },
+]
+
+# A balance transaction that carries a fee_details[] expansion.
+MOCK_BALANCE_TXNS_WITH_FEES = [
+    {
+        "id": "txn_fee001",
+        "type": "charge",
+        "reporting_category": "charge",
+        "source": "ch_test001",
+        "amount": 699,
+        "fee": 50,
+        "net": 649,
+        "currency": "usd",
+        "description": "Charge with fee breakdown",
+        "available_on": 1760918400,
+        "created": 1760918400,
+        "payout": None,
+        "status": "available",
+        "fee_details": [
+            {"type": "stripe_fee", "amount": 44, "currency": "usd",
+             "description": "Stripe processing fee", "application": None},
+            {"type": "tax", "amount": 6, "currency": "usd",
+             "description": "Tax on Stripe fee", "application": None},
+        ],
+    },
+]
+
+
 def _build_mock_stripe(charges=None, balance_txns=None, payouts=None,
                        customers=None, refunds=None, disputes=None,
-                       invoices=None, subscriptions=None):
+                       invoices=None, subscriptions=None,
+                       transfers=None, credit_notes=None):
     """Build a fully mocked stripe module with configurable list responses."""
     mock_stripe = MagicMock()
 
@@ -253,6 +306,10 @@ def _build_mock_stripe(charges=None, balance_txns=None, payouts=None,
         invoices if invoices is not None else [])
     mock_stripe.Subscription.list.return_value = _make_auto_paging_iter(
         subscriptions if subscriptions is not None else [])
+    mock_stripe.Transfer.list.return_value = _make_auto_paging_iter(
+        transfers if transfers is not None else [])
+    mock_stripe.CreditNote.list.return_value = _make_auto_paging_iter(
+        credit_notes if credit_notes is not None else [])
 
     # Mock api_key setter
     mock_stripe.api_key = None
@@ -276,6 +333,8 @@ def _env_and_stripe(conn):
         disputes=MOCK_DISPUTES,
         invoices=MOCK_INVOICES,
         subscriptions=MOCK_SUBSCRIPTIONS,
+        transfers=MOCK_TRANSFERS,
+        credit_notes=MOCK_CREDIT_NOTES,
     )
     return env, mock_stripe
 
@@ -580,7 +639,7 @@ class TestSyncJobFailed:
 class TestFullSync:
 
     def test_full_sync_creates_multiple_jobs(self, conn):
-        """Full sync should create one sync_job per object type (8 total)."""
+        """Full sync should create one sync_job per object type (10 total)."""
         env, mock_stripe = _env_and_stripe(conn)
 
         with patch.dict("sys.modules", {"stripe": mock_stripe}):
@@ -589,7 +648,7 @@ class TestFullSync:
             ))
 
         assert is_ok(result)
-        assert result["job_count"] == 8
+        assert result["job_count"] == 10
 
         # Verify each object type got a job
         jobs = result["jobs"]
@@ -597,20 +656,22 @@ class TestFullSync:
         expected = {
             "customer", "charge", "refund", "dispute",
             "payout", "balance_transaction", "invoice", "subscription",
+            "transfer", "credit_note",
         }
         assert object_types == expected
 
         # Total records should be sum of all mocks
         # customers=2, charges=3, refunds=1, disputes=1, payouts=1,
-        # balance_transactions=2, invoices=1, subscriptions=1 = 12
-        assert result["total_records"] == 12
+        # balance_transactions=2, invoices=1, subscriptions=1,
+        # transfers=1, credit_notes=1 = 14
+        assert result["total_records"] == 14
 
         # Verify jobs exist in DB
         db_jobs = conn.execute(
             "SELECT COUNT(*) as cnt FROM stripe_sync_job WHERE stripe_account_id = ?",
             (env["stripe_account_id"],)
         ).fetchone()["cnt"]
-        assert db_jobs == 8
+        assert db_jobs == 10
 
 
 # ===========================================================================
@@ -659,3 +720,206 @@ class TestListSyncJobs:
         ))
         assert is_ok(result_completed)
         assert result_completed["count"] == 2
+
+
+# ===========================================================================
+# Test 11: test_sync_transfers  (B8 — Connect transfer writer)
+# ===========================================================================
+class TestSyncTransfers:
+
+    def test_sync_transfers_happy_path(self, conn):
+        """Syncing a Connect transfer stores it with exact Decimal amount."""
+        env, mock_stripe = _env_and_stripe(conn)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            result = call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="transfer",
+            ))
+
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["object_type"] == "transfer"
+        assert result["records_processed"] == 1
+
+        row = conn.execute(
+            "SELECT * FROM stripe_transfer WHERE stripe_account_id = ?",
+            (env["stripe_account_id"],)
+        ).fetchone()
+        assert row is not None
+        assert row["stripe_id"] == "tr_test001"
+        # 15000 cents = $150.00, exact TEXT Decimal
+        assert Decimal(row["amount"]) == Decimal("150.00")
+        assert row["destination_account"] == "acct_connected001"
+        assert row["reversed"] == 0
+
+    def test_list_transfers_returns_synced_rows(self, conn):
+        """stripe-list-transfers returns rows written by the transfer sync."""
+        env, mock_stripe = _env_and_stripe(conn)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="transfer",
+            ))
+
+        result = call_action(CONNECT_ACTIONS["stripe-list-transfers"], conn, ns(
+            stripe_account_id=env["stripe_account_id"],
+            limit=50,
+        ))
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["count"] == 1
+        assert result["transfers"][0]["stripe_id"] == "tr_test001"
+        assert Decimal(result["transfers"][0]["amount"]) == Decimal("150.00")
+
+    def test_sync_transfers_idempotent(self, conn):
+        """Re-syncing the same transfer does not create duplicate rows."""
+        env, mock_stripe = _env_and_stripe(conn)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="transfer",
+            ))
+
+        mock_stripe2 = _build_mock_stripe(transfers=MOCK_TRANSFERS)
+        with patch.dict("sys.modules", {"stripe": mock_stripe2}):
+            call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="transfer",
+            ))
+
+        count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM stripe_transfer WHERE stripe_account_id = ?",
+            (env["stripe_account_id"],)
+        ).fetchone()["cnt"]
+        assert count == 1
+
+
+# ===========================================================================
+# Test 12: test_sync_credit_notes  (B8 — credit-note writer + reader)
+# ===========================================================================
+class TestSyncCreditNotes:
+
+    def test_sync_credit_notes_happy_path(self, conn):
+        """Syncing a credit note stores it with exact Decimal amount."""
+        env, mock_stripe = _env_and_stripe(conn)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            result = call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="credit_note",
+            ))
+
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["object_type"] == "credit_note"
+        assert result["records_processed"] == 1
+
+        row = conn.execute(
+            "SELECT * FROM stripe_credit_note WHERE stripe_account_id = ?",
+            (env["stripe_account_id"],)
+        ).fetchone()
+        assert row is not None
+        assert row["stripe_id"] == "cn_test001"
+        # 1200 cents = $12.00
+        assert Decimal(row["amount"]) == Decimal("12.00")
+        assert row["invoice_stripe_id"] == "in_test001"
+        assert row["customer_stripe_id"] == "cus_test789"
+        assert row["reason"] == "product_unsatisfactory"
+        assert row["status"] == "issued"
+
+    def test_list_credit_notes_returns_synced_rows(self, conn):
+        """stripe-list-credit-notes returns rows written by the credit-note sync
+        (the newly-written rows are not merely write-only)."""
+        env, mock_stripe = _env_and_stripe(conn)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="credit_note",
+            ))
+
+        result = call_action(CONNECT_ACTIONS["stripe-list-credit-notes"], conn, ns(
+            stripe_account_id=env["stripe_account_id"],
+            limit=50,
+        ))
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["count"] == 1
+        assert result["credit_notes"][0]["stripe_id"] == "cn_test001"
+        assert Decimal(result["credit_notes"][0]["amount"]) == Decimal("12.00")
+
+
+# ===========================================================================
+# Test 13: test_sync_fee_detail  (B8 — fee_details[] expansion)
+# ===========================================================================
+class TestSyncFeeDetail:
+
+    def test_balance_txn_fee_details_expanded(self, conn):
+        """A balance transaction's fee_details[] expand into stripe_fee_detail."""
+        env = build_stripe_env(conn)
+        mock_stripe = _build_mock_stripe(
+            balance_txns=MOCK_BALANCE_TXNS_WITH_FEES)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            result = call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="balance_transaction",
+            ))
+
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["records_processed"] == 1
+
+        # Resolve the local bt id, then read its fee_detail children.
+        bt_row = conn.execute(
+            "SELECT id FROM stripe_balance_transaction WHERE stripe_id = 'txn_fee001'"
+        ).fetchone()
+        assert bt_row is not None
+
+        details = conn.execute(
+            """SELECT fee_type, amount FROM stripe_fee_detail
+               WHERE balance_transaction_id = ? ORDER BY fee_type""",
+            (bt_row["id"],)
+        ).fetchall()
+        assert len(details) == 2
+        by_type = {d["fee_type"]: Decimal(d["amount"]) for d in details}
+        # 44 cents = $0.44, 6 cents = $0.06 — exact Decimal
+        assert by_type["stripe_fee"] == Decimal("0.44")
+        assert by_type["tax"] == Decimal("0.06")
+
+    def test_balance_txn_without_fee_details_graceful(self, conn):
+        """A balance transaction with no fee_details[] writes no fee rows and
+        does not error (graceful when the API omits the expansion)."""
+        env = build_stripe_env(conn)
+        mock_stripe = _build_mock_stripe(balance_txns=MOCK_BALANCE_TXNS)
+
+        with patch.dict("sys.modules", {"stripe": mock_stripe}):
+            result = call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                stripe_account_id=env["stripe_account_id"],
+                object_type="balance_transaction",
+            ))
+
+        assert is_ok(result), f"Expected ok, got: {result}"
+        assert result["records_processed"] == 2
+
+        fd_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM stripe_fee_detail"
+        ).fetchone()["cnt"]
+        assert fd_count == 0
+
+    def test_fee_details_idempotent_on_resync(self, conn):
+        """Re-syncing the same bt does not accumulate duplicate fee_detail rows."""
+        env = build_stripe_env(conn)
+
+        for _ in range(2):
+            mock_stripe = _build_mock_stripe(
+                balance_txns=MOCK_BALANCE_TXNS_WITH_FEES)
+            with patch.dict("sys.modules", {"stripe": mock_stripe}):
+                call_action(ACTIONS["stripe-start-sync"], conn, ns(
+                    stripe_account_id=env["stripe_account_id"],
+                    object_type="balance_transaction",
+                ))
+
+        fd_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM stripe_fee_detail"
+        ).fetchone()["cnt"]
+        # Still exactly 2 (cleared + re-inserted), no accumulation.
+        assert fd_count == 2

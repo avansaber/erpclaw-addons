@@ -7,7 +7,7 @@
 Free, open-source, self-hosted connectors that sync every transaction directly into your ERPClaw general ledger. Your data stays on your own ERPClaw instance.
 
 ### Stripe (`erpclaw-integrations-stripe`)
-Deep Stripe integration. <!-- SYNC:value:module.erpclaw-integrations-stripe.actions -->66<!-- /SYNC --> actions across 10 domains: account management, charges/refunds/disputes/payouts/subscriptions sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports (revenue, MRR, fees, disputes).
+Deep Stripe integration. <!-- SYNC:value:module.erpclaw-integrations-stripe.actions -->67<!-- /SYNC --> actions across 10 domains: account management, charges/refunds/disputes/payouts/subscriptions sync, customer mapping, GL posting with rule engine, payout reconciliation, ASC 606 revenue recognition, Connect platform fees, webhook processing, and financial reports (revenue, MRR, fees, disputes).
 
 ```
 install-module erpclaw-integrations-stripe
@@ -28,7 +28,7 @@ OAuth tokens are forwarded once to your ERPClaw during pairing and deleted from 
 ## Modules
 
 ### Growth Suite (`erpclaw-growth`)
-CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis. <!-- SYNC:value:module.erpclaw-growth.actions -->159<!-- /SYNC --> actions across 4 sub-modules: CRM, CRM Advanced, Analytics, AI Engine.
+CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis. <!-- SYNC:value:module.erpclaw-growth.actions -->161<!-- /SYNC --> actions across 4 sub-modules: CRM, CRM Advanced, Analytics, AI Engine.
 
 ### Operations Suite (`erpclaw-ops`)
 Manufacturing (BOMs, work orders, MRP), advanced manufacturing (shop floor, tools, ECOs), projects (tasks, milestones, timesheets), fixed assets (depreciation, disposal), quality (inspections, NCRs), and support (issues, SLAs, warranty). <!-- SYNC:value:module.erpclaw-ops.actions -->142<!-- /SYNC --> actions across 6 sub-modules.
