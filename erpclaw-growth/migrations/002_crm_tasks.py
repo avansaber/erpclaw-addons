@@ -15,7 +15,7 @@ The crm_task_link CHECK already covers all 5 entity types because growth:001
 Idempotent (CREATE IF NOT EXISTS), dialect-aware.
 
 money: no money columns in either table (TEXT/Decimal rule n/a here).
-ADR: internal/decisions/ADR-0023-foundation-fk-columns-for-addon-owned-entities.md
+ADR: ADR-0023 (foundation FK columns for addon-owned entities).
 """
 import argparse
 import os

@@ -1,7 +1,7 @@
 """Bank statement parsers (M2).
 
-Pure-Python, stdlib-only parsers for the four file formats legacy-erp / ERPNext
-support: OFX, CAMT.053 (ISO 20022), MT940 (SWIFT) and BAI2. We deliberately do
+Pure-Python, stdlib-only parsers for the four file formats SAP Business One /
+ERPNext support: OFX, CAMT.053 (ISO 20022), MT940 (SWIFT) and BAI2. We deliberately do
 NOT depend on ofxparse / mt-940 / bai2: the coding rules require external IO to
 be a mockable seam and CI to run with no real dependency, and these formats are
 small/well-specified enough to parse correctly in stdlib. This keeps the import

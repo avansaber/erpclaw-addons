@@ -19,7 +19,7 @@ first on an existing install it falls back to seeding the pipeline itself — Op
 self-contained — so ordering is forgiving either way).
 
 money: crm_pipeline_stage.default_probability is TEXT (Python Decimal), never float.
-ADR: internal/decisions/ADR-0023-foundation-fk-columns-for-addon-owned-entities.md
+ADR: ADR-0023 (foundation FK columns for addon-owned entities).
 """
 import argparse
 import os

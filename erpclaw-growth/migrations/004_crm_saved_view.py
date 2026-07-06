@@ -19,7 +19,7 @@ actions gain a --saved-view-id flag in-module). No migration ordering constraint
 Idempotent (CREATE IF NOT EXISTS), dialect-aware.
 
 money: crm_saved_view holds no money columns (filter values are opaque TEXT/JSON).
-ADR: internal/decisions/ADR-0023-foundation-fk-columns-for-addon-owned-entities.md
+ADR: ADR-0023 (foundation FK columns for addon-owned entities).
 """
 import argparse
 import os

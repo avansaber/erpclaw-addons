@@ -14,7 +14,7 @@ crm_contact / crm_company — must exist first). Idempotent (CREATE IF NOT EXIST
 dialect-aware.
 
 money: crm_company.annual_revenue is TEXT (Python Decimal), never float.
-ADR: internal/decisions/ADR-0023-foundation-fk-columns-for-addon-owned-entities.md
+ADR: ADR-0023 (foundation FK columns for addon-owned entities).
 """
 import argparse
 import os
