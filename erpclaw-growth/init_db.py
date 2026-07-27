@@ -682,7 +682,8 @@ def create_crmadv_tables(db_path=None):
                                 'sequence_violation','benford_deviation','budget_overrun',
                                 'inventory_shrinkage','payment_pattern_shift',
                                 'asset_book_value_drift','dimension_tag_drift',
-                                'reservation_over_available','subcontract_receipt_mismatch'
+                                'reservation_over_available','subcontract_receipt_mismatch',
+                                'rate_plan_mismatch'
                             )),
             severity        TEXT NOT NULL DEFAULT 'info'
                             CHECK(severity IN ('info','warning','critical')),

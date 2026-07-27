@@ -50,6 +50,9 @@ VALID_ANOMALY_TYPES = {
     "asset_book_value_drift", "dimension_tag_drift",
     # Wave 2 AI1: reservation-vs-stock headroom + subcontract receipt/transfer parity
     "reservation_over_available", "subcontract_receipt_mismatch",
+    # Wave F AI1: usage-vs-plan expectations (the spike half of the Wave F pair
+    # emits the pre-declared `consumption_spike` type above)
+    "rate_plan_mismatch",
 }
 
 VALID_SEVERITY = {"info", "warning", "critical"}
@@ -339,6 +342,633 @@ def _detect_subcontract_receipt_mismatch(conn, company_id, from_date, to_date):
                 if aid:
                     emitted.append({"id": aid, "type": "subcontract_receipt_mismatch",
                                     "severity": "warning"})
+    return emitted
+
+
+# Wave F AI1 usage-anomaly thresholds (OVERVIEW AI1 table, Wave F row).
+USAGE_SPIKE_MULTIPLIER = Decimal("3")   # window avg > N x historical baseline avg
+USAGE_MIN_BASELINE_READINGS = 3         # too few pre-window readings = no baseline
+USAGE_DEFAULT_WINDOW_READINGS = 3       # default sweep: last N readings = window
+
+# rate_plan types whose rate_tier rows are CUMULATIVE VOLUME BANDS — the only
+# tier shape where max(tier_end) is a hard per-billing-period consumption
+# ceiling. Exactly the set erpclaw-billing's _calculate_charge walks tier-by-
+# tier (2026-07-25 QA bounce #2, DEFECT-B): 'flat' prices ALL volume at one
+# rate (a closed tier_end never meant a ceiling), and for
+# time_of_use/demand/hybrid the tier rows are time/demand BANDS each with its
+# own cap, so max(tier_end) falsely accuses a customer whose usage is within
+# every band. Per-band ceilings for TOU/demand/hybrid arrive with S1.1-rated
+# data, not this heuristic.
+VOLUME_BAND_PLAN_TYPES = ("tiered", "volume_discount")
+
+# A rate_tier.tier_end at or beyond this magnitude is treated as garbage data,
+# not a real per-billing-period volume ceiling (no utility bills 10^15 units in
+# one period). add-rate-plan stores tier_end unvalidated, so absurd values are
+# reachable through shipped actions; the ceiling heuristic skips such plans
+# instead of "judging" against a nonsense ceiling (2026-07-26 QA round 3,
+# DEFECT-D).
+USAGE_CEILING_SANITY_MAX = Decimal("1E15")
+
+
+def _reading_day(value):
+    """Normalize a meter_reading.reading_date to its 10-char date part.
+
+    add-meter-reading stores --reading-date verbatim (no format validation),
+    so a value like '2026-03-31 08:00:00' or '2026-03-31T08:00' is reachable
+    through the shipped action. Raw string comparison against 'YYYY-MM-DD'
+    window bounds would silently drop such readings from BOTH the baseline and
+    the window (2026-07-25 QA bounce, MEDIUM defect) — every detector-side
+    date comparison goes through this normalization instead.
+    """
+    return str(value)[:10]
+
+
+def _sane_consumption(raw):
+    """Parse a consumption/money-like stored figure defensively, or None.
+
+    add-meter-reading and legacy rows store these figures unvalidated, so
+    non-finite ('NaN') and finite-but-absurd magnitudes (>= 1E26 survives
+    is_finite() yet overflows the default 28-digit decimal context in the
+    emission arithmetic) are reachable in stored data. Treating such a
+    figure as real aborted the WHOLE company sweep in all four emission
+    branches (2026-07-27 QA round 4, DEFECT-E). No real consumption or
+    charge approaches USAGE_CEILING_SANITY_MAX (1E15) — beyond it the row
+    is garbage data and the detector skips exactly that row. Never raises.
+    """
+    try:
+        val = to_decimal(str(raw))
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+    if not val.is_finite() or abs(val) >= USAGE_CEILING_SANITY_MAX:
+        return None
+    return val
+
+
+def _plan_volume_ceiling(conn, rate_plan_id, cache):
+    """Resolve a plan's hard per-billing-period volume ceiling, or None.
+
+    Returns ``(plan_name, ceiling Decimal)`` only when ALL hold: the plan
+    exists; its plan_type is in VOLUME_BAND_PLAN_TYPES (cumulative volume
+    bands — see the constant's rationale, 2026-07-25 QA bounce #2 DEFECT-B);
+    it has at least one rate_tier and every tier_end is closed AND sane;
+    and the resulting max(tier_end) is positive. Otherwise None — the plan
+    defines no usable volume ceiling and the mismatch heuristic must stay
+    silent. ``cache`` memoizes per sweep (dict keyed by rate_plan_id).
+
+    tier_end containment (2026-07-26 QA round 3, DEFECT-D — add-rate-plan
+    stores tier_end unvalidated, and one bad row must NEVER abort the whole
+    company sweep):
+      - NULL or blank/whitespace-only -> OPEN-ENDED (no ceiling): a blank
+        upper limit is the natural NL-authored "no upper limit", and it is
+        exactly how erpclaw-billing's _calculate_charge already treats it
+        (truthy check on tier_end) — engine-consistent, not invented here.
+      - unparseable ('abc'), non-finite ('NaN'/'sNaN'/'Infinity'), or
+        absurd-magnitude (>= USAGE_CEILING_SANITY_MAX) -> the plan's tier
+        data is garbage; skip the ceiling heuristic for THIS plan and let
+        the sweep continue. Never raise out of this helper.
+    """
+    if rate_plan_id in cache:
+        return cache[rate_plan_id]
+    result = None
+    plan_row = conn.execute(
+        "SELECT id, name, plan_type FROM rate_plan WHERE id = ?",
+        (rate_plan_id,),
+    ).fetchone()
+    if plan_row:
+        plan = row_to_dict(plan_row)
+        if plan["plan_type"] in VOLUME_BAND_PLAN_TYPES:
+            tier_rows = conn.execute(
+                "SELECT tier_end FROM rate_tier WHERE rate_plan_id = ?",
+                (rate_plan_id,),
+            ).fetchall()
+            raw_ends = [row_to_dict(t)["tier_end"] for t in tier_rows]
+            ends = []
+            usable = bool(raw_ends)
+            for raw in raw_ends:
+                if raw is None or not str(raw).strip():
+                    usable = False      # open-ended tier -> no ceiling
+                    break
+                try:
+                    val = to_decimal(str(raw).strip())
+                except (ValueError, TypeError, ArithmeticError):
+                    usable = False      # garbage tier_end -> skip this plan
+                    break
+                if not val.is_finite() or abs(val) >= USAGE_CEILING_SANITY_MAX:
+                    usable = False      # non-finite/absurd -> skip this plan
+                    break
+                ends.append(val)
+            if usable and ends:
+                ceiling = max(ends)
+                if ceiling > 0:
+                    result = (plan["name"], ceiling)
+    cache[rate_plan_id] = result
+    return result
+
+
+def _plan_pricing_rows(conn, rate_plan_id, cache):
+    """Fetch (plan_type, tier rows) for pricing math, memoized per sweep.
+
+    Shared by _stored_plan_usage_charge and _plan_max_billable so a plan's
+    tiers are read once per sweep regardless of how many periods cite it.
+    """
+    if rate_plan_id in cache:
+        return cache[rate_plan_id]
+    plan_type, tiers = None, []
+    plan_row = conn.execute(
+        "SELECT plan_type FROM rate_plan WHERE id = ?",
+        (rate_plan_id,),
+    ).fetchone()
+    if plan_row:
+        plan_type = row_to_dict(plan_row)["plan_type"]
+        tier_rows = conn.execute(
+            "SELECT tier_start, tier_end, rate FROM rate_tier "
+            "WHERE rate_plan_id = ? ORDER BY sort_order",
+            (rate_plan_id,),
+        ).fetchall()
+        tiers = [row_to_dict(t) for t in tier_rows]
+    cache[rate_plan_id] = (plan_type, tiers)
+    return plan_type, tiers
+
+
+def _plan_max_billable(conn, rate_plan_id, ceiling, cache):
+    """The most the plan's CURRENT tiers can bill in one period, or None.
+
+    The attribution discriminator (2026-07-27 QA round 4, DEFECT-F): a
+    stored usage_charge ABOVE this maximum is impossible under the stored
+    plan — some other plan priced the period. A charge at or below it is
+    explainable under the stored plan (including charges produced by since-
+    raised rates), so the over-ceiling accusation stands.
+
+    tiered: the full walk at the ceiling — charge is nondecreasing in
+    consumption and flat beyond the top closed band, so walk(ceiling) is
+    the maximum. volume_discount: charge = matched band's rate x total
+    consumption, so the maximum over legal consumption is per-band —
+    max over closed bands of round_currency(min(tier_end, ceiling) x rate).
+    Returns None when no finite maximum exists (open band, garbage tier
+    data, non-volume-band type). Never raises.
+    """
+    plan_type, tiers = _plan_pricing_rows(conn, rate_plan_id, cache)
+    if plan_type not in VOLUME_BAND_PLAN_TYPES or not tiers:
+        return None
+    if not isinstance(ceiling, Decimal):
+        return None
+    try:
+        if plan_type == "tiered":
+            return _stored_plan_usage_charge(
+                conn, rate_plan_id, ceiling, cache)
+        best = Decimal("0")
+        for tier in tiers:
+            tier_end_val = tier.get("tier_end")
+            if tier_end_val is None or not str(tier_end_val).strip():
+                return None      # open band -> no finite maximum
+            cap = min(to_decimal(str(tier_end_val).strip()), ceiling)
+            charge = round_currency(cap * to_decimal(tier.get("rate", "0")))
+            if charge > best:
+                best = charge
+        return best
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def _stored_plan_usage_charge(conn, rate_plan_id, consumption, cache):
+    """What the STORED plan's tiers would have charged for ``consumption``.
+
+    Exact mirror of erpclaw-billing _calculate_charge's usage-charge leg for
+    the volume-band types (tiered / volume_discount): tiers sorted by
+    tier_start, per-tier round_currency, TRUTHY tier_end -> open-ended —
+    byte-for-byte the arithmetic run-billing uses, so the recomputation
+    agrees with a stored billing_period.usage_charge if and only if that
+    stored plan's tiers actually produced it (usage_charge is independent of
+    base_charge / minimum_charge, which only touch the period total).
+    Read-only cross-module read of rate_plan/rate_tier (allowed).
+
+    Returns a Decimal, or None when the charge cannot be recomputed (unknown
+    plan, non-volume-band type, no tiers, or garbage tier data). NEVER
+    raises — one bad tier row must not abort the company sweep (2026-07-26
+    QA round 3). ``cache`` memoizes the fetched tier rows per plan.
+    """
+    plan_type, tiers = _plan_pricing_rows(conn, rate_plan_id, cache)
+    if plan_type not in VOLUME_BAND_PLAN_TYPES or not tiers:
+        return None
+    try:
+        sorted_tiers = sorted(
+            tiers, key=lambda t: to_decimal(t.get("tier_start", "0")))
+        if plan_type == "tiered":
+            usage_charge = Decimal("0")
+            remaining = consumption
+            for tier in sorted_tiers:
+                if remaining <= 0:
+                    break
+                tier_start = to_decimal(tier.get("tier_start", "0"))
+                tier_end_val = tier.get("tier_end")
+                tier_end = to_decimal(tier_end_val) if tier_end_val else None
+                rate = to_decimal(tier.get("rate", "0"))
+                band_width = (tier_end - tier_start) if tier_end else remaining
+                applicable = min(remaining, band_width)
+                usage_charge += round_currency(applicable * rate)
+                remaining -= applicable
+            return usage_charge
+        # volume_discount: the single matched band's rate on ALL consumption.
+        applicable_rate = Decimal("0")
+        for tier in sorted_tiers:
+            tier_start = to_decimal(tier.get("tier_start", "0"))
+            tier_end_val = tier.get("tier_end")
+            tier_end = to_decimal(tier_end_val) if tier_end_val else None
+            if consumption >= tier_start and (
+                    tier_end is None or consumption < tier_end):
+                applicable_rate = to_decimal(tier.get("rate", "0"))
+                break
+        return round_currency(consumption * applicable_rate)
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def _detect_usage_anomaly(conn, company_id, from_date, to_date,
+                          window_is_explicit=False):
+    """Wave F AI1 detector: consumption_spike + rate_plan_mismatch.
+
+    Per OVERVIEW's AI1 table (Wave F row), two related usage anomalies on the
+    foundation billing substrate (meters / readings / rate plans):
+
+      1. consumption_spike — a meter's recent average per-reading consumption
+         strictly exceeds USAGE_SPIKE_MULTIPLIER x its own historical baseline
+         (needing >= USAGE_MIN_BASELINE_READINGS baseline readings so a single
+         old reading never anchors a baseline). The window/baseline split
+         depends on how the sweep was invoked (2026-07-25 QA bounce, HIGH 1 —
+         the sweep window must not double as the baseline split point):
+           - window_is_explicit=True (user passed --from-date): window =
+             readings in [from_date, to_date]; baseline = all readings before
+             from_date.
+           - default sweep (no --from-date): meter-local recency split —
+             window = the meter's last USAGE_DEFAULT_WINDOW_READINGS readings
+             dated <= to_date; baseline = all earlier readings. Without this,
+             the default from_date sentinel swallows every reading into the
+             window and the baseline is always empty (type never emitted).
+         All threshold comparisons are cross-multiplied (window_total * n_base
+         vs baseline_total * n_win * MULT) so they are EXACT — an exactly-Nx
+         window must not fire the strict > threshold (QA bounce, LOW defect);
+         division appears only in display figures.
+      2. rate_plan_mismatch — usage exceeds what the meter's assigned rate
+         plan allows/defines ("customer using more than plan allows"):
+           - prepaid_credit plans: the customer's prepaid_credit_balance for
+             that plan is exhausted or carries overage (critical when actual
+             overage has accrued, warning when merely exhausted);
+           - volume-banded plans (VOLUME_BAND_PLAN_TYPES — exactly the tier
+             shapes _calculate_charge walks cumulatively: tiered,
+             volume_discount) where every rate_tier has a closed tier_end:
+             the plan defines a hard consumption ceiling. Other plan types
+             never fire this heuristic — for time_of_use/demand/hybrid the
+             tiers are per-band caps, not a volume ceiling (2026-07-25 QA
+             bounce #2, DEFECT-B). The ceiling is PER BILLING PERIOD (proven
+             by erpclaw-billing's _calculate_charge, which walks tiers
+             against ONE period's total_consumption), so the comparison is
+             per-period, never against a whole-sweep-window sum (2026-07-25
+             QA bounce, HIGH 2 — the old sum falsely accused fully compliant
+             customers):
+               * meter has billing_period rows (status != 'void') overlapping
+                 the sweep window -> evaluate each period AGAINST ITS OWN
+                 PLAN (billing_period.rate_plan_id, the plan the period
+                 was/will be rated under — never the meter's current plan; a
+                 plan change must not re-judge rated history, 2026-07-25 QA
+                 bounce #2, DEFECT-A). 'open' periods: consumption = SUM of
+                 readings dated within the period (usage_events omitted ->
+                 undercount only, conservative); rated/invoiced/paid/disputed
+                 periods: the stored total_consumption (authoritative — what
+                 run-billing actually accounted), PLUS the attribution guard
+                 (2026-07-26 QA round 3, DEFECT-C): accuse only if the stored
+                 usage_charge agrees EXACTLY with what the stored plan's
+                 tiers would have charged for that consumption
+                 (_stored_plan_usage_charge, a mirror of run-billing's
+                 arithmetic) — a mid-cycle plan change can leave a terminal
+                 row whose rate_plan_id names a plan that never priced it,
+                 and a period we cannot honestly attribute is never accused.
+                 Entity = ('billing_period', period_id).
+               * no billing_period rows -> single-reading lower bound against
+                 the METER's current plan (unbilled readings will be rated
+                 under it): fire only when ONE reading's consumption already
+                 exceeds the ceiling (run-billing aggregates a reading into
+                 exactly one period by reading_date, so a single reading
+                 lower-bounds its period's total). Entity =
+                 ('meter_reading', reading_id). With no period info and no
+                 single over-ceiling reading, stay silent — never accuse on
+                 a guessed accounting period.
+             Open-ended plans (any NULL tier_end) never fire.
+
+    Reads foundation billing tables (meter, meter_reading, rate_plan,
+    rate_tier, billing_period, prepaid_credit_balance — cross-module READ,
+    allowed); WRITES only growth's anomaly table via _insert_anomaly. Company
+    scope rides meter -> customer.company_id. Grouping/averaging is done in
+    Python from raw rows (dialect-safe, matching the Wave 2 detectors); all
+    quantities are Decimal-as-text and every comparison uses Decimal. Returns
+    a list of {"id","type","severity"} for each inserted anomaly.
+    """
+    emitted = []
+    for required in ("meter", "meter_reading", "rate_plan"):
+        if not _table_exists(conn, required):
+            return emitted
+
+    # Active meters for this company. Raw SQL — simple two-table join with
+    # internal literals only, mirroring the Wave 2 detector style.
+    meters = conn.execute(
+        "SELECT m.id, m.meter_number, m.customer_id, m.rate_plan_id "
+        "FROM meter m JOIN customer c ON m.customer_id = c.id "
+        "WHERE c.company_id = ? AND m.status = 'active'",
+        (company_id,),
+    ).fetchall()
+
+    # Per-sweep memos: _plan_volume_ceiling results and _stored_plan_usage_charge
+    # tier rows (plans are shared across meters and periods).
+    plan_ceilings = {}
+    plan_pricing = {}
+
+    for m_row in meters:
+        m = row_to_dict(m_row)
+        try:
+
+            # All usable readings up to the sweep end, oldest first. Dates are
+            # normalized per _reading_day; the raw-SQL ORDER BY stays monotonic
+            # w.r.t. the normalized day (lexicographic prefix), with created_at/id
+            # as deterministic tiebreak within a day.
+            rows = conn.execute(
+                "SELECT id, reading_date, consumption FROM meter_reading "
+                "WHERE meter_id = ? AND consumption IS NOT NULL "
+                "ORDER BY reading_date, created_at, id",
+                (m["id"],),
+            ).fetchall()
+            readings = []
+            for r in rows:
+                rd = row_to_dict(r)
+                day = _reading_day(rd["reading_date"])
+                if day > to_date:
+                    continue
+                consumption = _sane_consumption(rd["consumption"] or "0")
+                if consumption is None:
+                    continue    # garbage figure: skip the row, never the sweep
+                readings.append({"id": rd["id"], "day": day,
+                                 "consumption": consumption})
+
+            # --- 1. consumption_spike: window avg strictly > N x baseline avg ---
+            if window_is_explicit:
+                # User-declared window: examine it against everything before it.
+                split = 0
+                while split < len(readings) and readings[split]["day"] < from_date:
+                    split += 1
+                baseline, window = readings[:split], readings[split:]
+            else:
+                # Default sweep: latest readings vs their own history.
+                n_recent = min(len(readings), USAGE_DEFAULT_WINDOW_READINGS)
+                baseline = readings[:len(readings) - n_recent]
+                window = readings[len(readings) - n_recent:]
+
+            n_base, n_win = len(baseline), len(window)
+            if n_base >= USAGE_MIN_BASELINE_READINGS and n_win:
+                baseline_total = sum((r["consumption"] for r in baseline), Decimal("0"))
+                window_total = sum((r["consumption"] for r in window), Decimal("0"))
+                # Exact cross-multiplied threshold: no divide-then-multiply
+                # rounding, so an exactly-Nx window never fires the strict >.
+                lhs = window_total * n_base
+                rhs = baseline_total * n_win
+                if (baseline_total > 0
+                        and lhs > rhs * USAGE_SPIKE_MULTIPLIER):
+                    severity = ("critical"
+                                if lhs > rhs * USAGE_SPIKE_MULTIPLIER * 2
+                                else "warning")
+                    # Display-only figures (the comparison above is exact).
+                    baseline_avg = baseline_total / Decimal(n_base)
+                    window_avg = window_total / Decimal(n_win)
+                    ratio = (lhs / rhs).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    deviation_pct = ((lhs - rhs) / rhs * Decimal("100")).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    aid = _insert_anomaly(
+                        conn, "consumption_spike", severity,
+                        "meter", m["id"],
+                        f"Meter {m['meter_number']} consumption spike: window "
+                        f"average {round_currency(window_avg)} per reading is "
+                        f"{ratio}x the historical baseline "
+                        f"{round_currency(baseline_avg)} (fires strictly above "
+                        f"{USAGE_SPIKE_MULTIPLIER}x).",
+                        {"company_id": company_id, "meter_id": m["id"],
+                         "customer_id": m["customer_id"],
+                         "window_readings": n_win,
+                         "baseline_readings": n_base,
+                         "window_mode": ("explicit" if window_is_explicit
+                                         else "recent_readings")},
+                        baseline={"baseline_avg_consumption": str(round_currency(baseline_avg))},
+                        actual={"window_avg_consumption": str(round_currency(window_avg))},
+                        deviation_pct=str(deviation_pct),
+                    )
+                    if aid:
+                        emitted.append({"id": aid, "type": "consumption_spike",
+                                        "severity": severity})
+
+            # --- 2. rate_plan_mismatch: usage beyond what the plan allows ---
+            if not m["rate_plan_id"]:
+                continue
+            plan_row = conn.execute(
+                "SELECT id, name, plan_type FROM rate_plan WHERE id = ?",
+                (m["rate_plan_id"],),
+            ).fetchone()
+            if not plan_row:
+                continue
+            plan = row_to_dict(plan_row)
+
+            if plan["plan_type"] == "prepaid_credit":
+                if not _table_exists(conn, "prepaid_credit_balance"):
+                    continue
+                balances = conn.execute(
+                    "SELECT id, remaining_amount, overage_amount, status "
+                    "FROM prepaid_credit_balance "
+                    "WHERE customer_id = ? AND rate_plan_id = ? "
+                    "AND status IN ('active', 'exhausted')",
+                    (m["customer_id"], plan["id"]),
+                ).fetchall()
+                for b_row in balances:
+                    b = row_to_dict(b_row)
+                    overage = to_decimal(str(b["overage_amount"] or "0"))
+                    exhausted = b["status"] == "exhausted"
+                    if overage <= 0 and not exhausted:
+                        continue
+                    severity = "critical" if overage > 0 else "warning"
+                    aid = _insert_anomaly(
+                        conn, "rate_plan_mismatch", severity,
+                        "prepaid_credit_balance", b["id"],
+                        f"Meter {m['meter_number']} usage exceeds prepaid plan "
+                        f"'{plan['name']}': balance "
+                        + (f"overage ${round_currency(overage)} accrued"
+                           if overage > 0 else "exhausted")
+                        + " — customer is consuming beyond the plan's allowance.",
+                        {"company_id": company_id, "meter_id": m["id"],
+                         "customer_id": m["customer_id"],
+                         "rate_plan_id": plan["id"],
+                         "balance_status": b["status"],
+                         "overage_amount": str(round_currency(overage))},
+                        baseline={"remaining_amount": str(round_currency(
+                            to_decimal(str(b["remaining_amount"] or "0"))))},
+                        actual={"overage_amount": str(round_currency(overage))},
+                    )
+                    if aid:
+                        emitted.append({"id": aid, "type": "rate_plan_mismatch",
+                                        "severity": severity})
+            else:
+                if not _table_exists(conn, "rate_tier"):
+                    continue
+
+                # The tier ceiling is PER BILLING PERIOD — never compare it to a
+                # whole-sweep-window sum (2026-07-25 QA bounce, HIGH 2).
+                periods = []
+                if _table_exists(conn, "billing_period"):
+                    periods = conn.execute(
+                        "SELECT id, period_start, period_end, total_consumption, "
+                        "usage_charge, status, rate_plan_id FROM billing_period "
+                        "WHERE meter_id = ? AND status != 'void' "
+                        "AND period_start <= ? AND period_end >= ?",
+                        (m["id"], to_date, from_date),
+                    ).fetchall()
+                if periods:
+                    for p_row in periods:
+                        p = row_to_dict(p_row)
+                        # Judge the period against ITS OWN plan
+                        # (billing_period.rate_plan_id — the plan it was/will be
+                        # rated under, the same per-plan scoping the prepaid
+                        # branch above applies to balances). A meter plan change
+                        # must never re-judge already-rated history (2026-07-25
+                        # QA bounce #2, DEFECT-A).
+                        ceiling_info = _plan_volume_ceiling(
+                            conn, p["rate_plan_id"], plan_ceilings)
+                        if ceiling_info is None:
+                            continue
+                        period_plan_name, ceiling = ceiling_info
+                        if p["status"] == "open":
+                            # Not yet rated: best-available per-period figure from
+                            # the readings themselves (normalized dates; omitting
+                            # usage_events can only under-count -> conservative).
+                            period_consumption = sum(
+                                (r["consumption"] for r in readings
+                                 if p["period_start"] <= r["day"] <= p["period_end"]),
+                                Decimal("0"))
+                        else:
+                            # rated/invoiced/paid/disputed: what run-billing
+                            # actually accounted for this period. Garbage stored
+                            # totals (non-finite / absurd magnitude) skip THIS
+                            # period, never the sweep (QA round 4, DEFECT-E).
+                            period_consumption = _sane_consumption(
+                                p["total_consumption"] or "0")
+                            if period_consumption is None:
+                                continue
+                        if period_consumption <= ceiling:
+                            continue
+                        if p["status"] != "open":
+                            # ATTRIBUTION GUARD (QA round 3 DEFECT-C, reshaped in
+                            # round 4 for DEFECT-F): run-billing's open-period
+                            # UPDATE re-rates under the meter's CURRENT plan
+                            # without rewriting the period's rate_plan_id, so a
+                            # terminal row can claim plan X while plan Y priced
+                            # it (mid-cycle upgrade). Exact charge-agreement was
+                            # the wrong test — a routine update-rate-plan
+                            # re-price changes the recomputation and permanently
+                            # silenced TRUE accusations (DEFECT-F). The only
+                            # attribution claim the stored data supports: a
+                            # stored usage_charge EXCEEDING the most this plan
+                            # can bill at its own ceiling is impossible under
+                            # the stored plan — some other plan priced the
+                            # period, stay silent. At or below that maximum the
+                            # charge is explainable under the stored plan and
+                            # the accusation stands. Known epistemic bound
+                            # (recorded in the sim log): after a rate DECREASE a
+                            # historical charge may exceed the new maximum and
+                            # be silenced — undecidable without rate history;
+                            # lane A's rate_plan_id stamping ends the lying-row
+                            # supply at the source.
+                            stored_charge = _sane_consumption(
+                                p["usage_charge"] or "0")
+                            max_billable = _plan_max_billable(
+                                conn, p["rate_plan_id"], ceiling, plan_pricing)
+                            if (stored_charge is None or max_billable is None
+                                    or stored_charge > max_billable):
+                                continue
+                        over_pct = ((period_consumption - ceiling) / ceiling
+                                    * Decimal("100")).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        aid = _insert_anomaly(
+                            conn, "rate_plan_mismatch", "warning",
+                            "billing_period", p["id"],
+                            f"Meter {m['meter_number']} billing period "
+                            f"{p['period_start']}..{p['period_end']} consumption "
+                            f"{round_currency(period_consumption)} exceeds its "
+                            f"rate plan '{period_plan_name}' top tier ceiling "
+                            f"{round_currency(ceiling)} by {over_pct}% — the plan "
+                            f"defines no pricing for that usage.",
+                            {"company_id": company_id, "meter_id": m["id"],
+                             "customer_id": m["customer_id"],
+                             "rate_plan_id": p["rate_plan_id"],
+                             "billing_period_id": p["id"],
+                             "period_start": p["period_start"],
+                             "period_end": p["period_end"],
+                             "period_status": p["status"]},
+                            baseline={"plan_ceiling": str(round_currency(ceiling))},
+                            actual={"period_consumption": str(round_currency(period_consumption))},
+                            deviation_pct=str(over_pct),
+                        )
+                        if aid:
+                            emitted.append({"id": aid, "type": "rate_plan_mismatch",
+                                            "severity": "warning"})
+                else:
+                    # No billing periods for this meter: the only provable claim
+                    # is the single-reading lower bound (one reading bills into
+                    # exactly one period, so it lower-bounds that period's total),
+                    # judged against the METER's current plan — the plan unbilled
+                    # readings will be rated under. Same volume-band restriction
+                    # (2026-07-25 QA bounce #2, DEFECT-B).
+                    ceiling_info = _plan_volume_ceiling(
+                        conn, plan["id"], plan_ceilings)
+                    if ceiling_info is None:
+                        continue
+                    _, ceiling = ceiling_info
+                    worst = None
+                    for r in readings:
+                        if not (from_date <= r["day"] <= to_date):
+                            continue
+                        if worst is None or r["consumption"] > worst["consumption"]:
+                            worst = r
+                    if worst is None or worst["consumption"] <= ceiling:
+                        continue
+                    over_pct = ((worst["consumption"] - ceiling) / ceiling
+                                * Decimal("100")).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    aid = _insert_anomaly(
+                        conn, "rate_plan_mismatch", "warning",
+                        "meter_reading", worst["id"],
+                        f"Meter {m['meter_number']} single reading on "
+                        f"{worst['day']} consumed "
+                        f"{round_currency(worst['consumption'])}, already beyond "
+                        f"rate plan '{plan['name']}' per-billing-period top tier "
+                        f"ceiling {round_currency(ceiling)} by {over_pct}% — the "
+                        f"plan defines no pricing for that usage.",
+                        {"company_id": company_id, "meter_id": m["id"],
+                         "customer_id": m["customer_id"],
+                         "rate_plan_id": plan["id"],
+                         "meter_reading_id": worst["id"],
+                         "reading_date": worst["day"]},
+                        baseline={"plan_ceiling": str(round_currency(ceiling))},
+                        actual={"reading_consumption": str(round_currency(worst["consumption"]))},
+                        deviation_pct=str(over_pct),
+                    )
+                    if aid:
+                        emitted.append({"id": aid, "type": "rate_plan_mismatch",
+                                        "severity": "warning"})
+        except ArithmeticError as exc:
+            # Defense-in-depth (QA round 4, DEFECT-E class): input
+            # sanitization above is the primary guard, but NO residual
+            # decimal explosion in one meter's figures may ever kill the
+            # company sweep — contain, note, continue (mirrors the
+            # billing lane's per-meter ArithmeticError containment).
+            print(
+                f"[erpclaw-ai-engine] usage-anomaly: meter {m.get('id')} "
+                f"skipped ({exc.__class__.__name__}: {exc})",
+                file=sys.stderr,
+            )
+            continue
     return emitted
 
 
@@ -1469,14 +2099,23 @@ def detect_anomalies(conn, args):
                     by_type["dimension_tag_drift"] = by_type.get("dimension_tag_drift", 0) + 1
                     by_severity["warning"] = by_severity.get("warning", 0) + 1
 
-    # --- Heuristics 8 + 9: Wave 2 AI1 inventory hooks ---
-    # reservation_over_available (reads M5 stock_reservation_entry + SLE) and
-    # subcontract_receipt_mismatch (reads S5 subcontracting_order). Each detector
-    # emits through _insert_anomaly and returns the anomalies it inserted so the
-    # sweep's roll-up counters stay consistent.
-    for detector in (_detect_reservation_over_available,
-                     _detect_subcontract_receipt_mismatch):
-        for a in detector(conn, company_id, from_date, to_date):
+    # --- Heuristics 8 + 9: Wave 2 AI1 inventory hooks; 10: Wave F usage ---
+    # reservation_over_available (reads M5 stock_reservation_entry + SLE),
+    # subcontract_receipt_mismatch (reads S5 subcontracting_order), and the
+    # Wave F usage detector (consumption_spike + rate_plan_mismatch, reads the
+    # foundation billing substrate). Each detector emits through
+    # _insert_anomaly and returns the anomalies it inserted so the sweep's
+    # roll-up counters stay consistent. The usage detector is told whether the
+    # USER supplied --from-date: on the default sweep the '2000-01-01'
+    # sentinel would swallow every reading into the window (empty baseline ->
+    # consumption_spike could never fire), so it switches to a meter-local
+    # recency split instead of trusting the sentinel as a split point.
+    for detector, extra in (
+            (_detect_reservation_over_available, {}),
+            (_detect_subcontract_receipt_mismatch, {}),
+            (_detect_usage_anomaly,
+             {"window_is_explicit": bool(args.from_date)})):
+        for a in detector(conn, company_id, from_date, to_date, **extra):
             new_anomalies.append(a["id"])
             by_type[a["type"]] = by_type.get(a["type"], 0) + 1
             by_severity[a["severity"]] = by_severity.get(a["severity"], 0) + 1

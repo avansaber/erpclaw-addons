@@ -387,6 +387,104 @@ def seed_subcontracting_order(conn, company_id: str, *, qty: str,
     return oid
 
 
+def seed_customer(conn, company_id: str, name="Usage Cust") -> str:
+    """Insert a customer (Wave F usage-anomaly prerequisite). Returns its ID."""
+    cid = _uuid()
+    conn.execute(
+        "INSERT INTO customer (id, name, company_id) VALUES (?, ?, ?)",
+        (cid, f"{name} {cid[:6]}", company_id),
+    )
+    conn.commit()
+    return cid
+
+
+def seed_rate_plan(conn, *, plan_type: str = "flat", name="Plan",
+                   tiers=None) -> str:
+    """Insert a rate_plan (+ optional rate_tier rows). `tiers` is a list of
+    (tier_start, tier_end_or_None, rate) tuples. Returns the plan ID."""
+    pid = _uuid()
+    conn.execute(
+        """INSERT INTO rate_plan (id, name, plan_type, effective_from)
+           VALUES (?, ?, ?, '2025-01-01')""",
+        (pid, f"{name} {pid[:6]}", plan_type),
+    )
+    for i, (start, end, rate) in enumerate(tiers or []):
+        conn.execute(
+            """INSERT INTO rate_tier (id, rate_plan_id, tier_start, tier_end,
+               rate, sort_order) VALUES (?, ?, ?, ?, ?, ?)""",
+            (_uuid(), pid, start, end, rate, i),
+        )
+    conn.commit()
+    return pid
+
+
+def seed_meter(conn, customer_id: str, *, rate_plan_id=None,
+               service_type: str = "electricity") -> str:
+    """Insert an active meter for the customer. Returns the meter ID."""
+    mid = _uuid()
+    conn.execute(
+        """INSERT INTO meter (id, meter_number, customer_id, service_type,
+           rate_plan_id, status) VALUES (?, ?, ?, ?, ?, 'active')""",
+        (mid, f"MTR-{mid[:8]}", customer_id, service_type, rate_plan_id),
+    )
+    conn.commit()
+    return mid
+
+
+def seed_meter_reading(conn, meter_id: str, reading_date: str,
+                       consumption: str) -> str:
+    """Insert a meter_reading carrying an explicit consumption figure."""
+    rid = _uuid()
+    conn.execute(
+        """INSERT INTO meter_reading (id, meter_id, reading_date,
+           reading_value, consumption) VALUES (?, ?, ?, ?, ?)""",
+        (rid, meter_id, reading_date, consumption, consumption),
+    )
+    conn.commit()
+    return rid
+
+
+def seed_billing_period(conn, customer_id: str, meter_id: str,
+                        rate_plan_id: str, period_start: str,
+                        period_end: str, *, status: str = "open",
+                        total_consumption: str = "0",
+                        usage_charge: str = "0") -> str:
+    """Insert a billing_period row for a meter. Returns its ID.
+
+    For terminal statuses (rated/invoiced/paid/disputed) pass the
+    usage_charge run-billing would have stored — it writes the computed
+    charge atomically with status='rated', so a faithful terminal fixture
+    always carries it (the detector's DEFECT-C attribution guard checks it).
+    """
+    pid = _uuid()
+    conn.execute(
+        """INSERT INTO billing_period
+           (id, customer_id, meter_id, rate_plan_id, period_start,
+            period_end, total_consumption, usage_charge, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (pid, customer_id, meter_id, rate_plan_id, period_start,
+         period_end, total_consumption, usage_charge, status),
+    )
+    conn.commit()
+    return pid
+
+
+def seed_prepaid_balance(conn, customer_id: str, rate_plan_id: str, *,
+                         remaining: str = "0", overage: str = "0",
+                         status: str = "active") -> str:
+    """Insert a prepaid_credit_balance row. Returns its ID."""
+    bid = _uuid()
+    conn.execute(
+        """INSERT INTO prepaid_credit_balance
+           (id, customer_id, rate_plan_id, original_amount, remaining_amount,
+            period_start, period_end, overage_amount, status)
+           VALUES (?, ?, ?, '100', ?, '2026-01-01', '2026-12-31', ?, ?)""",
+        (bid, customer_id, rate_plan_id, remaining, overage, status),
+    )
+    conn.commit()
+    return bid
+
+
 def build_env(conn) -> dict:
     """Create a full AI engine test environment with GL data."""
     cid = seed_company(conn)

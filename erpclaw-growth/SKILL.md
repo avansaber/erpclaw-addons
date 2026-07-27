@@ -1,6 +1,6 @@
 ---
 name: erpclaw-growth
-version: 2.9.2
+version: 2.10.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis for ERPClaw.
   137 actions across 4 domains: lead management, lead sources, opportunity pipeline, saved views, global search, CSV import/export, email campaigns,
@@ -249,7 +249,7 @@ Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `detect-anomalies` | `--company-id` | `--from-date`, `--to-date` — scans 18 anomaly types incl. `asset_book_value_drift`, `dimension_tag_drift` |
+| `detect-anomalies` | `--company-id` | `--from-date`, `--to-date` — scans 21 anomaly types incl. `asset_book_value_drift`, `dimension_tag_drift`, `consumption_spike` (meter usage vs historical baseline) and `rate_plan_mismatch` (usage beyond plan allowance, Wave F) |
 | `list-anomalies` | | `--company-id`, `--severity`, `--status`, `--limit`, `--offset` |
 | `acknowledge-anomaly` | `--anomaly-id` | |
 | `dismiss-anomaly` | `--anomaly-id` | `--reason` |

@@ -18,6 +18,8 @@ from ai_helpers import (
     seed_asset_category, seed_asset, seed_gl_with_dimensions,
     seed_item, seed_warehouse, seed_sle, seed_reservation,
     seed_subcontracting_order,
+    seed_customer, seed_rate_plan, seed_meter, seed_meter_reading,
+    seed_prepaid_balance, seed_billing_period,
 )
 
 MOD = load_db_query()
@@ -670,3 +672,785 @@ class TestAI1SubcontractReceiptMismatch:
         r = self._detect(conn, env["company_id"])
         assert is_ok(r)
         assert r["by_type"].get("subcontract_receipt_mismatch", 0) == 0
+
+
+# ===========================================================================
+# AI1 — consumption_spike + rate_plan_mismatch  (Wave F usage anomalies)
+# ===========================================================================
+
+class TestAI1UsageAnomaly:
+    """Wave F AI1 detector (S1.5): usage spike > Nx baseline + rate-plan
+    mismatch, per OVERVIEW's AI1 table Wave-F row."""
+
+    def _detect(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id,
+            from_date="2026-03-01", to_date="2026-03-31",
+        ))
+
+    def _seed_baseline(self, conn, meter_id, values=("10", "10", "10")):
+        """Three pre-window readings (the minimum baseline)."""
+        for i, v in enumerate(values):
+            seed_meter_reading(conn, meter_id, f"2026-01-{10 + i:02d}", v)
+
+    def test_consumption_spike_raises_critical(self, conn, env):
+        """Window avg (100) is 10x the baseline avg (10) => critical
+        consumption_spike with exact figures."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        self._seed_baseline(conn, meter_id)                 # baseline avg 10
+        seed_meter_reading(conn, meter_id, "2026-03-10", "100")  # window avg 100
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 1
+        assert r["by_severity"].get("critical", 0) >= 1
+
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert a is not None
+        assert a["severity"] == "critical"                  # 10x > 2*3x
+        assert a["entity_type"] == "meter"
+        assert a["entity_id"] == meter_id
+        assert json.loads(a["baseline"]) == {"baseline_avg_consumption": "10.00"}
+        assert json.loads(a["actual"]) == {"window_avg_consumption": "100.00"}
+        assert a["deviation_pct"] == "900.00"               # (100-10)/10 * 100
+
+    def test_moderate_spike_is_warning(self, conn, env):
+        """Window avg (40) is 4x baseline (10): above the 3x threshold but
+        under the 6x critical line => warning."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        self._seed_baseline(conn, meter_id)
+        seed_meter_reading(conn, meter_id, "2026-03-10", "40")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert a is not None
+        assert a["severity"] == "warning"
+        assert a["deviation_pct"] == "300.00"
+
+    def test_normal_usage_no_spike(self, conn, env):
+        """NEGATIVE CONTROL: window avg (12) vs baseline (10) must NOT fire."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        self._seed_baseline(conn, meter_id)
+        seed_meter_reading(conn, meter_id, "2026-03-10", "12")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 0
+
+    def test_insufficient_baseline_no_spike(self, conn, env):
+        """NEGATIVE CONTROL: only 2 pre-window readings (< the 3-reading
+        minimum) => no baseline, no fire, however large the window reading."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        seed_meter_reading(conn, meter_id, "2026-01-10", "10")
+        seed_meter_reading(conn, meter_id, "2026-01-11", "10")
+        seed_meter_reading(conn, meter_id, "2026-03-10", "500")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 0
+
+    def test_prepaid_overage_raises_critical_mismatch(self, conn, env):
+        """A meter on a prepaid_credit plan whose balance carries accrued
+        overage => critical rate_plan_mismatch."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="prepaid_credit")
+        seed_meter(conn, cust, rate_plan_id=plan)
+        bal = seed_prepaid_balance(conn, cust, plan, remaining="0",
+                                   overage="25.50", status="exhausted")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["severity"] == "critical"
+        assert a["entity_type"] == "prepaid_credit_balance"
+        assert a["entity_id"] == bal
+        assert json.loads(a["actual"]) == {"overage_amount": "25.50"}
+
+    def test_prepaid_exhausted_no_overage_is_warning(self, conn, env):
+        """Exhausted balance with zero overage => warning (cap hit, not yet
+        exceeded)."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="prepaid_credit")
+        seed_meter(conn, cust, rate_plan_id=plan)
+        seed_prepaid_balance(conn, cust, plan, remaining="0",
+                             overage="0", status="exhausted")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["severity"] == "warning"
+
+    def test_prepaid_active_balance_no_mismatch(self, conn, env):
+        """NEGATIVE CONTROL: an active prepaid balance with credit left and no
+        overage must NOT fire."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="prepaid_credit")
+        seed_meter(conn, cust, rate_plan_id=plan)
+        seed_prepaid_balance(conn, cust, plan, remaining="60",
+                             overage="0", status="active")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+    def test_tier_ceiling_exceeded_raises_mismatch(self, conn, env):
+        """A single reading (600) beyond a fully-closed tiered plan's
+        per-billing-period top ceiling (500) => warning rate_plan_mismatch
+        with exact figures (single-reading lower bound: no billing periods
+        exist, and one reading always bills into exactly one period)."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        rid = seed_meter_reading(conn, meter_id, "2026-03-10", "600")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["severity"] == "warning"
+        assert a["entity_type"] == "meter_reading"
+        assert a["entity_id"] == rid
+        assert json.loads(a["baseline"]) == {"plan_ceiling": "500.00"}
+        assert json.loads(a["actual"]) == {"reading_consumption": "600.00"}
+        assert a["deviation_pct"] == "20.00"                # (600-500)/500 * 100
+
+    def test_open_ended_plan_never_fires(self, conn, env):
+        """NEGATIVE CONTROL: a plan whose top tier is open-ended (NULL
+        tier_end) defines no ceiling and must NOT fire, whatever the usage."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", tiers=[
+            ("0", "100", "0.10"), ("100", None, "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        seed_meter_reading(conn, meter_id, "2026-03-10", "9999")
+
+        r = self._detect(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+    def test_idempotent_rerun_no_duplicates(self, conn, env):
+        """A second sweep must not duplicate open usage anomalies (the
+        _insert_anomaly new/acknowledged dedup)."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        self._seed_baseline(conn, meter_id)
+        seed_meter_reading(conn, meter_id, "2026-03-10", "100")
+
+        r1 = self._detect(conn, env["company_id"])
+        assert is_ok(r1)
+        assert r1["by_type"].get("consumption_spike", 0) == 1
+        r2 = self._detect(conn, env["company_id"])
+        assert is_ok(r2)
+        assert r2["by_type"].get("consumption_spike", 0) == 0
+        n = conn.execute(
+            "SELECT COUNT(*) FROM anomaly WHERE anomaly_type = 'consumption_spike'"
+        ).fetchone()[0]
+        assert n == 1
+
+
+class TestAI1UsageAnomalyQaBounceRegressions:
+    """Pins for the 2026-07-25 QA bounce of S1.5 — one regression per
+    executed defect (2 HIGH, 1 MEDIUM, 1 LOW)."""
+
+    def _detect_default(self, conn, company_id):
+        """The default (no-date-flags) sweep — exactly what QA broke."""
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id, from_date=None, to_date=None,
+        ))
+
+    def _detect_window(self, conn, company_id, from_date, to_date):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id, from_date=from_date, to_date=to_date,
+        ))
+
+    # --- HIGH 1: consumption_spike must fire on the default invocation ---
+
+    def test_default_sweep_consumption_spike_fires(self, conn, env):
+        """QA reproduction: 5 baseline readings of 10 (Jan) + one 500 (Mar),
+        NO date flags. The old code put every reading in the window (empty
+        baseline) and could never emit; the recency split must fire."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        for i in range(5):
+            seed_meter_reading(conn, meter_id, f"2026-01-{10 + i:02d}", "10")
+        seed_meter_reading(conn, meter_id, "2026-03-10", "500")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 1
+
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert a is not None
+        # window = last 3 readings (10,10,500) avg 173.33 vs baseline 10.00
+        assert a["severity"] == "critical"       # 520*3 > 30*3*6
+        assert json.loads(a["baseline"]) == {"baseline_avg_consumption": "10.00"}
+        assert json.loads(a["actual"]) == {"window_avg_consumption": "173.33"}
+        assert json.loads(a["evidence"])["window_mode"] == "recent_readings"
+
+    def test_default_sweep_steady_usage_stays_silent(self, conn, env):
+        """NEGATIVE CONTROL (QA reproduction a): 12 months of steady 100/month
+        on a plan with a 500/period ceiling must fire NEITHER anomaly on the
+        default sweep — the old code falsely accused this customer with a
+        1200-vs-500 whole-window comparison."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        for month_date in ("2025-08-01", "2025-09-01", "2025-10-01",
+                           "2025-11-01", "2025-12-01", "2026-01-01",
+                           "2026-02-01", "2026-03-01", "2026-04-01",
+                           "2026-05-01", "2026-06-01", "2026-07-01"):
+            seed_meter_reading(conn, meter_id, month_date, "100")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 0
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+    # --- HIGH 2: per-billing-period ceiling accounting ---
+
+    def test_explicit_quarter_window_compliant_customer_not_accused(
+            self, conn, env):
+        """QA reproduction b: ordinary quarterly window over monthly usage of
+        200 against a 500/period ceiling — fully compliant, must NOT fire."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        for month_date in ("2026-01-15", "2026-02-15", "2026-03-15"):
+            seed_meter_reading(conn, meter_id, month_date, "200")
+
+        r = self._detect_window(conn, env["company_id"],
+                                "2026-01-01", "2026-03-31")
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+    def test_tier_ceiling_fires_per_billing_period(self, conn, env):
+        """TRUE POSITIVE with billing periods: an open January period whose
+        readings sum to 600 (> the 500 ceiling) fires exactly once, keyed to
+        that period; a rated February period whose AUTHORITATIVE stored
+        total_consumption is 400 stays silent even though its raw readings
+        sum higher (run-billing's figure wins for rated periods)."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        jan = seed_billing_period(conn, cust, meter_id, plan,
+                                  "2026-01-01", "2026-01-31", status="open")
+        seed_billing_period(conn, cust, meter_id, plan,
+                            "2026-02-01", "2026-02-28", status="rated",
+                            total_consumption="400")
+        seed_meter_reading(conn, meter_id, "2026-01-10", "300")
+        seed_meter_reading(conn, meter_id, "2026-01-20", "300")
+        seed_meter_reading(conn, meter_id, "2026-02-10", "300")
+        seed_meter_reading(conn, meter_id, "2026-02-20", "300")
+
+        r = self._detect_window(conn, env["company_id"],
+                                "2026-01-01", "2026-02-28")
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["severity"] == "warning"
+        assert a["entity_type"] == "billing_period"
+        assert a["entity_id"] == jan
+        assert json.loads(a["baseline"]) == {"plan_ceiling": "500.00"}
+        assert json.loads(a["actual"]) == {"period_consumption": "600.00"}
+        assert a["deviation_pct"] == "20.00"
+
+    # --- MEDIUM: datetime-carrying reading_date must not be dropped ---
+
+    def test_datetime_reading_date_counts_in_window(self, conn, env):
+        """QA reproduction: a reading stored as '2026-03-31 08:00:00' (legal
+        through add-meter-reading) must land in the March window instead of
+        silently vanishing from both buckets."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_id = seed_meter(conn, cust)
+        for i in range(3):
+            seed_meter_reading(conn, meter_id, f"2026-01-{10 + i:02d}", "10")
+        seed_meter_reading(conn, meter_id, "2026-03-31 08:00:00", "500")
+
+        r = self._detect_window(conn, env["company_id"],
+                                "2026-03-01", "2026-03-31")
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert json.loads(a["actual"]) == {"window_avg_consumption": "500.00"}
+
+    # --- LOW: exact-Nx boundary is strict ---
+
+    def test_exact_multiplier_boundary_does_not_fire(self, conn, env):
+        """QA reproduction: baseline (1,2,4) has a non-terminating avg (7/3);
+        a window reading of exactly 7 (= 3x) fired through divide-then-
+        multiply rounding. Cross-multiplied comparison keeps the strict >
+        exact: exactly-3x stays silent, 7.01 (just above) fires."""
+        cust = seed_customer(conn, env["company_id"])
+        meter_exact = seed_meter(conn, cust)
+        meter_above = seed_meter(conn, cust)
+        for meter_id in (meter_exact, meter_above):
+            for day, val in (("2026-01-10", "1"), ("2026-01-11", "2"),
+                             ("2026-01-12", "4")):
+                seed_meter_reading(conn, meter_id, day, val)
+        seed_meter_reading(conn, meter_exact, "2026-03-10", "7")
+        seed_meter_reading(conn, meter_above, "2026-03-10", "7.01")
+
+        r = self._detect_window(conn, env["company_id"],
+                                "2026-03-01", "2026-03-31")
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 1
+        fired = [row[0] for row in conn.execute(
+            "SELECT entity_id FROM anomaly "
+            "WHERE anomaly_type = 'consumption_spike'").fetchall()]
+        assert fired == [meter_above]
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert a["severity"] == "warning"      # 3.004x is above 3x, below 6x
+        assert a["deviation_pct"] == "200.43"  # (7.01-7/3)/(7/3)*100, exact
+
+
+class TestAI1UsageAnomalyQaBounce2Regressions:
+    """Pins for the 2026-07-25 QA bounce #2 of S1.5 — two MEDIUM
+    'falsely accuses a compliant customer' defects in the rate_plan_mismatch
+    volume-ceiling heuristic (DEFECT-A: a meter plan change re-judged
+    already-rated history under the NEW plan; DEFECT-B: max(tier_end) was
+    applied to plan types whose tiers are per-band caps, not cumulative
+    volume bands)."""
+
+    def _detect_default(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id, from_date=None, to_date=None,
+        ))
+
+    # --- DEFECT-A: each billing period is judged against ITS OWN plan ---
+
+    def test_plan_downgrade_does_not_accuse_rated_history(self, conn, env):
+        """QA reproduction (qa_p1_e2e.py + qa_probe2.py P1 seeded variant):
+        periods rated/paid at 1000 under the open-ended 'Unlimited' plan
+        (billing_period.rate_plan_id == Unlimited), then the meter downgrades
+        to 'Small' (500/period ceiling) via one shipped action. The history
+        WAS priced and rated under Unlimited — zero mismatches."""
+        cust = seed_customer(conn, env["company_id"])
+        unlimited = seed_rate_plan(conn, plan_type="tiered", name="Unlimited",
+                                   tiers=[("0", None, "0.10")])
+        small = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=unlimited)
+        for start, end, status in (
+                ("2026-01-01", "2026-01-31", "rated"),
+                ("2026-02-01", "2026-02-28", "paid"),
+                ("2026-03-01", "2026-03-31", "paid")):
+            seed_billing_period(conn, cust, meter_id, unlimited, start, end,
+                                status=status, total_consumption="1000")
+            seed_meter_reading(conn, meter_id, end, "1000")
+        # The shipped-action downgrade: update-meter --rate-plan-id Small.
+        conn.execute("UPDATE meter SET rate_plan_id = ? WHERE id = ?",
+                     (small, meter_id))
+        conn.commit()
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+        n = conn.execute("SELECT COUNT(*) FROM anomaly "
+                         "WHERE anomaly_type = 'rate_plan_mismatch'"
+                         ).fetchone()[0]
+        assert n == 0
+
+    def test_rated_history_still_fires_under_its_own_plan(self, conn, env):
+        """Complement (guards against over-fix): a period RATED under 'Small'
+        (500 ceiling) at 600 keeps firing after the meter upgrades to the
+        open-ended 'Unlimited' — the period's own plan governs in BOTH
+        directions; an upgrade must not silence a genuine historical
+        violation."""
+        cust = seed_customer(conn, env["company_id"])
+        small = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        unlimited = seed_rate_plan(conn, plan_type="tiered", name="Unlimited",
+                                   tiers=[("0", None, "0.10")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=small)
+        # usage_charge = what run-billing stores when it rates 600 under
+        # Small (100@0.10 + 400@0.08, top 100 unpriced) — a genuinely-rated
+        # row always carries the charge its own plan computed, and the
+        # round-3 attribution guard verifies exactly that agreement.
+        jan = seed_billing_period(conn, cust, meter_id, small,
+                                  "2026-01-01", "2026-01-31", status="rated",
+                                  total_consumption="600",
+                                  usage_charge="42.00")
+        conn.execute("UPDATE meter SET rate_plan_id = ? WHERE id = ?",
+                     (unlimited, meter_id))
+        conn.commit()
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["severity"] == "warning"
+        assert a["entity_type"] == "billing_period"
+        assert a["entity_id"] == jan
+        assert json.loads(a["baseline"]) == {"plan_ceiling": "500.00"}
+        assert json.loads(a["actual"]) == {"period_consumption": "600.00"}
+        assert a["deviation_pct"] == "20.00"
+        # Evidence names the PERIOD's plan, not the meter's current one.
+        assert json.loads(a["evidence"])["rate_plan_id"] == small
+
+    # --- DEFECT-B: max(tier_end) only for cumulative volume-band plans ---
+
+    def test_tou_closed_bands_not_a_volume_ceiling(self, conn, env):
+        """QA reproduction (qa_p2_e2e.py): a time_of_use plan with two closed
+        0-1000 bands (peak @0.20, off_peak @0.10); an open January period
+        whose readings sum to 1200 (600 peak + 600 off-peak). Each band is
+        within its own 1000 cap — max(tier_end) is NOT a volume ceiling for
+        TOU; must NOT fire."""
+        cust = seed_customer(conn, env["company_id"])
+        tou = seed_rate_plan(conn, plan_type="time_of_use", name="TOU")
+        for i, (rate, tou_period) in enumerate(
+                (("0.20", "peak"), ("0.10", "off_peak"))):
+            conn.execute(
+                """INSERT INTO rate_tier (id, rate_plan_id, tier_start,
+                   tier_end, rate, time_of_use_period, sort_order)
+                   VALUES (?, ?, '0', '1000', ?, ?, ?)""",
+                (_uuid(), tou, rate, tou_period, i))
+        meter_id = seed_meter(conn, cust, rate_plan_id=tou)
+        seed_billing_period(conn, cust, meter_id, tou,
+                            "2026-01-01", "2026-01-31", status="open")
+        seed_meter_reading(conn, meter_id, "2026-01-15", "600")  # peak band
+        seed_meter_reading(conn, meter_id, "2026-01-31", "600")  # off-peak
+        conn.commit()
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+    def test_demand_hybrid_no_ceiling_volume_discount_still_fires(
+            self, conn, env):
+        """DEFECT-B on the no-period single-reading path: demand and hybrid
+        plans with fully-closed tiers never define a volume ceiling, however
+        large the reading; volume_discount (IN the cumulative volume-band
+        set _calculate_charge walks) with the same tier shape still fires."""
+        cust = seed_customer(conn, env["company_id"])
+        vd_reading = None
+        for ptype in ("demand", "hybrid", "volume_discount"):
+            plan = seed_rate_plan(conn, plan_type=ptype, name=ptype,
+                                  tiers=[("0", "500", "0.10")])
+            meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+            rid = seed_meter_reading(conn, meter_id, "2026-03-10", "900")
+            if ptype == "volume_discount":
+                vd_reading = rid
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        rows = [dict(x) for x in conn.execute(
+            "SELECT entity_type, entity_id FROM anomaly "
+            "WHERE anomaly_type = 'rate_plan_mismatch'").fetchall()]
+        assert rows == [{"entity_type": "meter_reading",
+                         "entity_id": vd_reading}]
+
+
+class TestAI1UsageAnomalyQaRound3Regressions:
+    """Pins for the 2026-07-26 QA round 3 (directed final round, pm-scoped):
+    DEFECT-C — a mid-cycle plan UPGRADE leaves a terminal billing_period
+    whose rate_plan_id names a plan that never priced it (run-billing's
+    open-period UPDATE re-rates under the meter's current plan without
+    rewriting the period's plan); the detector must not accuse a correctly
+    priced bill it cannot attribute. DEFECT-D — a garbage rate_tier.tier_end
+    (accepted unvalidated by add-rate-plan) aborted the ENTIRE
+    detect-anomalies action company-wide."""
+
+    def _detect_default(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id, from_date=None, to_date=None,
+        ))
+
+    # --- DEFECT-C: unattributable terminal period is never accused ---
+
+    def test_mid_cycle_upgrade_correctly_priced_bill_not_accused(
+            self, conn, env):
+        """QA reproduction (qa3_probeA.py end-state, all shipped actions):
+        January period opened under 'Small' (500 ceiling), customer upgrades
+        to open-ended 'Unlimited' mid-cycle, run-billing rates 1000 kWh at
+        $100.00 (= 1000 x 0.10 under Unlimited) but the row still records
+        Small. Recomputing Small's tiers gives $42.00 != $100.00 — the
+        stored plan did not price this period, so the sweep stays SILENT."""
+        cust = seed_customer(conn, env["company_id"])
+        small = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        unlimited = seed_rate_plan(conn, plan_type="tiered", name="Unlimited",
+                                   tiers=[("0", None, "0.10")])
+        # Meter already upgraded (update-meter --rate-plan-id Unlimited).
+        meter_id = seed_meter(conn, cust, rate_plan_id=unlimited)
+        # The lying terminal row exactly as run-billing leaves it: plan =
+        # Small (never rewritten), charge = what Unlimited actually billed.
+        seed_billing_period(conn, cust, meter_id, small,
+                            "2026-01-01", "2026-01-31", status="rated",
+                            total_consumption="1000", usage_charge="100.00")
+        seed_meter_reading(conn, meter_id, "2026-01-05", "0")
+        seed_meter_reading(conn, meter_id, "2026-01-31", "1000")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+        assert r["by_type"].get("consumption_spike", 0) == 0
+        n = conn.execute("SELECT COUNT(*) FROM anomaly "
+                         "WHERE anomaly_type = 'rate_plan_mismatch'"
+                         ).fetchone()[0]
+        assert n == 0
+
+    def test_truthful_small_rated_overage_still_fires(self, conn, env):
+        """Complement (the post-lane-A composition leg): the SAME 1000-kWh
+        overage genuinely rated under Small stores usage_charge $42.00
+        (100@0.10 + 400@0.08, 500 kWh unpriced) — recomputation AGREES, so
+        the accusation fires normally. The attribution guard silences only
+        rows the stored plan did not price."""
+        cust = seed_customer(conn, env["company_id"])
+        small = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=small)
+        jan = seed_billing_period(conn, cust, meter_id, small,
+                                  "2026-01-01", "2026-01-31", status="rated",
+                                  total_consumption="1000",
+                                  usage_charge="42.00")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None
+        assert a["entity_type"] == "billing_period"
+        assert a["entity_id"] == jan
+        assert json.loads(a["baseline"]) == {"plan_ceiling": "500.00"}
+        assert json.loads(a["actual"]) == {"period_consumption": "1000.00"}
+        assert a["deviation_pct"] == "100.00"
+
+    # --- DEFECT-D: one bad tier row must never abort the company sweep ---
+
+    @pytest.mark.parametrize("bad_tier_end", [
+        "", "  ", "NaN", "sNaN", "abc", "123456789012345678901234567",
+    ], ids=["blank", "whitespace", "nan", "snan", "alpha", "27-digit"])
+    def test_garbage_tier_end_never_aborts_sweep(self, conn, env,
+                                                 bad_tier_end):
+        """QA reproduction (qa3_edge.py battery + oversized value):
+        add-rate-plan accepts the junk tier_end; detect-anomalies must
+        complete (no company-wide abort), stay silent on the un-judgeable
+        plan, and every OTHER finding must survive (a second meter's genuine
+        consumption spike still comes through)."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", name="Junk",
+                              tiers=[("0", bad_tier_end, "0.10")])
+        meter_bad = seed_meter(conn, cust, rate_plan_id=plan)
+        seed_meter_reading(conn, meter_bad, "2026-03-10", "900")
+        # Second meter: a genuine spike that must SURVIVE the junk plan
+        # (5 steady readings so the recency split leaves a full baseline:
+        # window = last 3 = (10, 10, 500), baseline = (10, 10, 10)).
+        meter_ok = seed_meter(conn, cust)
+        for i in range(5):
+            seed_meter_reading(conn, meter_ok, f"2026-01-{10 + i:02d}", "10")
+        seed_meter_reading(conn, meter_ok, "2026-03-10", "500")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+        assert r["by_type"].get("consumption_spike", 0) == 1
+
+    @pytest.mark.parametrize("benign_tier_end", [" 500 ", "5e2"],
+                             ids=["padded", "scientific"])
+    def test_parseable_tier_end_variants_still_fire(self, conn, env,
+                                                    benign_tier_end):
+        """Guard against over-containment (QA's benign rows): a padded or
+        scientific-notation tier_end still resolves to the 500 ceiling and
+        the 900 reading still fires."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", name="Padded",
+                              tiers=[("0", benign_tier_end, "0.10")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        rid = seed_meter_reading(conn, meter_id, "2026-03-10", "900")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a["entity_type"] == "meter_reading"
+        assert a["entity_id"] == rid
+        assert json.loads(a["baseline"]) == {"plan_ceiling": "500.00"}
+
+
+class TestAI1UsageAnomalyRound4PmInline:
+    """Pins for the 2026-07-27 pm-inline round (main session):
+    DEFECT-E — an oversized-but-finite figure (>= 1E26 survives is_finite,
+    overflows the 28-digit context in emission arithmetic) reachable through
+    shipped add-meter-reading aborted the ENTIRE company sweep in all four
+    emission branches. DEFECT-F — the round-3 exact charge-agreement guard
+    silenced TRUE accusations forever after a routine update-rate-plan
+    re-price; replaced by the impossible-charge discriminator (silence only
+    when stored usage_charge exceeds the stored plan's maximum billable at
+    its own ceiling)."""
+
+    def _detect_default(self, conn, company_id):
+        return call_action(MOD.detect_anomalies, conn, ns(
+            company_id=company_id, from_date=None, to_date=None,
+        ))
+
+    # --- DEFECT-E: oversized figures skip the row, never the sweep ---
+
+    def test_oversized_reading_never_aborts_sweep(self, conn, env):
+        """One meter with a 1E26 reading; ANOTHER customer's genuine 10x
+        spike must still be reported (the QA blast-radius scenario)."""
+        runaway = seed_customer(conn, env["company_id"], name="Runaway Co")
+        plan = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "600", "0.07")])
+        bad_meter = seed_meter(conn, runaway, rate_plan_id=plan)
+        seed_meter_reading(conn, bad_meter, "2026-06-01", "0")
+        seed_meter_reading(
+            conn, bad_meter, "2026-06-15",
+            "100000000000000000000000000")   # 1E26, shipped-action reachable
+
+        normal = seed_customer(conn, env["company_id"], name="Normal Cafe")
+        ok_meter = seed_meter(conn, normal, rate_plan_id=None)
+        for day in range(1, 6):
+            seed_meter_reading(conn, ok_meter, f"2026-05-0{day}", "10")
+        seed_meter_reading(conn, ok_meter, "2026-06-20", "500")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("consumption_spike", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "consumption_spike")
+        assert a is not None and a["entity_id"] == ok_meter
+
+    def test_oversized_stored_period_total_skips_period_only(
+            self, conn, env):
+        """A terminal period carrying a garbage 1E26 total is skipped; a
+        sane over-ceiling period on the SAME plan still fires."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        seed_billing_period(conn, cust, meter_id, plan,
+                            "2026-01-01", "2026-01-31", status="rated",
+                            total_consumption="1" + "0" * 26,
+                            usage_charge="40.00")
+        feb = seed_billing_period(conn, cust, meter_id, plan,
+                                  "2026-02-01", "2026-02-28", status="rated",
+                                  total_consumption="1000",
+                                  usage_charge="40.00")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None and a["entity_id"] == feb
+
+    # --- DEFECT-F: a re-priced plan's true accusations keep firing ---
+
+    def test_reprice_keeps_true_accusation_firing(self, conn, env):
+        """The QA round-4 scenario: 1000 kWh genuinely rated under Small
+        (600 @ 0.07 -> stored charge 42.00), then the utility raises the
+        rate to 0.08 (update-rate-plan deletes+re-inserts tiers). Stored
+        42.00 <= new maximum 48.00 -> explainable under Small -> the
+        over-ceiling accusation MUST still fire."""
+        cust = seed_customer(conn, env["company_id"])
+        plan = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "600", "0.07")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=plan)
+        jan = seed_billing_period(conn, cust, meter_id, plan,
+                                  "2026-01-01", "2026-01-31", status="rated",
+                                  total_consumption="1000",
+                                  usage_charge="42.00")
+        # update-rate-plan semantics: tiers deleted + re-inserted at 0.08.
+        conn.execute("UPDATE rate_tier SET rate = '0.08' "
+                     "WHERE rate_plan_id = ?", (plan,))
+        conn.commit()
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 1
+        a = _find_anomaly(conn, env["company_id"], "rate_plan_mismatch")
+        assert a is not None and a["entity_id"] == jan
+
+    def test_impossible_charge_still_silent(self, conn, env):
+        """The DEFECT-C leg under the new discriminator: stored charge
+        100.00 EXCEEDS Small's maximum billable 42.00 (100@0.10 + 400@0.08)
+        -> impossible under the stored plan -> silent."""
+        cust = seed_customer(conn, env["company_id"])
+        small = seed_rate_plan(conn, plan_type="tiered", name="Small", tiers=[
+            ("0", "100", "0.10"), ("100", "500", "0.08")])
+        meter_id = seed_meter(conn, cust, rate_plan_id=small)
+        seed_billing_period(conn, cust, meter_id, small,
+                            "2026-01-01", "2026-01-31", status="rated",
+                            total_consumption="1000", usage_charge="100.00")
+
+        r = self._detect_default(conn, env["company_id"])
+        assert is_ok(r)
+        assert r["by_type"].get("rate_plan_mismatch", 0) == 0
+
+
+class TestMigration006WavefUsageAnomalyType:
+    """L2 rehearsal pinned: migration 006 rebuilds the anomaly CHECK on a DB
+    that still carries the Wave-2 (20-value) enum."""
+
+    def _load_migration(self, number_prefix):
+        import importlib.util
+        mig_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            "migrations")
+        fname = [f for f in os.listdir(mig_dir)
+                 if f.startswith(number_prefix)][0]
+        spec = importlib.util.spec_from_file_location(
+            f"growth_mig_{number_prefix}", os.path.join(mig_dir, fname))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_migration_extends_check_preserves_rows_and_is_idempotent(
+            self, tmp_path):
+        import sqlite3
+        db = str(tmp_path / "mig006.sqlite")
+        m005 = self._load_migration("005")
+        m006 = self._load_migration("006")
+
+        # Old-shape DB: the 20-value CHECK from migration 005's frozen DDL.
+        conn = sqlite3.connect(db)
+        conn.execute(m005._ANOMALY_DDL_EXTENDED)
+        conn.execute(
+            "INSERT INTO anomaly (id, anomaly_type, severity, entity_type, "
+            "entity_id, description, status) VALUES ('a1', 'price_spike', "
+            "'warning', 'gl_entry', 'e1', 'pre-existing row', 'new')")
+        conn.commit()
+        # Old CHECK must REJECT the Wave F value (proves the rehearsal is real).
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO anomaly (id, anomaly_type, severity, description) "
+                "VALUES ('bad', 'rate_plan_mismatch', 'info', 'x')")
+        conn.close()
+
+        m006.run_migration(db)
+
+        conn = sqlite3.connect(db)
+        # Pre-existing row preserved; new value now accepted; no temp table.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM anomaly").fetchone()[0] == 1
+        conn.execute(
+            "INSERT INTO anomaly (id, anomaly_type, severity, description) "
+            "VALUES ('a2', 'rate_plan_mismatch', 'warning', 'wave f row')")
+        conn.commit()
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name LIKE '%_wfai1_old'").fetchone()[0] == 0
+        conn.close()
+
+        # Idempotent re-run keeps both rows.
+        m006.run_migration(db)
+        conn = sqlite3.connect(db)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM anomaly").fetchone()[0] == 2
+        conn.close()
