@@ -316,3 +316,38 @@ def test_audit_log_written(db_path, conn, gdpr_module, tmp_path):
     with open(log_path, "r", encoding="utf-8") as f:
         lines = [json.loads(line) for line in f if line.strip()]
     assert any(line["topic"] == "app/uninstalled" for line in lines)
+
+
+def test_shipped_dsr_text_promises_no_flow_that_does_not_exist(gdpr_module):
+    """Wave G F20 pin (salvaged from the parallel draft at close-out).
+
+    The shipped note told merchants to "Run the core ERPClaw DSR workflow",
+    and the redact audit line said the request was "forwarded to ERPClaw core
+    customer redaction flow". Neither exists: a repo-wide sweep found zero
+    redact / DSR / anonymize / erasure actions outside this connector. This
+    pin fails if that promise comes back in any of the three shipped text
+    surfaces (module docstring, the export note, the redact audit note).
+    """
+    import inspect
+
+    def _flat(text):
+        # Line-wrapping must not be able to hide a re-introduced promise.
+        return " ".join((text or "").split())
+
+    surfaces = {
+        "module docstring": _flat(gdpr_module.__doc__),
+        "data_request handler": _flat(inspect.getsource(gdpr_module._handle_data_request)),
+        "customers_redact handler": _flat(inspect.getsource(gdpr_module._handle_customers_redact)),
+    }
+    # Phrasings that hand the merchant off to a flow ERPClaw does not ship.
+    forbidden = ("Run the core ERPClaw DSR workflow",
+                 "forwarded to ERPClaw core customer redaction flow",
+                 "core customer redaction flow handles")
+    for where, text in surfaces.items():
+        for phrase in forbidden:
+            assert phrase not in text, f"{where} still promises a nonexistent flow: {phrase!r}"
+
+    # The docstring must keep stating the honest current behavior.
+    doc = surfaces["module docstring"]
+    assert "do NOT yet null out PII" in doc, (
+        "module docstring no longer states that customers/redact redacts nothing today")

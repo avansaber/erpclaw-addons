@@ -26,6 +26,20 @@ import os
 import sqlite3
 import uuid
 
+# M102: seeds the shipped pipeline catalog rows (see the exemptions below) —
+# nothing a row held before this run is different afterwards.
+MIGRATION_DATA_CLASS = "none"
+# Statements the classifier flags that this file's own shape explains.
+# Keyed per statement, never per file, so anything it does not name
+# still fails the gate.
+MIGRATION_DATA_EXEMPTIONS = {
+    ("INSERT", "crm_pipeline"):
+        "the shipped default pipelines — fixed catalog rows, identical on "
+        "every install, in a table without the _registry suffix",
+    ("INSERT", "crm_pipeline_stage"):
+        "their shipped stages, same reason",
+}
+
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
 DEFAULT_PIPELINE_NAME = "Standard Sales"

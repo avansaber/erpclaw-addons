@@ -7,9 +7,13 @@ import uuid
 from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err
+from erpclaw_lib.gl_posting import insert_gl_entries
+from erpclaw_lib.query_helpers import get_default_cost_center
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
 
@@ -114,52 +118,79 @@ def handle_record_repayment(conn, args):
             )
             remaining -= pay
 
-    # Post GL entries
+    # Post GL entries: DR Bank (cash received) / CR Loan Receivable (principal)
+    # + CR Interest Income (interest). One balanced call, posted last, never
+    # swallowed.
+    #
+    # (M62 sweep: this block used to call `post_gl_entry` — a symbol that has
+    # never existed in erpclaw_lib.gl_posting — inside `except Exception: pass`,
+    # so every repayment since the module shipped recorded the document and
+    # posted nothing at all. Same wrong-symbol-plus-swallow the write-off path
+    # below was already fixed for.)
+    #
+    # 'journal_entry' is the registered catch-all voucher_type; loan vouchers
+    # are not first-class types in foundation's voucher_type_registry, so the
+    # semantic identity rides on voucher_id (the repayment) + remarks. The
+    # receivable leg carries the party (GL validation step 5) and the interest
+    # leg carries a cost center (step 6, income account).
+    #
+    # penalty_amount is deliberately absent: there is no penalty-income account
+    # on `loan` to post it to, and inventing one is a schema decision, not a
+    # bug fix. A penalty-only repayment therefore posts nothing — every leg is
+    # zero and GL validation step 11 filters them all out, which is a no-op,
+    # not a failure.
+    if not loan_account_id or not disbursement_account_id:
+        conn.rollback()
+        return err(
+            f"Loan {loan_id} has no loan / disbursement account configured; "
+            f"the repayment cannot reach the ledger"
+        )
+    if interest > 0 and not interest_account_id:
+        conn.rollback()
+        return err(
+            f"Loan {loan_id} has no interest income account configured; "
+            f"an interest repayment cannot reach the ledger"
+        )
+
+    cost_center_id = get_default_cost_center(conn, company_id)
+    gl_entries = [
+        {
+            "account_id": disbursement_account_id,
+            "debit": str(principal + interest),
+            "credit": "0",
+        },
+        {
+            "account_id": loan_account_id,
+            "debit": "0",
+            "credit": str(principal),
+            "party_type": loan_dict["applicant_type"],
+            "party_id": loan_dict["applicant_id"],
+        },
+    ]
+    if interest > 0:
+        gl_entries.append({
+            "account_id": interest_account_id,
+            "debit": "0",
+            "credit": str(interest),
+            "cost_center_id": cost_center_id,
+        })
+
     try:
-        from erpclaw_lib.gl_posting import post_gl_entry
-
-        if loan_account_id and disbursement_account_id:
-            if principal > 0:
-                post_gl_entry(conn, {
-                    "account_id": disbursement_account_id,
-                    "debit": str(principal), "credit": "0",
-                    "voucher_type": "Loan Repayment",
-                    "voucher_id": repayment_id,
-                    "company_id": company_id,
-                    "posting_date": repayment_date,
-                    "remarks": f"Loan repayment principal {naming}",
-                })
-                post_gl_entry(conn, {
-                    "account_id": loan_account_id,
-                    "debit": "0", "credit": str(principal),
-                    "voucher_type": "Loan Repayment",
-                    "voucher_id": repayment_id,
-                    "company_id": company_id,
-                    "posting_date": repayment_date,
-                    "remarks": f"Loan repayment principal {naming}",
-                })
-
-            if interest > 0 and interest_account_id:
-                post_gl_entry(conn, {
-                    "account_id": disbursement_account_id,
-                    "debit": str(interest), "credit": "0",
-                    "voucher_type": "Loan Repayment",
-                    "voucher_id": repayment_id,
-                    "company_id": company_id,
-                    "posting_date": repayment_date,
-                    "remarks": f"Loan interest {naming}",
-                })
-                post_gl_entry(conn, {
-                    "account_id": interest_account_id,
-                    "debit": "0", "credit": str(interest),
-                    "voucher_type": "Loan Repayment",
-                    "voucher_id": repayment_id,
-                    "company_id": company_id,
-                    "posting_date": repayment_date,
-                    "remarks": f"Loan interest {naming}",
-                })
-    except Exception:
-        pass  # GL posting is best-effort during testing
+        insert_gl_entries(
+            conn,
+            gl_entries,
+            voucher_type="journal_entry",
+            voucher_id=repayment_id,
+            posting_date=repayment_date,
+            company_id=company_id,
+            remarks=f"Loan repayment {naming}",
+        )
+    except Exception as e:
+        # Single-transaction rule: any failure = full rollback. err() raises
+        # SystemExit, which the router's `except Exception` does not catch, so
+        # the rollback happens here rather than relying on process exit.
+        conn.rollback()
+        return err(f"GL posting failed, repayment rolled back: {e}")
 
     conn.commit()
     return ok({
@@ -287,8 +318,6 @@ def handle_write_off_loan(conn, args):
     # zero GL entries the entire time. Fixed to use insert_gl_entries
     # with cost_center_id (validation step 6) + party_type/party_id on
     # the receivable side (validation step 5).)
-    from erpclaw_lib.gl_posting import insert_gl_entries
-    from erpclaw_lib.query_helpers import get_default_cost_center
     if loan_account_id:
         cost_center_id = get_default_cost_center(conn, company_id)
         insert_gl_entries(

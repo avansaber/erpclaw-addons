@@ -10,13 +10,15 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.naming import get_next_name, register_prefix
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 except ImportError:
     pass
 
@@ -119,7 +121,7 @@ def update_scenario(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("planning_scenario", data, {"id": scenario_id})
     conn.execute(sql, params)
     audit(conn, SKILL_NAME, "planning-update-scenario", "planning_scenario", scenario_id)
@@ -401,7 +403,7 @@ def approve_scenario(conn, args):
         err(f"Cannot approve scenario in '{current_status}' status")
 
     sql = update_row("planning_scenario",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("approved", scenario_id))
     audit(conn, SKILL_NAME, "planning-approve-scenario", "planning_scenario", scenario_id)
@@ -426,7 +428,7 @@ def archive_scenario(conn, args):
         err("Scenario is already archived")
 
     sql = update_row("planning_scenario",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("archived", scenario_id))
     audit(conn, SKILL_NAME, "planning-archive-scenario", "planning_scenario", scenario_id)
@@ -590,7 +592,7 @@ def _recalculate_scenario_totals(conn, scenario_id):
     net = revenue - expense
     sql = update_row("planning_scenario",
                      data={"total_revenue": P(), "total_expense": P(),
-                           "net_income": P(), "updated_at": LiteralValue("datetime('now')")},
+                           "net_income": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql,
         (str(round_currency(revenue)), str(round_currency(expense)),

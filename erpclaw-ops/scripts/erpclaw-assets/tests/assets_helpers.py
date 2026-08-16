@@ -35,9 +35,18 @@ SETUP_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")
 INIT_SCHEMA_PATH = os.path.join(SETUP_DIR, "init_schema.py")
 
 # Make erpclaw_lib importable
-ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(SETUP_DIR, "lib")
+ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+               else os.path.join(os.path.expanduser(
+                   os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 if ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, ERPCLAW_LIB)
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, ERPCLAW_LIB)
 
 from erpclaw_lib.db import setup_pragmas
 
@@ -202,6 +211,8 @@ def ns(**kwargs) -> argparse.Namespace:
         "disposal_method": None,
         "sale_amount": None,
         "buyer_details": None,
+        "proceeds_account_id": None,
+        "gain_loss_account_id": None,
         # M7 asset depth
         "impairment_id": None,
         "impairment_amount": None,
@@ -355,6 +366,25 @@ def wire_category_accounts(conn, category_id: str, company_id: str) -> dict:
             "accumulated_depreciation_account_id": accum_acct}
 
 
+def seed_disposal_accounts(conn, company_id: str) -> dict:
+    """Accounts a disposal posts to (M61): where the money lands, and where the
+    gain or loss is recognized. Not on the category — they belong to the sale.
+
+    Types mirror the shipped chart exactly (`erpclaw-gl/assets/charts/us_gaap.json`):
+    1112 Operating Checking Account is `bank`, and since M94 both 4220 Gain on
+    Asset Disposal and 5340 Loss on Asset Disposal are `disposal_gain_loss`. A
+    fixture that seeds a type the shipped chart does not use would be testing a
+    chart nobody has.
+    """
+    return {
+        "bank_account_id": seed_account(conn, company_id, "Bank", "bank", "asset"),
+        "gain_account_id": seed_account(
+            conn, company_id, "Gain on Asset Disposal", "disposal_gain_loss", "income"),
+        "loss_account_id": seed_account(
+            conn, company_id, "Loss on Asset Disposal", "disposal_gain_loss", "expense"),
+    }
+
+
 def seed_fiscal_year(conn, company_id, name="FY2026", start="2026-01-01", end="2026-12-31"):
     """Seed an open fiscal year so GL postings resolve a fiscal_year."""
     conn.execute(
@@ -398,7 +428,9 @@ def build_env(conn) -> dict:
 
 def build_gl_env(conn) -> dict:
     """Full environment for GL-posting M7 tests: company, naming, fiscal year,
-    a category with accounts, plus an in_use asset (book value 5000)."""
+    a category with accounts, plus an in_use asset (book value 5000).
+
+    Also carries the disposal accounts (bank / gain / loss) M61 made explicit."""
     cid = seed_company(conn)
     seed_naming_series(conn, cid)
     seed_fiscal_year(conn, cid)
@@ -410,4 +442,5 @@ def build_gl_env(conn) -> dict:
     env = {"company_id": cid, "category_id": cat_id, "asset_id": asset_id,
            "cost_center_id": cc_id}
     env.update(accts)
+    env.update(seed_disposal_accounts(conn, cid))
     return env

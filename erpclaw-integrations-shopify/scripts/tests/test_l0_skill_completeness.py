@@ -27,6 +27,10 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.abspath(os.path.join(HERE, ".."))
 SKILL_PATH = os.path.abspath(os.path.join(SCRIPTS_DIR, "..", "SKILL.md"))
+# The monorepo's source/ dir, used only to bind erpclaw_lib to the tree
+# under test (M54). Absent in the published module repo, which is why
+# every use of it is guarded by an isdir check.
+SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPTS_DIR)))
 
 # Actions that appear in SKILL.md tables but aren't real router keys
 # (meta/reserved router overrides). Keep this list small and explicit.
@@ -35,7 +39,18 @@ META_ACTIONS = {"status"}
 
 @pytest.fixture(scope="module")
 def router_actions():
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    # M54: bind erpclaw_lib to the tree under test, never the deployed
+    # ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+    # so with several worktrees in flight it resolves to a tree nobody is testing
+    # (and DANGLES once that worktree is removed). The deployed install stays as
+    # the fallback for a published module repo, which ships no source/erpclaw/.
+    _IN_TREE_LIB = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup", "lib")
+    _ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+                    else os.path.join(os.path.expanduser(
+                        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, _ERPCLAW_LIB)
     sys.path.insert(0, SCRIPTS_DIR)
     from accounts import ACTIONS as A
     from sync import ACTIONS as S

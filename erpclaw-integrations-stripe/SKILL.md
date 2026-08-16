@@ -151,14 +151,13 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 | `stripe-list-transfers` | List transfers |
 | `stripe-connect-fee-summary` | Connect fee summary |
 
-### Revenue Recognition / ASC 606 (5 actions)
+### Revenue Recognition / ASC 606 (4 actions)
 | Action | Description |
 |--------|-------------|
 | `stripe-create-rev-rec-schedule` | Create ASC 606 revenue contract from Stripe subscription |
 | `stripe-recognize-subscription-revenue` | Batch recognize deferred revenue for period |
 | `stripe-rev-rec-status` | Revenue recognition status across subscriptions |
 | `stripe-handle-subscription-change` | Handle subscription upgrade/downgrade/cancel |
-| `stripe-rev-rec-summary` | Revenue recognition summary report |
 
 ### Reports (10 actions)
 | Action | Description |

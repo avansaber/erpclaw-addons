@@ -15,6 +15,10 @@ import pytest
 # Add erpclaw-os-engine scripts directory to path.
 # v4.0.0 split (b4918b3) moved scripts to scripts/ subdir.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# The monorepo's source/ dir, used only to bind erpclaw_lib to the tree
+# under test (M54). Absent in the published module repo, which is why
+# every use of it is guarded by an isdir check.
+SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 OS_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "scripts")
 if OS_DIR not in sys.path:
     sys.path.insert(0, OS_DIR)
@@ -24,7 +28,18 @@ FOUNDATION_OS_DIR = os.path.abspath(FOUNDATION_OS_DIR)
 if FOUNDATION_OS_DIR not in sys.path:
     sys.path.insert(0, FOUNDATION_OS_DIR)
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup", "lib")
+_ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+                else os.path.join(os.path.expanduser(
+                    os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, _ERPCLAW_LIB)
 from erpclaw_lib.db import setup_pragmas
 
 from deploy_pipeline import run_pipeline, handle_deploy_module

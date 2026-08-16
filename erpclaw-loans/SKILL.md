@@ -72,4 +72,10 @@ Loan management for term loans, demand loans, staff loans, and credit lines.
 - **Disbursement:** Debit Loan Receivable, Credit Bank/Cash
 - **Repayment:** Debit Bank/Cash, Credit Loan Receivable (principal) + Interest Income (interest)
 - **Write-off:** Debit Bad Debt Expense, Credit Loan Receivable
-- All GL postings use `erpclaw_lib.gl_posting.post_gl_entry()` with full GL invariant validation
+- All GL postings use `erpclaw_lib.gl_posting.insert_gl_entries()` and pass the full
+  12-step GL validation. A GL failure rolls the whole action back and returns an
+  error; no loans action records a document the ledger has not accepted.
+- The receivable leg carries `party_type` / `party_id` from the loan applicant
+  (GL validation step 5); the interest-income leg carries a cost center (step 6).
+- Loan vouchers post under the registered `journal_entry` voucher type; identity
+  rides on `voucher_id` (loan / repayment / write-off row) plus `remarks`.

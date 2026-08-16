@@ -14,7 +14,9 @@ import sys
 
 # Add shared lib to path
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args

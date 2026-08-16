@@ -9,11 +9,13 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Field, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, today as sql_today, update_row
 
 register_prefix("investment_transaction", "ITXN-")
 
@@ -131,7 +133,7 @@ def update_investment(conn, args):
     if not changed:
         err("No fields to update")
 
-    upd_data["updated_at"] = LiteralValue("datetime('now')")
+    upd_data["updated_at"] = sql_now()
     sql, params = dynamic_update("investment", upd_data, {"id": inv_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-investment", "investment", inv_id,
@@ -261,7 +263,7 @@ def add_investment_transaction(conn, args):
         new_value = current
 
     sql = update_row("investment",
-        data={"current_value": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"current_value": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, (str(new_value), inv_id))
 
@@ -331,7 +333,7 @@ def mature_investment(conn, args):
         err(f"Can only mature an active investment, current status: {data['status']}")
 
     sql = update_row("investment",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, ("matured", inv_id))
     audit(conn, SKILL, "treasury-mature-investment", "investment", inv_id,
@@ -367,7 +369,7 @@ def redeem_investment(conn, args):
     txn_id = str(uuid.uuid4())
     sql, _ = insert_row("investment_transaction", {
         "id": P(), "investment_id": P(), "transaction_type": P(),
-        "transaction_date": LiteralValue("date('now')"), "amount": P(),
+        "transaction_date": sql_today(), "amount": P(),
         "reference": P(), "notes": P(), "company_id": P(),
     })
     conn.execute(sql, (
@@ -378,7 +380,7 @@ def redeem_investment(conn, args):
     ))
 
     sql = update_row("investment",
-        data={"status": P(), "current_value": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "current_value": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, ("redeemed", "0", inv_id))
 

@@ -116,22 +116,39 @@ def _resolve_company(conn, supplied_id):
     return rows[0][0], rows
 
 
-def _lazy_migrate(conn):
-    """Ensure v1.1 columns exist on shopify_account, without needing a full
-    init_db.py rerun. Imports the migration helper directly."""
-    # Load init_db.py dynamically; it lives one level up from scripts/.
+def _lazy_migrate(db_path=None):
+    """Ensure the v1.1 pairing columns exist on shopify_account.
+
+    This used to call a helper that lived inside `init_db.py`. ADR-0034 phase 2
+    ruled that an installer PROVISIONS and a migration ALTERS, so the ALTER moved
+    to `migrations/001_shopify_account_v11_pairing_columns.py` and this calls it
+    where it now lives. Behaviour is unchanged: idempotent, and it returns how
+    many columns it actually added.
+
+    It stays rather than being deleted in favour of the module migration runner.
+    The runner covers install and update through `module_manager`; a module
+    directory that arrives any other way (an SCP deploy to a box) never ran it,
+    and this action is the first thing that needs the columns.
+
+    The migration prints human progress, and this action's stdout is the JSON an
+    agent parses — so its output is routed to stderr exactly as the foundation
+    migration runner does.
+    """
+    import contextlib
     import importlib.util
-    init_path = os.path.join(os.path.dirname(__file__), "..", "init_db.py")
-    init_path = os.path.abspath(init_path)
-    spec = importlib.util.spec_from_file_location("_erpclaw_shopify_init_db", init_path)
+
+    migration_path = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "migrations",
+        "001_shopify_account_v11_pairing_columns.py"))
+    spec = importlib.util.spec_from_file_location(
+        "_erpclaw_shopify_migration_001", migration_path)
     if spec is None or spec.loader is None:
         return 0
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    added = mod.apply_shopify_account_migrations_v1_1(conn)
-    if added:
-        conn.commit()
-    return added
+    with contextlib.redirect_stdout(sys.stderr):
+        spec.loader.exec_module(mod)
+        result = mod.run_migration(db_path)
+    return len(result.get("added", []))
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +164,10 @@ def shopify_connect(conn, args):
     worker_url = getattr(args, "worker_url", None) or DEFAULT_WORKER_URL
     erpclaw_url_override = getattr(args, "erpclaw_url", None)
 
-    # Lazy migrate first so _add_account_core can set the v1.1 columns.
-    _lazy_migrate(conn)
+    # Lazy migrate first so _add_account_core can set the v1.1 columns. The
+    # migration opens the database by path, the same way db_query.py resolved
+    # `conn`, so the CLI's --db-path is honoured rather than re-derived.
+    _lazy_migrate(getattr(args, "db_path", None))
 
     # Resolve which company this shop attaches to.
     company_id, _ = _resolve_company(conn, getattr(args, "company_id", None))

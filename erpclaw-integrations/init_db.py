@@ -2,16 +2,42 @@
 """ERPClaw Integrations schema extension -- adds integration tables to the shared database.
 
 Operator-facing connectors for syncing data with external platforms.
-25 tables: 9 core integration tables + 8 connectors-v2 tables
-(booking, delivery, realestate, financial, productivity)
-+ 3 Plaid + 3 Stripe + 2 S3 tables (moved from core init_schema.py).
+17 tables: 9 core integration tables + 8 connectors-v2 tables
+(booking, delivery, realestate, financial, productivity).
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. Conversion rules are the pilot's (`erpclaw-esign`): seam
+vocabulary only, IDs and amounts stay TEXT on every backend, and
+``primary_key=True, nullable=True`` reproduces SQLite's ``id TEXT PRIMARY KEY``
+without adding a NOT NULL that never shipped.
+
+Two asymmetries in the shipped DDL are transcribed rather than tidied: the nine
+``integration_*`` tables carry ``company_id`` as a bare column while the eight
+``connv2_*`` tables declare a foreign key to ``company(id)``, and
+``integration_sync_schedule`` gives ``sync_type`` / ``direction`` defaults
+without the CHECK lists its sibling ``integration_sync`` puts on the same two
+column names.
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    UniqueConstraint, provision, reference_table, text,
+)
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "ERPClaw Integrations"
@@ -20,482 +46,578 @@ REQUIRED_FOUNDATION = [
     "company", "naming_series", "audit_log",
 ]
 
+METADATA = MetaData()
 
-def create_integration_tables(db_path=None):
-    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
+# Foundation tables this module points at but does not own. Declared for foreign
+# key resolution only and never created here — see `seam.reference_table`.
+reference_table("company", METADATA)
 
-    # -- Verify ERPClaw foundation --
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
+# ---------------------------------------------------------------------------
+# 1. integration_connector
+# ---------------------------------------------------------------------------
+CONNECTOR = Table(
+    "integration_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("platform", Text, nullable=False),
+    Column("connector_type", Text, nullable=False,
+           server_default=text("'bidirectional'")),
+    Column("base_url", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("config_json", Text, nullable=False, server_default=text("'{}'")),
+    Column("last_sync_at", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('shopify','woocommerce','amazon','quickbooks','stripe',"
+        "'square','xero','custom')",
+        name="ck_integration_connector_platform"),
+    CheckConstraint(
+        "connector_type IN ('inbound','outbound','bidirectional')",
+        name="ck_integration_connector_connector_type"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_integration_connector_connector_status"),
+)
+
+Index("idx_intg_connector_company", CONNECTOR.c.company_id)
+Index("idx_intg_connector_platform", CONNECTOR.c.platform)
+Index("idx_intg_connector_status", CONNECTOR.c.connector_status)
+
+# ---------------------------------------------------------------------------
+# 2. integration_credential
+# ---------------------------------------------------------------------------
+CREDENTIAL = Table(
+    "integration_credential", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("credential_type", Text, nullable=False),
+    Column("credential_key", Text, nullable=False),
+    Column("credential_value", Text, nullable=False),
+    Column("expires_at", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "credential_type IN ('api_key','oauth2','basic_auth','webhook_secret')",
+        name="ck_integration_credential_credential_type"),
+)
+
+Index("idx_intg_credential_connector", CREDENTIAL.c.connector_id)
+Index("idx_intg_credential_company", CREDENTIAL.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 3. integration_webhook
+# ---------------------------------------------------------------------------
+WEBHOOK = Table(
+    "integration_webhook", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("event_type", Text, nullable=False),
+    Column("webhook_url", Text, nullable=False),
+    Column("webhook_secret", Text),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_intg_webhook_connector", WEBHOOK.c.connector_id)
+Index("idx_intg_webhook_company", WEBHOOK.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 4. integration_sync
+# ---------------------------------------------------------------------------
+SYNC = Table(
+    "integration_sync", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("sync_type", Text, nullable=False),
+    Column("direction", Text, nullable=False),
+    Column("entity_type", Text),
+    Column("sync_status", Text, nullable=False,
+           server_default=text("'pending'")),
+    Column("records_processed", Integer, nullable=False,
+           server_default=text("0")),
+    Column("records_failed", Integer, nullable=False, server_default=text("0")),
+    Column("started_at", Text),
+    Column("completed_at", Text),
+    Column("error_message", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("sync_type IN ('full','incremental','manual')",
+                    name="ck_integration_sync_sync_type"),
+    CheckConstraint("direction IN ('inbound','outbound','bidirectional')",
+                    name="ck_integration_sync_direction"),
+    CheckConstraint(
+        "sync_status IN ('pending','running','completed','failed','cancelled')",
+        name="ck_integration_sync_sync_status"),
+)
+
+Index("idx_intg_sync_connector", SYNC.c.connector_id)
+Index("idx_intg_sync_status", SYNC.c.sync_status)
+Index("idx_intg_sync_company", SYNC.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 5. integration_sync_schedule
+#
+# `sync_type` and `direction` carry defaults here but NOT the CHECK lists that
+# `integration_sync` puts on the same two column names. Transcribed as shipped.
+# ---------------------------------------------------------------------------
+SYNC_SCHEDULE = Table(
+    "integration_sync_schedule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("frequency", Text, nullable=False),
+    Column("sync_type", Text, nullable=False,
+           server_default=text("'incremental'")),
+    Column("direction", Text, nullable=False,
+           server_default=text("'bidirectional'")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("last_run_at", Text),
+    Column("next_run_at", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "frequency IN ('hourly','daily','weekly','monthly','manual')",
+        name="ck_integration_sync_schedule_frequency"),
+)
+
+Index("idx_intg_schedule_connector", SYNC_SCHEDULE.c.connector_id)
+Index("idx_intg_schedule_company", SYNC_SCHEDULE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 6. integration_field_mapping
+# ---------------------------------------------------------------------------
+FIELD_MAPPING = Table(
+    "integration_field_mapping", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("source_field", Text, nullable=False),
+    Column("target_field", Text, nullable=False),
+    Column("transform_rule", Text),
+    Column("is_required", Integer, nullable=False, server_default=text("0")),
+    Column("default_value", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_intg_field_map_connector", FIELD_MAPPING.c.connector_id)
+Index("idx_intg_field_map_entity", FIELD_MAPPING.c.entity_type)
+Index("idx_intg_field_map_company", FIELD_MAPPING.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 7. integration_entity_map
+# ---------------------------------------------------------------------------
+ENTITY_MAP = Table(
+    "integration_entity_map", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("local_id", Text, nullable=False),
+    Column("remote_id", Text, nullable=False),
+    Column("last_synced_at", Text),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    # Unnamed, as shipped. SQLite backs this with an implicit `sqlite_autoindex`
+    # that the parity oracle deliberately filters out, so it is carried here by
+    # transcription rather than by the diff catching its absence.
+    UniqueConstraint("connector_id", "entity_type", "local_id"),
+)
+
+Index("idx_intg_entity_map_connector", ENTITY_MAP.c.connector_id)
+Index("idx_intg_entity_map_entity", ENTITY_MAP.c.entity_type)
+Index("idx_intg_entity_map_local", ENTITY_MAP.c.local_id)
+Index("idx_intg_entity_map_remote", ENTITY_MAP.c.remote_id)
+Index("idx_intg_entity_map_company", ENTITY_MAP.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 8. integration_transform_rule (supplementary)
+# ---------------------------------------------------------------------------
+TRANSFORM_RULE = Table(
+    "integration_transform_rule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("integration_connector.id"),
+           nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("rule_name", Text, nullable=False),
+    Column("rule_json", Text, nullable=False, server_default=text("'{}'")),
+    Column("company_id", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_intg_transform_connector", TRANSFORM_RULE.c.connector_id)
+Index("idx_intg_transform_company", TRANSFORM_RULE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 9. integration_sync_error (child of sync)
+#
+# The only table in this module with no `company_id` at all. As shipped.
+# ---------------------------------------------------------------------------
+SYNC_ERROR = Table(
+    "integration_sync_error", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("sync_id", Text, ForeignKey("integration_sync.id"), nullable=False),
+    Column("entity_type", Text),
+    Column("entity_id", Text),
+    Column("error_message", Text, nullable=False),
+    Column("is_resolved", Integer, nullable=False, server_default=text("0")),
+    Column("resolution_notes", Text),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("resolved_at", Text),
+)
+
+Index("idx_intg_sync_error_sync", SYNC_ERROR.c.sync_id)
+Index("idx_intg_sync_error_resolved", SYNC_ERROR.c.is_resolved)
+
+# ===========================================================================
+# CONNECTORS V2 -- BOOKING DOMAIN
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 10. connv2_booking_connector
+# ---------------------------------------------------------------------------
+BOOKING_CONNECTOR = Table(
+    "connv2_booking_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("platform", Text, nullable=False),
+    Column("property_id", Text),
+    Column("api_credentials_ref", Text),
+    Column("sync_reservations", Integer, nullable=False,
+           server_default=text("1")),
+    Column("sync_rates", Integer, nullable=False, server_default=text("1")),
+    Column("sync_availability", Integer, nullable=False,
+           server_default=text("1")),
+    Column("last_sync_at", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('booking_com','expedia','airbnb','vrbo')",
+        name="ck_connv2_booking_connector_platform"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_connv2_booking_connector_connector_status"),
+)
+
+Index("idx_cv2_bkc_company", BOOKING_CONNECTOR.c.company_id)
+Index("idx_cv2_bkc_platform", BOOKING_CONNECTOR.c.platform)
+Index("idx_cv2_bkc_status", BOOKING_CONNECTOR.c.connector_status)
+
+# ---------------------------------------------------------------------------
+# 11. connv2_booking_sync_log
+# ---------------------------------------------------------------------------
+BOOKING_SYNC_LOG = Table(
+    "connv2_booking_sync_log", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("connv2_booking_connector.id"),
+           nullable=False),
+    Column("sync_type", Text, nullable=False),
+    Column("direction", Text, nullable=False),
+    Column("records_synced", Integer, nullable=False, server_default=text("0")),
+    Column("errors", Integer, nullable=False, server_default=text("0")),
+    Column("sync_status", Text, nullable=False,
+           server_default=text("'completed'")),
+    Column("started_at", Text),
+    Column("completed_at", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "sync_type IN ('reservations','rates','availability')",
+        name="ck_connv2_booking_sync_log_sync_type"),
+    CheckConstraint("direction IN ('inbound','outbound')",
+                    name="ck_connv2_booking_sync_log_direction"),
+    CheckConstraint(
+        "sync_status IN ('pending','running','completed','failed')",
+        name="ck_connv2_booking_sync_log_sync_status"),
+)
+
+Index("idx_cv2_bsl_connector", BOOKING_SYNC_LOG.c.connector_id)
+Index("idx_cv2_bsl_company", BOOKING_SYNC_LOG.c.company_id)
+Index("idx_cv2_bsl_status", BOOKING_SYNC_LOG.c.sync_status)
+
+# ===========================================================================
+# CONNECTORS V2 -- DELIVERY DOMAIN
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 12. connv2_delivery_connector
+# ---------------------------------------------------------------------------
+DELIVERY_CONNECTOR = Table(
+    "connv2_delivery_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("platform", Text, nullable=False),
+    Column("store_id", Text),
+    Column("api_credentials_ref", Text),
+    Column("auto_accept", Integer, nullable=False, server_default=text("0")),
+    Column("sync_menu", Integer, nullable=False, server_default=text("1")),
+    Column("last_sync_at", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('doordash','ubereats','grubhub','postmates')",
+        name="ck_connv2_delivery_connector_platform"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_connv2_delivery_connector_connector_status"),
+)
+
+Index("idx_cv2_dlc_company", DELIVERY_CONNECTOR.c.company_id)
+Index("idx_cv2_dlc_platform", DELIVERY_CONNECTOR.c.platform)
+Index("idx_cv2_dlc_status", DELIVERY_CONNECTOR.c.connector_status)
+
+# ---------------------------------------------------------------------------
+# 13. connv2_delivery_order
+#
+# `total_amount` / `commission` / `net_amount` are money and stay TEXT
+# (ADR-0034 dec. 1), exactly as the shipped DDL declared them.
+# ---------------------------------------------------------------------------
+DELIVERY_ORDER = Table(
+    "connv2_delivery_order", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("connv2_delivery_connector.id"),
+           nullable=False),
+    Column("external_order_id", Text),
+    Column("order_data", Text),
+    Column("total_amount", Text),
+    Column("commission", Text),
+    Column("net_amount", Text),
+    Column("order_status", Text, nullable=False,
+           server_default=text("'received'")),
+    Column("received_at", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "order_status IN ('received','confirmed','preparing','ready',"
+        "'picked_up','delivered','cancelled')",
+        name="ck_connv2_delivery_order_order_status"),
+)
+
+Index("idx_cv2_dlo_connector", DELIVERY_ORDER.c.connector_id)
+Index("idx_cv2_dlo_company", DELIVERY_ORDER.c.company_id)
+Index("idx_cv2_dlo_status", DELIVERY_ORDER.c.order_status)
+Index("idx_cv2_dlo_ext_id", DELIVERY_ORDER.c.external_order_id)
+
+# ===========================================================================
+# CONNECTORS V2 -- REAL ESTATE DOMAIN
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 14. connv2_realestate_connector
+# ---------------------------------------------------------------------------
+REALESTATE_CONNECTOR = Table(
+    "connv2_realestate_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("platform", Text, nullable=False),
+    Column("agent_id", Text),
+    Column("api_credentials_ref", Text),
+    Column("sync_listings", Integer, nullable=False, server_default=text("1")),
+    Column("capture_leads", Integer, nullable=False, server_default=text("1")),
+    Column("last_sync_at", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('zillow','realtor_com','mls','trulia')",
+        name="ck_connv2_realestate_connector_platform"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_connv2_realestate_connector_connector_status"),
+)
+
+Index("idx_cv2_rec_company", REALESTATE_CONNECTOR.c.company_id)
+Index("idx_cv2_rec_platform", REALESTATE_CONNECTOR.c.platform)
+Index("idx_cv2_rec_status", REALESTATE_CONNECTOR.c.connector_status)
+
+# ---------------------------------------------------------------------------
+# 15. connv2_realestate_lead
+# ---------------------------------------------------------------------------
+REALESTATE_LEAD = Table(
+    "connv2_realestate_lead", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("connector_id", Text, ForeignKey("connv2_realestate_connector.id"),
+           nullable=False),
+    Column("lead_source", Text),
+    Column("contact_name", Text),
+    Column("contact_email", Text),
+    Column("contact_phone", Text),
+    Column("property_ref", Text),
+    Column("inquiry", Text),
+    Column("lead_status", Text, nullable=False, server_default=text("'new'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "lead_status IN ('new','contacted','qualified','converted','lost')",
+        name="ck_connv2_realestate_lead_lead_status"),
+)
+
+Index("idx_cv2_rel_connector", REALESTATE_LEAD.c.connector_id)
+Index("idx_cv2_rel_company", REALESTATE_LEAD.c.company_id)
+Index("idx_cv2_rel_status", REALESTATE_LEAD.c.lead_status)
+
+# ===========================================================================
+# CONNECTORS V2 -- FINANCIAL DOMAIN
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 16. connv2_financial_connector
+# ---------------------------------------------------------------------------
+FINANCIAL_CONNECTOR = Table(
+    "connv2_financial_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("platform", Text, nullable=False),
+    Column("account_ref", Text),
+    Column("api_credentials_ref", Text),
+    Column("sync_enabled", Integer, nullable=False, server_default=text("1")),
+    Column("last_sync_at", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('plaid','twilio','sendgrid','mailchimp')",
+        name="ck_connv2_financial_connector_platform"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_connv2_financial_connector_connector_status"),
+)
+
+Index("idx_cv2_fnc_company", FINANCIAL_CONNECTOR.c.company_id)
+Index("idx_cv2_fnc_platform", FINANCIAL_CONNECTOR.c.platform)
+Index("idx_cv2_fnc_status", FINANCIAL_CONNECTOR.c.connector_status)
+
+# ===========================================================================
+# CONNECTORS V2 -- PRODUCTIVITY DOMAIN
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 17. connv2_productivity_connector
+# ---------------------------------------------------------------------------
+PRODUCTIVITY_CONNECTOR = Table(
+    "connv2_productivity_connector", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("platform", Text, nullable=False),
+    Column("workspace_id", Text),
+    Column("api_credentials_ref", Text),
+    Column("sync_calendar", Integer, nullable=False, server_default=text("1")),
+    Column("sync_contacts", Integer, nullable=False, server_default=text("1")),
+    Column("sync_files", Integer, nullable=False, server_default=text("0")),
+    Column("last_sync_at", Text),
+    Column("connector_status", Text, nullable=False,
+           server_default=text("'inactive'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "platform IN ('google_workspace','microsoft_365','slack','zoom')",
+        name="ck_connv2_productivity_connector_platform"),
+    CheckConstraint(
+        "connector_status IN ('active','inactive','error')",
+        name="ck_connv2_productivity_connector_connector_status"),
+)
+
+Index("idx_cv2_pdc_company", PRODUCTIVITY_CONNECTOR.c.company_id)
+Index("idx_cv2_pdc_platform", PRODUCTIVITY_CONNECTOR.c.platform)
+Index("idx_cv2_pdc_status", PRODUCTIVITY_CONNECTOR.c.connector_status)
+
+# ===========================================================================
+# PLAID / STRIPE / S3 -- config + scaffolding tables (all removed)
+# ===========================================================================
+#
+# plaid_config / stripe_config / s3_config removed 2026-07-02 (M31 H2 / audit
+# B7): the "KEPT (referenced)" rationale from migration 001 is overturned. The
+# register (writers=[], readers=[]) confirms zero writers/readers ever; the
+# sole reference was the erpclaw-meta ownership map (SKILL_TABLES), a runtime-
+# computed doc-map, not a persistence path. All three also normalized plaintext
+# secrets, contradicting the typed-credential mechanism (crypto.encrypt_field /
+# integration_credential) that the live connectors actually use. Dropped from
+# existing DBs by this module's migration 002.
+#
+# Earlier siblings removed 2026-06-01 (audit P2) by migration 001:
+#   plaid_linked_account / plaid_transaction (unbuilt Plaid connector),
+#   stripe_payment_intent / stripe_webhook_event (superseded by the dedicated
+#   erpclaw-integrations-stripe addon), s3_backup_record (unbuilt S3 backup).
+
+
+
+def _require_foundation(db_path):
+    """The pre-conversion installer's foundation probe, asked through the seam.
+
+    The original read ``sqlite_master`` directly, so the guard that exists to
+    produce a friendly error was itself SQLite-only. ``seam.table_exists`` answers
+    on both backends (ADR-0034 bulk-39).
+    """
+    from erpclaw_lib import seam
+
+    missing = [t for t in REQUIRED_FOUNDATION if not seam.table_exists(t, db_path)]
     if missing:
         print(f"ERROR: Foundation tables missing: {', '.join(missing)}")
         print("Run erpclaw-setup first: clawhub install erpclaw-setup")
-        conn.close()
         sys.exit(1)
 
-    tables_created = 0
-    indexes_created = 0
+def create_integration_tables(db_path=None):
+    """Create integration tables and indexes on whichever backend is configured.
 
-    # ==================================================================
-    # TABLE 1: integration_connector
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_connector (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            platform        TEXT NOT NULL
-                            CHECK(platform IN ('shopify','woocommerce','amazon','quickbooks','stripe','square','xero','custom')),
-            connector_type  TEXT NOT NULL DEFAULT 'bidirectional'
-                            CHECK(connector_type IN ('inbound','outbound','bidirectional')),
-            base_url        TEXT,
-            connector_status TEXT NOT NULL DEFAULT 'inactive'
-                            CHECK(connector_status IN ('active','inactive','error')),
-            config_json     TEXT NOT NULL DEFAULT '{}',
-            last_sync_at    TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_connector_company ON integration_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_connector_platform ON integration_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_connector_status ON integration_connector(connector_status)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 2: integration_credential
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_credential (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            credential_type TEXT NOT NULL
-                            CHECK(credential_type IN ('api_key','oauth2','basic_auth','webhook_secret')),
-            credential_key  TEXT NOT NULL,
-            credential_value TEXT NOT NULL,
-            expires_at      TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_credential_connector ON integration_credential(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_credential_company ON integration_credential(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # TABLE 3: integration_webhook
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_webhook (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            event_type      TEXT NOT NULL,
-            webhook_url     TEXT NOT NULL,
-            webhook_secret  TEXT,
-            is_active       INTEGER NOT NULL DEFAULT 1,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_webhook_connector ON integration_webhook(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_webhook_company ON integration_webhook(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # TABLE 4: integration_sync
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_sync (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            sync_type       TEXT NOT NULL
-                            CHECK(sync_type IN ('full','incremental','manual')),
-            direction       TEXT NOT NULL
-                            CHECK(direction IN ('inbound','outbound','bidirectional')),
-            entity_type     TEXT,
-            sync_status     TEXT NOT NULL DEFAULT 'pending'
-                            CHECK(sync_status IN ('pending','running','completed','failed','cancelled')),
-            records_processed INTEGER NOT NULL DEFAULT 0,
-            records_failed  INTEGER NOT NULL DEFAULT 0,
-            started_at      TEXT,
-            completed_at    TEXT,
-            error_message   TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_sync_connector ON integration_sync(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_sync_status ON integration_sync(sync_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_sync_company ON integration_sync(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 5: integration_sync_schedule
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_sync_schedule (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            entity_type     TEXT NOT NULL,
-            frequency       TEXT NOT NULL
-                            CHECK(frequency IN ('hourly','daily','weekly','monthly','manual')),
-            sync_type       TEXT NOT NULL DEFAULT 'incremental',
-            direction       TEXT NOT NULL DEFAULT 'bidirectional',
-            is_active       INTEGER NOT NULL DEFAULT 1,
-            last_run_at     TEXT,
-            next_run_at     TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_schedule_connector ON integration_sync_schedule(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_schedule_company ON integration_sync_schedule(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # TABLE 6: integration_field_mapping
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_field_mapping (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            entity_type     TEXT NOT NULL,
-            source_field    TEXT NOT NULL,
-            target_field    TEXT NOT NULL,
-            transform_rule  TEXT,
-            is_required     INTEGER NOT NULL DEFAULT 0,
-            default_value   TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_field_map_connector ON integration_field_mapping(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_field_map_entity ON integration_field_mapping(entity_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_field_map_company ON integration_field_mapping(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 7: integration_entity_map
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_entity_map (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            entity_type     TEXT NOT NULL,
-            local_id        TEXT NOT NULL,
-            remote_id       TEXT NOT NULL,
-            last_synced_at  TEXT,
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(connector_id, entity_type, local_id)
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_entity_map_connector ON integration_entity_map(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_entity_map_entity ON integration_entity_map(entity_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_entity_map_local ON integration_entity_map(local_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_entity_map_remote ON integration_entity_map(remote_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_entity_map_company ON integration_entity_map(company_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # TABLE 8: integration_transform_rule (supplementary)
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_transform_rule (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES integration_connector(id),
-            entity_type     TEXT NOT NULL,
-            rule_name       TEXT NOT NULL,
-            rule_json       TEXT NOT NULL DEFAULT '{}',
-            company_id      TEXT NOT NULL,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_transform_connector ON integration_transform_rule(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_transform_company ON integration_transform_rule(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # TABLE 9: integration_sync_error (child of sync)
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS integration_sync_error (
-            id              TEXT PRIMARY KEY,
-            sync_id         TEXT NOT NULL REFERENCES integration_sync(id),
-            entity_type     TEXT,
-            entity_id       TEXT,
-            error_message   TEXT NOT NULL,
-            is_resolved     INTEGER NOT NULL DEFAULT 0,
-            resolution_notes TEXT,
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            resolved_at     TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_sync_error_sync ON integration_sync_error(sync_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_intg_sync_error_resolved ON integration_sync_error(is_resolved)")
-    indexes_created += 2
-
-    # ==================================================================
-    # CONNECTORS V2 -- BOOKING DOMAIN
-    # ==================================================================
-
-    # TABLE 10: connv2_booking_connector
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_booking_connector (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            platform            TEXT NOT NULL
-                                CHECK(platform IN ('booking_com','expedia','airbnb','vrbo')),
-            property_id         TEXT,
-            api_credentials_ref TEXT,
-            sync_reservations   INTEGER NOT NULL DEFAULT 1,
-            sync_rates          INTEGER NOT NULL DEFAULT 1,
-            sync_availability   INTEGER NOT NULL DEFAULT 1,
-            last_sync_at        TEXT,
-            connector_status    TEXT NOT NULL DEFAULT 'inactive'
-                                CHECK(connector_status IN ('active','inactive','error')),
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bkc_company ON connv2_booking_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bkc_platform ON connv2_booking_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bkc_status ON connv2_booking_connector(connector_status)")
-    indexes_created += 3
-
-    # TABLE 11: connv2_booking_sync_log
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_booking_sync_log (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES connv2_booking_connector(id),
-            sync_type       TEXT NOT NULL
-                            CHECK(sync_type IN ('reservations','rates','availability')),
-            direction       TEXT NOT NULL
-                            CHECK(direction IN ('inbound','outbound')),
-            records_synced  INTEGER NOT NULL DEFAULT 0,
-            errors          INTEGER NOT NULL DEFAULT 0,
-            sync_status     TEXT NOT NULL DEFAULT 'completed'
-                            CHECK(sync_status IN ('pending','running','completed','failed')),
-            started_at      TEXT,
-            completed_at    TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bsl_connector ON connv2_booking_sync_log(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bsl_company ON connv2_booking_sync_log(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_bsl_status ON connv2_booking_sync_log(sync_status)")
-    indexes_created += 3
-
-    # ==================================================================
-    # CONNECTORS V2 -- DELIVERY DOMAIN
-    # ==================================================================
-
-    # TABLE 12: connv2_delivery_connector
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_delivery_connector (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            platform            TEXT NOT NULL
-                                CHECK(platform IN ('doordash','ubereats','grubhub','postmates')),
-            store_id            TEXT,
-            api_credentials_ref TEXT,
-            auto_accept         INTEGER NOT NULL DEFAULT 0,
-            sync_menu           INTEGER NOT NULL DEFAULT 1,
-            last_sync_at        TEXT,
-            connector_status    TEXT NOT NULL DEFAULT 'inactive'
-                                CHECK(connector_status IN ('active','inactive','error')),
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlc_company ON connv2_delivery_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlc_platform ON connv2_delivery_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlc_status ON connv2_delivery_connector(connector_status)")
-    indexes_created += 3
-
-    # TABLE 13: connv2_delivery_order
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_delivery_order (
-            id                  TEXT PRIMARY KEY,
-            connector_id        TEXT NOT NULL REFERENCES connv2_delivery_connector(id),
-            external_order_id   TEXT,
-            order_data          TEXT,
-            total_amount        TEXT,
-            commission          TEXT,
-            net_amount          TEXT,
-            order_status        TEXT NOT NULL DEFAULT 'received'
-                                CHECK(order_status IN ('received','confirmed','preparing','ready','picked_up','delivered','cancelled')),
-            received_at         TEXT,
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlo_connector ON connv2_delivery_order(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlo_company ON connv2_delivery_order(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlo_status ON connv2_delivery_order(order_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_dlo_ext_id ON connv2_delivery_order(external_order_id)")
-    indexes_created += 4
-
-    # ==================================================================
-    # CONNECTORS V2 -- REAL ESTATE DOMAIN
-    # ==================================================================
-
-    # TABLE 14: connv2_realestate_connector
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_realestate_connector (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            platform            TEXT NOT NULL
-                                CHECK(platform IN ('zillow','realtor_com','mls','trulia')),
-            agent_id            TEXT,
-            api_credentials_ref TEXT,
-            sync_listings       INTEGER NOT NULL DEFAULT 1,
-            capture_leads       INTEGER NOT NULL DEFAULT 1,
-            last_sync_at        TEXT,
-            connector_status    TEXT NOT NULL DEFAULT 'inactive'
-                                CHECK(connector_status IN ('active','inactive','error')),
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rec_company ON connv2_realestate_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rec_platform ON connv2_realestate_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rec_status ON connv2_realestate_connector(connector_status)")
-    indexes_created += 3
-
-    # TABLE 15: connv2_realestate_lead
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_realestate_lead (
-            id              TEXT PRIMARY KEY,
-            connector_id    TEXT NOT NULL REFERENCES connv2_realestate_connector(id),
-            lead_source     TEXT,
-            contact_name    TEXT,
-            contact_email   TEXT,
-            contact_phone   TEXT,
-            property_ref    TEXT,
-            inquiry         TEXT,
-            lead_status     TEXT NOT NULL DEFAULT 'new'
-                            CHECK(lead_status IN ('new','contacted','qualified','converted','lost')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rel_connector ON connv2_realestate_lead(connector_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rel_company ON connv2_realestate_lead(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_rel_status ON connv2_realestate_lead(lead_status)")
-    indexes_created += 3
-
-    # ==================================================================
-    # CONNECTORS V2 -- FINANCIAL DOMAIN
-    # ==================================================================
-
-    # TABLE 16: connv2_financial_connector
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_financial_connector (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            platform            TEXT NOT NULL
-                                CHECK(platform IN ('plaid','twilio','sendgrid','mailchimp')),
-            account_ref         TEXT,
-            api_credentials_ref TEXT,
-            sync_enabled        INTEGER NOT NULL DEFAULT 1,
-            last_sync_at        TEXT,
-            connector_status    TEXT NOT NULL DEFAULT 'inactive'
-                                CHECK(connector_status IN ('active','inactive','error')),
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_fnc_company ON connv2_financial_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_fnc_platform ON connv2_financial_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_fnc_status ON connv2_financial_connector(connector_status)")
-    indexes_created += 3
-
-    # ==================================================================
-    # CONNECTORS V2 -- PRODUCTIVITY DOMAIN
-    # ==================================================================
-
-    # TABLE 17: connv2_productivity_connector
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS connv2_productivity_connector (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            platform            TEXT NOT NULL
-                                CHECK(platform IN ('google_workspace','microsoft_365','slack','zoom')),
-            workspace_id        TEXT,
-            api_credentials_ref TEXT,
-            sync_calendar       INTEGER NOT NULL DEFAULT 1,
-            sync_contacts       INTEGER NOT NULL DEFAULT 1,
-            sync_files          INTEGER NOT NULL DEFAULT 0,
-            last_sync_at        TEXT,
-            connector_status    TEXT NOT NULL DEFAULT 'inactive'
-                                CHECK(connector_status IN ('active','inactive','error')),
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_pdc_company ON connv2_productivity_connector(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_pdc_platform ON connv2_productivity_connector(platform)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cv2_pdc_status ON connv2_productivity_connector(connector_status)")
-    indexes_created += 3
-
-    # ==================================================================
-    # PLAID / STRIPE / S3 -- config + scaffolding tables (all removed)
-    # ==================================================================
-    #
-    # plaid_config / stripe_config / s3_config removed 2026-07-02 (M31 H2 / audit
-    # B7): the "KEPT (referenced)" rationale from migration 001 is overturned. The
-    # register (writers=[], readers=[]) confirms zero writers/readers ever; the
-    # sole reference was the erpclaw-meta ownership map (SKILL_TABLES), a runtime-
-    # computed doc-map, not a persistence path. All three also normalized plaintext
-    # secrets, contradicting the typed-credential mechanism (crypto.encrypt_field /
-    # integration_credential) that the live connectors actually use. Dropped from
-    # existing DBs by this module's migration 002.
-    #
-    # Earlier siblings removed 2026-06-01 (audit P2) by migration 001:
-    #   plaid_linked_account / plaid_transaction (unbuilt Plaid connector),
-    #   stripe_payment_intent / stripe_webhook_event (superseded by the dedicated
-    #   erpclaw-integrations-stripe addon), s3_backup_record (unbuilt S3 backup).
-
-    conn.commit()
-    conn.close()
-
+    Same contract as before the ADR-0034 conversion: idempotent, and the returned
+    counts are what was ACTUALLY created rather than what was declared.
+    """
+    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
+    _require_foundation(db_path)
+    result = provision(METADATA, db_path)
     return {
         "database": db_path,
-        "tables": tables_created,
-        "indexes": indexes_created,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
     }
 
 

@@ -14,11 +14,13 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 # Add shared lib to path
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.query import (
-    Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update,
+    Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update, now as sql_now,
 )
 
 
@@ -57,7 +59,7 @@ def store_variant(conn, run_id, variant_data):
         "test_total": P(),
         "composite_score": P(),
         "is_selected": P(),
-        "created_at": LiteralValue("datetime('now')"),
+        "created_at": sql_now(),
     })
     conn.execute(sql, [
         variant_id,
@@ -224,7 +226,7 @@ def _create_improvement_proposal(conn, variant):
         "proposed_diff": P(),
         "source": P(),
         "status": P(),
-        "proposed_at": LiteralValue("datetime('now')"),
+        "proposed_at": sql_now(),
     })
     conn.execute(sql, [
         improvement_id,

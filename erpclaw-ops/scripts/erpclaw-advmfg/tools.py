@@ -8,11 +8,13 @@ import sys
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -136,7 +138,7 @@ def update_tool(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("tool", data, {"id": tool_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "update-tool", "tool", tool_id,
@@ -268,7 +270,7 @@ def add_tool_usage(conn, args):
     new_count = tool["current_usage_count"] + usage_count
     upd_data = {
         "current_usage_count": new_count,
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": sql_now(),
     }
 
     # Update condition if specified

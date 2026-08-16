@@ -7,11 +7,13 @@ import os
 import sys
 import uuid
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 
 SKILL = "erpclaw-advmfg"
 
@@ -113,7 +115,7 @@ def update_eco(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("engineering_change_order", data, {"id": eco_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "update-eco", "engineering_change_order", eco_id,
@@ -206,7 +208,7 @@ def submit_eco_for_review(conn, args):
         err(f"Cannot submit ECO for review in status '{row['status']}'. Must be draft")
 
     sql = update_row("engineering_change_order",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("review", eco_id))
     audit(conn, SKILL, "submit-eco-for-review", "engineering_change_order", eco_id,
@@ -229,7 +231,7 @@ def approve_eco(conn, args):
         err(f"Cannot approve ECO in status '{row['status']}'. Must be in review")
 
     approved_by = getattr(args, "approved_by", None)
-    upd_data = {"status": "approved", "updated_at": LiteralValue("datetime('now')")}
+    upd_data = {"status": "approved", "updated_at": sql_now()}
     if approved_by:
         upd_data["approved_by"] = approved_by
     sql, params = dynamic_update("engineering_change_order", upd_data, {"id": eco_id})
@@ -254,7 +256,7 @@ def implement_eco(conn, args):
         err(f"Cannot implement ECO in status '{row['status']}'. Must be approved or in_progress")
 
     sql = update_row("engineering_change_order",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("implemented", eco_id))
     audit(conn, SKILL, "implement-eco", "engineering_change_order", eco_id,

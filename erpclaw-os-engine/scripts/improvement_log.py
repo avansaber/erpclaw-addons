@@ -16,12 +16,14 @@ import uuid
 from datetime import datetime, timezone
 
 # Add shared lib to path
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.pagination import paginate
 from erpclaw_lib.query import (
-    Q, P, Table, Field, LiteralValue, insert_row, dynamic_update,
+    Q, P, Table, Field, LiteralValue, insert_row, dynamic_update, now as sql_now,
 )
 
 VALID_CATEGORIES = ("performance", "usability", "coverage", "semantic", "structural")
@@ -81,7 +83,7 @@ def handle_log_improvement(args):
             "expected_impact": P(),
             "source": P(),
             "status": P(),
-            "proposed_at": LiteralValue("datetime('now')"),
+            "proposed_at": sql_now(),
         })
         conn.execute(sql, [
             improvement_id,
@@ -231,7 +233,7 @@ def handle_review_improvement(args):
 
         update_data = {
             "status": new_status,
-            "reviewed_at": LiteralValue("datetime('now')"),
+            "reviewed_at": sql_now(),
             "reviewed_by": reviewed_by,
         }
         if review_notes:

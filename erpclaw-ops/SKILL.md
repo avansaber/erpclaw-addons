@@ -1,6 +1,6 @@
 ---
 name: erpclaw-ops
-version: 2.2.0
+version: 2.3.0
 description: >
   Operations suite for ERPClaw. Manufacturing (BOMs, work orders, MRP),
   advanced manufacturing (shop floor, tools, ECOs, recipes),
@@ -173,7 +173,7 @@ Tool lifecycle: new -> good -> worn -> needs_repair -> scrapped. ECO workflow: d
 | `post-depreciation` / `run-depreciation` | Post GL entries (DR Depreciation Expense, CR Accumulated Depreciation) |
 | `record-asset-movement` | Track location/custodian transfers |
 | `schedule-maintenance` / `complete-maintenance` | Asset maintenance lifecycle; `--is-capex` capitalizes the cost into the asset (DR Asset / CR Cash) + recomputes depreciation, else expenses it |
-| `dispose-asset` | Sell or scrap with gain/loss GL posting |
+| `dispose-asset` | Sell or scrap (DR Accumulated Depreciation + DR `--proceeds-account-id` for the sale money, CR Fixed Asset at gross, gain/loss plug to `--gain-loss-account-id`). `--proceeds-account-id` is required whenever `--sale-amount` > 0 and must be `account_type` `bank` or `cash` (a receivable is refused by name, it would need a customer party); `--gain-loss-account-id` is required whenever the disposal produces a gain or a loss and must be `account_type` `disposal_gain_loss` (the shipped chart's 4220 / 5340), and not the category's depreciation account. Every other P&L account is refused with a steer, including plain `revenue` and `expense`, so a disposal gain cannot land on the sales line. **On an install whose foundation has not yet registered `disposal_gain_loss`** (foundation migration 035 runs when the foundation itself is updated, not when this addon is) the wider pre-M94 rule stays in force, `revenue` / `expense` are accepted, and refusals say so and steer to add-account only, because retyping an existing account arrived with that same foundation release. Untyped accounts are refused either way. A fully depreciated scrap needs neither account |
 | `impair-asset` / `reverse-impairment` | Write down to recoverable amount (DR Impairment Loss / CR Accumulated Impairment); reverse = mirror GL + restore book value |
 | `capitalize-asset` | Initial recognition from a purchase cost (DR Fixed Asset / CR source account) |
 | `revalue-asset` | Upward/downward revaluation (Asset vs Revaluation Reserve) + depreciation recompute |

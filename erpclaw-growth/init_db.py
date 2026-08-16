@@ -1,19 +1,49 @@
 #!/usr/bin/env python3
 """erpclaw-growth schema extension -- adds advanced CRM/marketing tables to the shared database.
 
-25 tables: 13 CRM advanced (campaigns, territories, contracts, automation, drip sequences)
-+ 12 AI engine / analytics tables (moved from core init_schema.py):
+32 tables: 15 CRM advanced (campaigns, territories, contracts, automation, drip
+sequences) + 8 CRM core entities (contact/company model, tasks, pipelines, saved
+views) + 9 AI engine / analytics tables (moved from core init_schema.py):
   anomaly, scenario, correlation, categorization_rule, business_rule,
-  pending_decision, usage_event, audit_conversation, conversation_context,
-  relationship_score, elimination_rule, elimination_entry.
+  pending_decision, audit_conversation, conversation_context,
+  relationship_score.
+(elimination_rule / elimination_entry were retired 2026-08-12 -- M63-C.)
 Part of the erpclaw-growth super-package (CRM + Analytics + AI Engine).
+
+The docstring said "25 tables" and listed `usage_event` among the AI-engine
+group. Both were stale: the count predates the Wave 1B F1-F4 tables and the M8
+drip tables, and `usage_event` moved to the foundation in the 2026-05-31
+migration audit (BUG-007). Corrected here against a provisioned count.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. The four case-insensitive uniqueness guarantees on CRM
+identity (`uq_crm_company_domain`, `uq_crm_contact_email`, `uq_crm_pipeline_name`,
+`uq_crm_pipeline_stage_name`) plus `uq_crm_saved_view_name` are EXPRESSION
+indexes over ``lower(...)``; SQLAlchemy refuses to reflect those, so they are
+declared inline in their ``Table`` blocks (the form the seam's static reader can
+attribute) and were verified against the raw catalog rather than reflection.
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.db import get_connection  # noqa: E402
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    provision, reference_table, table_exists, text,
+)
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "ERPClaw Growth (CRM Advanced tables)"
@@ -35,6 +65,27 @@ DEFAULT_PIPELINE_STAGES = [
     (6, "won", 1, 0, "100"),
     (7, "lost", 0, 1, "0"),
 ]
+
+METADATA = MetaData()
+
+# Foundation tables this module points at but does not own — declared so the
+# foreign keys resolve, never created here.
+reference_table("company", METADATA)
+reference_table("customer", METADATA)
+
+
+def _require_foundation(db_path):
+    """Refuse to provision without the foundation tables this module points at.
+
+    The pre-conversion probe queried SQLite's own catalog table, so on PostgreSQL
+    it raised rather than answering; ``seam.table_exists`` answers on both
+    backends. The message wording is the original's, deliberately.
+    """
+    missing = [t for t in REQUIRED_FOUNDATION if not table_exists(t, db_path)]
+    if missing:
+        print(f"ERROR: Foundation tables missing: {', '.join(missing)}", file=sys.stderr)
+        print("Run erpclaw-setup first: clawhub install erpclaw-setup", file=sys.stderr)
+        sys.exit(1)
 
 
 def _seed_default_pipeline(conn):
@@ -74,865 +125,900 @@ def _seed_default_pipeline(conn):
     return pipeline_id
 
 
+# ==================================================================
+# CAMPAIGNS DOMAIN
+# ==================================================================
+
+# 1. crmadv_campaign_template
+CAMPAIGN_TEMPLATE = Table(
+    "crmadv_campaign_template", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("subject_template", Text),
+    Column("body_html", Text),
+    Column("body_text", Text),
+    Column("template_type", Text, server_default=text("'newsletter'")),
+    Column("is_active", Integer, server_default=text("1")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "template_type IN ('newsletter','promotional','transactional','drip','welcome')",
+        name="ck_crmadv_campaign_template_template_type"),
+)
+
+Index("idx_crmadv_tmpl_company", CAMPAIGN_TEMPLATE.c.company_id)
+Index("idx_crmadv_tmpl_type", CAMPAIGN_TEMPLATE.c.template_type)
+
+# 2. crmadv_recipient_list
+RECIPIENT_LIST = Table(
+    "crmadv_recipient_list", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("description", Text),
+    Column("list_type", Text, server_default=text("'static'")),
+    Column("filter_criteria", Text),
+    Column("recipient_count", Integer, server_default=text("0")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("list_type IN ('static','dynamic','segment')",
+                    name="ck_crmadv_recipient_list_list_type"),
+)
+
+Index("idx_crmadv_rlist_company", RECIPIENT_LIST.c.company_id)
+
+# 3. crmadv_email_campaign
+EMAIL_CAMPAIGN = Table(
+    "crmadv_email_campaign", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("subject", Text),
+    Column("template_id", Text, ForeignKey("crmadv_campaign_template.id")),
+    Column("recipient_list_id", Text, ForeignKey("crmadv_recipient_list.id")),
+    Column("campaign_status", Text, server_default=text("'draft'")),
+    Column("scheduled_date", Text),
+    Column("sent_date", Text),
+    Column("total_sent", Integer, server_default=text("0")),
+    Column("total_opened", Integer, server_default=text("0")),
+    Column("total_clicked", Integer, server_default=text("0")),
+    Column("total_bounced", Integer, server_default=text("0")),
+    Column("total_unsubscribed", Integer, server_default=text("0")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "campaign_status IN ('draft','scheduled','sending','sent','paused','cancelled')",
+        name="ck_crmadv_email_campaign_campaign_status"),
+)
+
+Index("idx_crmadv_camp_company", EMAIL_CAMPAIGN.c.company_id)
+Index("idx_crmadv_camp_status", EMAIL_CAMPAIGN.c.campaign_status)
+Index("idx_crmadv_camp_template", EMAIL_CAMPAIGN.c.template_id)
+
+# 4. crmadv_campaign_event
+CAMPAIGN_EVENT = Table(
+    "crmadv_campaign_event", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("campaign_id", Text, ForeignKey("crmadv_email_campaign.id"), nullable=False),
+    Column("event_type", Text, nullable=False),
+    Column("recipient_email", Text),
+    Column("event_timestamp", Text),
+    Column("metadata", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "event_type IN ('sent','opened','clicked','bounced','unsubscribed','converted')",
+        name="ck_crmadv_campaign_event_event_type"),
+)
+
+Index("idx_crmadv_evt_campaign", CAMPAIGN_EVENT.c.campaign_id)
+Index("idx_crmadv_evt_type", CAMPAIGN_EVENT.c.event_type)
+Index("idx_crmadv_evt_company", CAMPAIGN_EVENT.c.company_id)
+
+# ==================================================================
+# TERRITORIES DOMAIN
+# ==================================================================
+
+# 5. crmadv_territory
+TERRITORY = Table(
+    "crmadv_territory", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("region", Text),
+    # Self-referential: a territory may nest under a parent territory.
+    Column("parent_territory_id", Text, ForeignKey("crmadv_territory.id")),
+    Column("territory_type", Text, server_default=text("'geographic'")),
+    Column("territory_status", Text, server_default=text("'active'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "territory_type IN ('geographic','industry','named_account','product')",
+        name="ck_crmadv_territory_territory_type"),
+    CheckConstraint("territory_status IN ('active','inactive')",
+                    name="ck_crmadv_territory_territory_status"),
+)
+
+Index("idx_crmadv_terr_company", TERRITORY.c.company_id)
+Index("idx_crmadv_terr_parent", TERRITORY.c.parent_territory_id)
+Index("idx_crmadv_terr_type", TERRITORY.c.territory_type)
+
+# 6. crmadv_territory_assignment
+TERRITORY_ASSIGNMENT = Table(
+    "crmadv_territory_assignment", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("territory_id", Text, ForeignKey("crmadv_territory.id"), nullable=False),
+    Column("salesperson", Text, nullable=False),
+    Column("start_date", Text),
+    Column("end_date", Text),
+    Column("assignment_status", Text, server_default=text("'active'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("assignment_status IN ('active','ended')",
+                    name="ck_crmadv_territory_assignment_assignment_status"),
+)
+
+Index("idx_crmadv_tassign_terr", TERRITORY_ASSIGNMENT.c.territory_id)
+Index("idx_crmadv_tassign_company", TERRITORY_ASSIGNMENT.c.company_id)
+
+# 7. crmadv_territory_quota
+# quota_amount / actual_amount / attainment_pct are money and stay TEXT-Decimal.
+TERRITORY_QUOTA = Table(
+    "crmadv_territory_quota", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("territory_id", Text, ForeignKey("crmadv_territory.id"), nullable=False),
+    Column("period", Text, nullable=False),
+    Column("quota_amount", Text, nullable=False),
+    Column("actual_amount", Text, server_default=text("'0'")),
+    Column("attainment_pct", Text, server_default=text("'0'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_crmadv_tquota_terr", TERRITORY_QUOTA.c.territory_id)
+Index("idx_crmadv_tquota_company", TERRITORY_QUOTA.c.company_id)
+
+# ==================================================================
+# CONTRACTS DOMAIN
+# ==================================================================
+
+# 8. crmadv_contract
+# total_value / annual_value are money and stay TEXT-Decimal.
+CONTRACT = Table(
+    "crmadv_contract", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("customer_name", Text, nullable=False),
+    Column("contract_type", Text, server_default=text("'service'")),
+    Column("contract_status", Text, server_default=text("'draft'")),
+    Column("start_date", Text),
+    Column("end_date", Text),
+    Column("total_value", Text),
+    Column("annual_value", Text),
+    Column("auto_renew", Integer, server_default=text("0")),
+    Column("renewal_terms", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    # 'licensing' and 'license' are both accepted — a historical duplication that
+    # is preserved rather than tidied (a conversion transcribes, it does not fix).
+    CheckConstraint(
+        "contract_type IN ('service','subscription','licensing','license','maintenance','consulting')",
+        name="ck_crmadv_contract_contract_type"),
+    CheckConstraint(
+        "contract_status IN ('draft','active','expired','renewed','terminated')",
+        name="ck_crmadv_contract_contract_status"),
+)
+
+Index("idx_crmadv_ctr_company", CONTRACT.c.company_id)
+Index("idx_crmadv_ctr_status", CONTRACT.c.contract_status)
+Index("idx_crmadv_ctr_type", CONTRACT.c.contract_type)
+
+# 9. crmadv_contract_obligation
+CONTRACT_OBLIGATION = Table(
+    "crmadv_contract_obligation", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("contract_id", Text, ForeignKey("crmadv_contract.id"), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("due_date", Text),
+    Column("obligee", Text),
+    Column("obligation_status", Text, server_default=text("'pending'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "obligation_status IN ('pending','in_progress','completed','overdue')",
+        name="ck_crmadv_contract_obligation_obligation_status"),
+)
+
+Index("idx_crmadv_obl_contract", CONTRACT_OBLIGATION.c.contract_id)
+Index("idx_crmadv_obl_status", CONTRACT_OBLIGATION.c.obligation_status)
+Index("idx_crmadv_obl_company", CONTRACT_OBLIGATION.c.company_id)
+
+# ==================================================================
+# AUTOMATION DOMAIN
+# ==================================================================
+
+# 10. crmadv_automation_workflow
+AUTOMATION_WORKFLOW = Table(
+    "crmadv_automation_workflow", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("trigger_event", Text),
+    Column("conditions_json", Text, server_default=text("'{}'")),
+    Column("actions_json", Text, server_default=text("'[]'")),
+    Column("workflow_status", Text, server_default=text("'inactive'")),
+    Column("execution_count", Integer, server_default=text("0")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("workflow_status IN ('active','inactive','paused')",
+                    name="ck_crmadv_automation_workflow_workflow_status"),
+)
+
+Index("idx_crmadv_wf_company", AUTOMATION_WORKFLOW.c.company_id)
+Index("idx_crmadv_wf_status", AUTOMATION_WORKFLOW.c.workflow_status)
+
+# 11. crmadv_lead_score_rule
+LEAD_SCORE_RULE = Table(
+    "crmadv_lead_score_rule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("criteria_json", Text, nullable=False),
+    Column("points", Integer, nullable=False, server_default=text("0")),
+    Column("is_active", Integer, server_default=text("1")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_crmadv_lsr_company", LEAD_SCORE_RULE.c.company_id)
+
+# 12. crmadv_nurture_sequence
+NURTURE_SEQUENCE = Table(
+    "crmadv_nurture_sequence", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("description", Text),
+    Column("steps_json", Text, server_default=text("'[]'")),
+    Column("total_steps", Integer, server_default=text("0")),
+    Column("sequence_status", Text, server_default=text("'draft'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("sequence_status IN ('draft','active','paused','completed')",
+                    name="ck_crmadv_nurture_sequence_sequence_status"),
+)
+
+Index("idx_crmadv_ns_company", NURTURE_SEQUENCE.c.company_id)
+Index("idx_crmadv_ns_status", NURTURE_SEQUENCE.c.sequence_status)
+
+# 13. crmadv_drip_sequence (M8 phase B -- drip campaign sequences)
+DRIP_SEQUENCE = Table(
+    "crmadv_drip_sequence", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("name", Text, nullable=False),
+    Column("description", Text),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    # The M8 tables space their IN-lists ("(0, 1)") where the older tables do not
+    # ("(0,1)"). Both spellings are kept exactly as shipped.
+    CheckConstraint("is_active IN (0, 1)",
+                    name="ck_crmadv_drip_sequence_is_active"),
+)
+
+Index("idx_crmadv_drip_company", DRIP_SEQUENCE.c.company_id)
+Index("idx_crmadv_drip_active", DRIP_SEQUENCE.c.is_active)
+
+# 14. crmadv_drip_sequence_step (M8 phase B -- steps within a drip sequence)
+# email_template_id deliberately carries NO foreign key, unlike
+# crmadv_email_campaign.template_id which does.
+DRIP_SEQUENCE_STEP = Table(
+    "crmadv_drip_sequence_step", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("sequence_id", Text, ForeignKey("crmadv_drip_sequence.id"), nullable=False),
+    Column("step_order", Integer, nullable=False),
+    Column("delay_hours", Integer, nullable=False, server_default=text("0")),
+    Column("email_template_id", Text),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_active IN (0, 1)",
+                    name="ck_crmadv_drip_sequence_step_is_active"),
+)
+
+Index("idx_crmadv_drip_step_seq", DRIP_SEQUENCE_STEP.c.sequence_id)
+Index("idx_crmadv_drip_step_seq_order",
+      DRIP_SEQUENCE_STEP.c.sequence_id, DRIP_SEQUENCE_STEP.c.step_order)
+
+# 15. crmadv_drip_enrollment (M8 phase B -- contacts enrolled in a drip sequence)
+# contact_id is opaque (no foreign key) and there is no company_id at all here,
+# unlike every sibling in this domain. Both preserved.
+DRIP_ENROLLMENT = Table(
+    "crmadv_drip_enrollment", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("sequence_id", Text, ForeignKey("crmadv_drip_sequence.id"), nullable=False),
+    Column("contact_id", Text, nullable=False),
+    Column("current_step", Integer, nullable=False, server_default=text("0")),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("next_send_at", Text),
+    Column("enrolled_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('active', 'completed', 'cancelled')",
+                    name="ck_crmadv_drip_enrollment_status"),
+)
+
+Index("idx_crmadv_drip_enr_seq", DRIP_ENROLLMENT.c.sequence_id)
+Index("idx_crmadv_drip_enr_contact", DRIP_ENROLLMENT.c.contact_id)
+Index("idx_crmadv_drip_enr_status_send",
+      DRIP_ENROLLMENT.c.status, DRIP_ENROLLMENT.c.next_send_at)
+
+# ==================================================================
+# CONTACT + COMPANY MODEL (Wave 1B F1)
+# crm_contact / crm_company / crm_contact_role. Person + Org entities
+# that the foundation lead/opportunity/customer/crm_activity tables point
+# at via the nullable FK columns added in foundation migration 023
+# (ADR-0023). Growth is the sole writer of both these tables and those
+# foundation FK columns.
+# ==================================================================
+
+# crm_company — Org entity (defined before crm_contact: contact FKs company)
+# annual_revenue is money and stays TEXT-Decimal; employee_count is a count.
+CRM_COMPANY = Table(
+    "crm_company", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("domain", Text),
+    Column("industry", Text),
+    Column("employee_count", Integer),
+    Column("annual_revenue", Text),
+    Column("address_line1", Text),
+    Column("address_line2", Text),
+    Column("city", Text),
+    Column("state", Text),
+    Column("postal_code", Text),
+    Column("country", Text),
+    Column("linkedin_url", Text),
+    Column("lifecycle", Text, nullable=False, server_default=text("'prospect'")),
+    Column("linked_customer_id", Text,
+           ForeignKey("customer.id", ondelete="SET NULL")),
+    Column("assigned_to_user_id", Text),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "lifecycle IN ('prospect','customer','partner','vendor','other')",
+        name="ck_crm_company_lifecycle"),
+    # domain UNIQUE where not NULL (case-insensitive): partial unique index on
+    # lower(domain). Declared inline because SQLAlchemy cannot reflect an
+    # expression index, so this is the form the seam's static reader attributes
+    # to the right table (ADR-0034 step 2f).
+    Index("uq_crm_company_domain", "company_id", text("lower(domain)"),
+          unique=True,
+          sqlite_where=text("domain IS NOT NULL"),
+          postgresql_where=text("domain IS NOT NULL")),
+)
+
+Index("idx_crm_company_company", CRM_COMPANY.c.company_id)
+Index("idx_crm_company_lifecycle", CRM_COMPANY.c.lifecycle)
+Index("idx_crm_company_linked_customer", CRM_COMPANY.c.linked_customer_id)
+
+# crm_contact — Person entity
+CRM_CONTACT = Table(
+    "crm_contact", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("email", Text),
+    Column("phone", Text),
+    Column("mobile", Text),
+    Column("job_title", Text),
+    Column("linkedin_url", Text),
+    Column("address_line1", Text),
+    Column("address_line2", Text),
+    Column("city", Text),
+    Column("state", Text),
+    Column("postal_code", Text),
+    Column("country", Text),
+    Column("lifecycle", Text, nullable=False, server_default=text("'lead'")),
+    Column("crm_company_id", Text,
+           ForeignKey("crm_company.id", ondelete="SET NULL")),
+    Column("assigned_to_user_id", Text),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("lifecycle IN ('lead','mql','sql','customer','other')",
+                    name="ck_crm_contact_lifecycle"),
+    # email UNIQUE where not NULL, case-insensitive: partial unique index on
+    # lower(email). Inline for the same reason as uq_crm_company_domain.
+    Index("uq_crm_contact_email", "company_id", text("lower(email)"),
+          unique=True,
+          sqlite_where=text("email IS NOT NULL"),
+          postgresql_where=text("email IS NOT NULL")),
+)
+
+Index("idx_crm_contact_company", CRM_CONTACT.c.company_id)
+Index("idx_crm_contact_crm_company", CRM_CONTACT.c.crm_company_id)
+Index("idx_crm_contact_lifecycle", CRM_CONTACT.c.lifecycle)
+
+# crm_contact_role — many-to-many: a person can work at multiple companies
+CRM_CONTACT_ROLE = Table(
+    "crm_contact_role", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("crm_contact_id", Text,
+           ForeignKey("crm_contact.id", ondelete="CASCADE"), nullable=False),
+    Column("crm_company_id", Text,
+           ForeignKey("crm_company.id", ondelete="CASCADE"), nullable=False),
+    Column("role_title", Text),
+    Column("is_primary", Integer, nullable=False, server_default=text("0")),
+    Column("started_at", Text),
+    Column("ended_at", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_primary IN (0,1)", name="ck_crm_contact_role_is_primary"),
+)
+
+Index("idx_crm_contact_role_contact", CRM_CONTACT_ROLE.c.crm_contact_id)
+Index("idx_crm_contact_role_company", CRM_CONTACT_ROLE.c.crm_company_id)
+Index("uq_crm_contact_role",
+      CRM_CONTACT_ROLE.c.crm_contact_id, CRM_CONTACT_ROLE.c.crm_company_id,
+      unique=True)
+
+# ==================================================================
+# TASKS — FIRST-CLASS ENTITY (Wave 1B F2)
+# crm_task / crm_task_link. A richer task row than crm_activity
+# (status / priority / due_date lifecycle); crm_task_link is the
+# many-to-many tie to any CRM entity (lead / opportunity / customer /
+# crm_contact / crm_company). crm_activity is NOT replaced — legacy
+# activity_type='task' rows stay valid. Growth-owned.
+# ==================================================================
+
+# crm_task — first-class task entity
+CRM_TASK = Table(
+    "crm_task", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("subject", Text, nullable=False),
+    Column("description", Text),
+    Column("status", Text, nullable=False, server_default=text("'open'")),
+    Column("priority", Text, nullable=False, server_default=text("'medium'")),
+    Column("due_date", Text),
+    Column("assigned_to_user_id", Text),
+    Column("created_by_user_id", Text),
+    Column("completed_at", Text),
+    Column("cancel_reason", Text),
+    Column("linked_count", Integer, nullable=False, server_default=text("0")),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('open','in_progress','done','cancelled')",
+                    name="ck_crm_task_status"),
+    CheckConstraint("priority IN ('low','medium','high','urgent')",
+                    name="ck_crm_task_priority"),
+)
+
+Index("idx_crm_task_company", CRM_TASK.c.company_id)
+Index("idx_crm_task_status", CRM_TASK.c.status)
+Index("idx_crm_task_assigned", CRM_TASK.c.assigned_to_user_id)
+Index("idx_crm_task_due", CRM_TASK.c.due_date)
+
+# crm_task_link — many-to-many: a task can attach to any CRM entity
+# linked_entity_id is opaque (the entity type decides the table), so no FK.
+CRM_TASK_LINK = Table(
+    "crm_task_link", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("crm_task_id", Text,
+           ForeignKey("crm_task.id", ondelete="CASCADE"), nullable=False),
+    Column("linked_entity_type", Text, nullable=False),
+    Column("linked_entity_id", Text, nullable=False),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "linked_entity_type IN ('lead','opportunity','customer','crm_contact','crm_company')",
+        name="ck_crm_task_link_linked_entity_type"),
+)
+
+Index("idx_crm_task_link_task", CRM_TASK_LINK.c.crm_task_id)
+Index("idx_crm_task_link_entity",
+      CRM_TASK_LINK.c.linked_entity_type, CRM_TASK_LINK.c.linked_entity_id)
+Index("uq_crm_task_link",
+      CRM_TASK_LINK.c.crm_task_id, CRM_TASK_LINK.c.linked_entity_type,
+      CRM_TASK_LINK.c.linked_entity_id, unique=True)
+
+# ==================================================================
+# Wave 1B F3 — Pipeline stages (customizable). crm_pipeline /
+# crm_pipeline_stage (growth-owned). Foundation opportunity carries a
+# nullable opaque FK column pipeline_stage_id -> crm_pipeline_stage (ADR-0023;
+# growth is the SOLE writer of that column). The hardcoded opportunity.stage
+# CHECK is dropped in foundation migration 024; the legacy `stage` text column
+# stays for backward-compat (dual-path pipeline-report). A default
+# "Standard Sales" 7-stage pipeline is seeded below so existing opportunity
+# rows have somewhere to point. Pipelines are catalog rows (no company_id) —
+# shared across the install, like a chart-of-accounts template.
+# ==================================================================
+
+# crm_pipeline — pipeline definition
+CRM_PIPELINE = Table(
+    "crm_pipeline", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("description", Text),
+    Column("is_default", Integer, nullable=False, server_default=text("0")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_default IN (0,1)", name="ck_crm_pipeline_is_default"),
+    CheckConstraint("is_active IN (0,1)", name="ck_crm_pipeline_is_active"),
+    # Pipeline names are unique case-insensitively across the install. Purely an
+    # expression index — there is no plain column in it at all — so it must be
+    # declared where the table is known.
+    Index("uq_crm_pipeline_name", text("lower(name)"), unique=True),
+)
+
+# crm_pipeline_stage — ordered stage within a pipeline
+# default_probability is a Decimal percentage and stays TEXT.
+CRM_PIPELINE_STAGE = Table(
+    "crm_pipeline_stage", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("crm_pipeline_id", Text,
+           ForeignKey("crm_pipeline.id", ondelete="CASCADE"), nullable=False),
+    Column("stage_order", Integer, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("is_terminal_won", Integer, nullable=False, server_default=text("0")),
+    Column("is_terminal_lost", Integer, nullable=False, server_default=text("0")),
+    Column("default_probability", Text, nullable=False, server_default=text("'0'")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_terminal_won IN (0,1)",
+                    name="ck_crm_pipeline_stage_is_terminal_won"),
+    CheckConstraint("is_terminal_lost IN (0,1)",
+                    name="ck_crm_pipeline_stage_is_terminal_lost"),
+    CheckConstraint("is_active IN (0,1)", name="ck_crm_pipeline_stage_is_active"),
+    # Stage names are unique case-insensitively within one pipeline.
+    Index("uq_crm_pipeline_stage_name", "crm_pipeline_id", text("lower(name)"),
+          unique=True),
+)
+
+Index("idx_crm_pipeline_stage_pipeline", CRM_PIPELINE_STAGE.c.crm_pipeline_id)
+Index("uq_crm_pipeline_stage_order",
+      CRM_PIPELINE_STAGE.c.crm_pipeline_id, CRM_PIPELINE_STAGE.c.stage_order,
+      unique=True)
+
+# ==================================================================
+# Wave 1B F4 — Saved views (filter-JSON DSL + persistence). crm_saved_view
+# (growth-owned). A persisted, named view over one CRM entity: a bounded
+# filter-JSON (operator + column whitelist, validated at SAVE-time, never
+# interpolated into SQL) plus optional sort / group-by / column-order JSON.
+# company_id is NOT NULL (multi-company-safe; matches every other company-scoped
+# growth table — DECISION #2, Wave 1B plan). is_shared 0/1: a shared view is
+# readable by every user in the company; only the owner may update or delete it.
+# entity_type is CHECK-bounded over the 6 supported CRM entities. No FK on the
+# opaque list-side (the view simply filters whatever list-<entity> returns).
+# ==================================================================
+CRM_SAVED_VIEW = Table(
+    "crm_saved_view", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("name", Text, nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("owner_user_id", Text),
+    Column("is_shared", Integer, nullable=False, server_default=text("0")),
+    Column("filter_json", Text),
+    Column("sort_json", Text),
+    Column("group_by_json", Text),
+    Column("column_order_json", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    # The shipped DDL wraps this IN-list across two lines, which leaves a space
+    # after 'customer',. It is part of the constraint body and is reproduced.
+    CheckConstraint(
+        "entity_type IN ('lead','opportunity','customer', "
+        "'crm_contact','crm_company','crm_task')",
+        name="ck_crm_saved_view_entity_type"),
+    CheckConstraint("is_shared IN (0,1)", name="ck_crm_saved_view_is_shared"),
+    # A fifth expression index, easy to miss: the shipped statement is split
+    # across two Python string literals, and the third key is lower(name).
+    Index("uq_crm_saved_view_name", "company_id", "owner_user_id",
+          text("lower(name)"), unique=True),
+)
+
+Index("idx_crm_saved_view_company", CRM_SAVED_VIEW.c.company_id)
+Index("idx_crm_saved_view_entity", CRM_SAVED_VIEW.c.entity_type)
+Index("idx_crm_saved_view_owner", CRM_SAVED_VIEW.c.owner_user_id)
+
+# ==================================================================
+# AI ENGINE / ANALYTICS TABLES (moved from core init_schema.py)
+# ==================================================================
+
+# 16. anomaly
+ANOMALY = Table(
+    "anomaly", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("detected_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("anomaly_type", Text, nullable=False),
+    Column("severity", Text, nullable=False, server_default=text("'info'")),
+    Column("entity_type", Text),
+    Column("entity_id", Text),
+    Column("description", Text, nullable=False),
+    Column("evidence", Text),
+    Column("baseline", Text),
+    Column("actual", Text),
+    Column("deviation_pct", Text),
+    Column("status", Text, nullable=False, server_default=text("'new'")),
+    Column("resolution_notes", Text),
+    Column("assigned_to", Text),
+    Column("expires_at", Text),
+    # Wrapped across seven lines in the shipped DDL; each wrap is a space inside
+    # the constraint body, including right after the opening paren and before
+    # the closing one.
+    CheckConstraint(
+        "anomaly_type IN ( "
+        "'price_spike','volume_change','duplicate_possible', "
+        "'margin_erosion','unusual_vendor','pattern_break', "
+        "'consumption_spike','late_pattern','round_number', "
+        "'ghost_employee','vendor_concentration', "
+        "'sequence_violation','benford_deviation','budget_overrun', "
+        "'inventory_shrinkage','payment_pattern_shift', "
+        "'asset_book_value_drift','dimension_tag_drift', "
+        "'reservation_over_available','subcontract_receipt_mismatch', "
+        "'rate_plan_mismatch' )",
+        name="ck_anomaly_anomaly_type"),
+    CheckConstraint("severity IN ('info','warning','critical')",
+                    name="ck_anomaly_severity"),
+    CheckConstraint(
+        "status IN ('new','acknowledged','investigated','dismissed','resolved')",
+        name="ck_anomaly_status"),
+)
+
+Index("idx_anomaly_status", ANOMALY.c.status)
+Index("idx_anomaly_type", ANOMALY.c.anomaly_type)
+Index("idx_anomaly_severity", ANOMALY.c.severity)
+Index("idx_anomaly_entity", ANOMALY.c.entity_type, ANOMALY.c.entity_id)
+
+# 17. scenario
+SCENARIO = Table(
+    "scenario", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("question", Text, nullable=False),
+    Column("scenario_type", Text, nullable=False),
+    Column("assumptions", Text),
+    Column("baseline", Text),
+    Column("projected", Text),
+    Column("impact_summary", Text),
+    Column("confidence", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("expires_at", Text),
+    CheckConstraint(
+        "scenario_type IN ( "
+        "'price_change','supplier_loss','demand_shift','cost_change', "
+        "'hiring_impact','expansion','contraction' )",
+        name="ck_scenario_scenario_type"),
+)
+
+Index("idx_scenario_type", SCENARIO.c.scenario_type)
+
+# 18. correlation
+CORRELATION = Table(
+    "correlation", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("discovered_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("module_a", Text, nullable=False),
+    Column("module_b", Text, nullable=False),
+    Column("description", Text, nullable=False),
+    Column("evidence", Text),
+    Column("strength", Text, nullable=False, server_default=text("'moderate'")),
+    Column("statistical_confidence", Text),
+    Column("actionable", Integer, nullable=False, server_default=text("0")),
+    Column("suggested_action", Text),
+    Column("status", Text, nullable=False, server_default=text("'new'")),
+    Column("expires_at", Text),
+    CheckConstraint("strength IN ('weak','moderate','strong')",
+                    name="ck_correlation_strength"),
+    CheckConstraint("actionable IN (0,1)", name="ck_correlation_actionable"),
+    CheckConstraint("status IN ('new','validated','dismissed')",
+                    name="ck_correlation_status"),
+)
+
+Index("idx_correlation_status", CORRELATION.c.status)
+
+# 19. categorization_rule
+# target_account_id / target_cost_center_id are opaque here (no foreign keys in
+# the shipped DDL, unlike most account references elsewhere). Preserved.
+CATEGORIZATION_RULE = Table(
+    "categorization_rule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("pattern", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("target_account_id", Text),
+    Column("target_cost_center_id", Text),
+    Column("confidence", Text, nullable=False, server_default=text("'0'")),
+    Column("times_applied", Integer, nullable=False, server_default=text("0")),
+    Column("times_overridden", Integer, nullable=False, server_default=text("0")),
+    Column("last_applied_at", Text),
+    Column("created_by", Text, nullable=False, server_default=text("'ai'")),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("source IN ('bank_feed','ocr_vendor','email_subject')",
+                    name="ck_categorization_rule_source"),
+    CheckConstraint("created_by IN ('user','ai')",
+                    name="ck_categorization_rule_created_by"),
+)
+
+Index("idx_categorization_source", CATEGORIZATION_RULE.c.source)
+
+# 20. business_rule
+BUSINESS_RULE = Table(
+    "business_rule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("rule_text", Text, nullable=False),
+    Column("parsed_condition", Text),
+    Column("applies_to", Text),
+    Column("action", Text, nullable=False, server_default=text("'warn'")),
+    Column("active", Integer, nullable=False, server_default=text("1")),
+    Column("times_triggered", Integer, nullable=False, server_default=text("0")),
+    Column("last_triggered_at", Text),
+    Column("created_by", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "action IN ('block','warn','notify','auto_execute','suggest')",
+        name="ck_business_rule_action"),
+    CheckConstraint("active IN (0,1)", name="ck_business_rule_active"),
+)
+
+Index("idx_business_rule_active", BUSINESS_RULE.c.active)
+
+# 21. pending_decision
+PENDING_DECISION = Table(
+    "pending_decision", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("context_id", Text),
+    Column("question", Text, nullable=False),
+    Column("options", Text),
+    Column("deadline", Text),
+    Column("impact", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("decision_made", Text),
+    Column("decided_at", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('pending','decided','expired')",
+                    name="ck_pending_decision_status"),
+)
+
+Index("idx_pending_decision_status", PENDING_DECISION.c.status)
+Index("idx_pending_decision_context", PENDING_DECISION.c.context_id)
+
+# 22. usage_event — OWNED BY FOUNDATION (erpclaw-setup/init_schema.py) as of
+# the 2026-05-31 migration audit (BUG-007). erpclaw-billing (foundation) also
+# uses it, so a foundation module can't depend on an addon-owned table. growth
+# reads/writes it as a foundation table; the definition + indexes live there.
+
+# 23. audit_conversation
+AUDIT_CONVERSATION = Table(
+    "audit_conversation", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("timestamp", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("voucher_type", Text),
+    Column("voucher_id", Text),
+    Column("user_message", Text),
+    Column("ai_interpretation", Text),
+    Column("actions_taken", Text),
+    Column("confidence_score", Text),
+    Column("user_confirmed", Integer),
+    Column("entity_changes", Text),
+    CheckConstraint("user_confirmed IN (0,1)",
+                    name="ck_audit_conversation_user_confirmed"),
+)
+
+Index("idx_audit_conv_voucher",
+      AUDIT_CONVERSATION.c.voucher_type, AUDIT_CONVERSATION.c.voucher_id)
+Index("idx_audit_conv_timestamp", AUDIT_CONVERSATION.c.timestamp)
+
+# 24. conversation_context
+CONVERSATION_CONTEXT = Table(
+    "conversation_context", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("user_id", Text),
+    Column("context_type", Text, nullable=False),
+    Column("summary", Text),
+    Column("related_entities", Text),
+    Column("state", Text),
+    Column("last_active", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("priority", Integer, nullable=False, server_default=text("0")),
+    Column("expires_at", Text),
+    CheckConstraint(
+        "context_type IN ( "
+        "'active_workflow','pending_decision','in_progress_analysis' )",
+        name="ck_conversation_context_context_type"),
+)
+
+Index("idx_conv_ctx_user", CONVERSATION_CONTEXT.c.user_id)
+Index("idx_conv_ctx_type", CONVERSATION_CONTEXT.c.context_type)
+
+# 25. relationship_score
+# Every score and lifetime_value is a Decimal and stays TEXT.
+RELATIONSHIP_SCORE = Table(
+    "relationship_score", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("party_type", Text, nullable=False),
+    Column("party_id", Text, nullable=False),
+    Column("score_date", Text, nullable=False),
+    Column("overall_score", Text, nullable=False, server_default=text("'0'")),
+    Column("payment_score", Text, nullable=False, server_default=text("'0'")),
+    Column("volume_trend", Text),
+    Column("profitability_score", Text, nullable=False, server_default=text("'0'")),
+    Column("risk_score", Text, nullable=False, server_default=text("'0'")),
+    Column("lifetime_value", Text, nullable=False, server_default=text("'0'")),
+    Column("factors", Text),
+    Column("ai_summary", Text),
+    Column("expires_at", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("party_type IN ('customer','supplier')",
+                    name="ck_relationship_score_party_type"),
+    CheckConstraint("volume_trend IN ('growing','stable','declining')",
+                    name="ck_relationship_score_volume_trend"),
+)
+
+Index("idx_rel_score_party",
+      RELATIONSHIP_SCORE.c.party_type, RELATIONSHIP_SCORE.c.party_id)
+
+# elimination_rule / elimination_entry were RETIRED 2026-08-12 (M63-C):
+# a legacy pair no growth code ever used, whose only writer was a foundation
+# action posting group eliminations straight into the live ledger. The real
+# system is the foundation consolidation layer (ADR-0010); migration 007
+# archives any rows an existing install holds and then drops both tables.
+# Removed from this metadata at the phase-2 merge, where the conversion (which
+# still declared them) met the retirement (which had removed them from the DDL).
+# SIM: planning/simlogs/m63c_SIM_2026-08-12.md
+
+
 def create_crmadv_tables(db_path=None):
+    """Create growth tables and indexes on whichever backend is configured.
+
+    Same contract as before the ADR-0034 conversion: idempotent, the returned
+    counts are what was ACTUALLY created rather than what was declared, and the
+    default "Standard Sales" pipeline is seeded afterwards.
+
+    Provisioning and seeding are deliberately separate steps on separate
+    connections. The seam's engine opens its own connection, so its DDL is not
+    inside any transaction this function could hold; provision first, then open
+    the DML connection to seed.
+    """
     db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
 
     # -- Verify ERPClaw foundation --
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
-    if missing:
-        print(f"ERROR: Foundation tables missing: {', '.join(missing)}", file=sys.stderr)
-        print("Run erpclaw-setup first: clawhub install erpclaw-setup", file=sys.stderr)
-        conn.close()
-        sys.exit(1)
+    _require_foundation(db_path)
 
-    tables_created = 0
-    indexes_created = 0
-
-    # ==================================================================
-    # CAMPAIGNS DOMAIN
-    # ==================================================================
-
-    # 1. crmadv_campaign_template
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_campaign_template (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            subject_template TEXT,
-            body_html       TEXT,
-            body_text       TEXT,
-            template_type   TEXT DEFAULT 'newsletter'
-                            CHECK(template_type IN ('newsletter','promotional','transactional','drip','welcome')),
-            is_active       INTEGER DEFAULT 1,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tmpl_company ON crmadv_campaign_template(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tmpl_type ON crmadv_campaign_template(template_type)")
-    indexes_created += 2
-
-    # 2. crmadv_recipient_list
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_recipient_list (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            description     TEXT,
-            list_type       TEXT DEFAULT 'static'
-                            CHECK(list_type IN ('static','dynamic','segment')),
-            filter_criteria TEXT,
-            recipient_count INTEGER DEFAULT 0,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_rlist_company ON crmadv_recipient_list(company_id)")
-    indexes_created += 1
-
-    # 3. crmadv_email_campaign
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_email_campaign (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            subject         TEXT,
-            template_id     TEXT REFERENCES crmadv_campaign_template(id),
-            recipient_list_id TEXT REFERENCES crmadv_recipient_list(id),
-            campaign_status TEXT DEFAULT 'draft'
-                            CHECK(campaign_status IN ('draft','scheduled','sending','sent','paused','cancelled')),
-            scheduled_date  TEXT,
-            sent_date       TEXT,
-            total_sent      INTEGER DEFAULT 0,
-            total_opened    INTEGER DEFAULT 0,
-            total_clicked   INTEGER DEFAULT 0,
-            total_bounced   INTEGER DEFAULT 0,
-            total_unsubscribed INTEGER DEFAULT 0,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_camp_company ON crmadv_email_campaign(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_camp_status ON crmadv_email_campaign(campaign_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_camp_template ON crmadv_email_campaign(template_id)")
-    indexes_created += 3
-
-    # 4. crmadv_campaign_event
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_campaign_event (
-            id              TEXT PRIMARY KEY,
-            campaign_id     TEXT NOT NULL REFERENCES crmadv_email_campaign(id),
-            event_type      TEXT NOT NULL
-                            CHECK(event_type IN ('sent','opened','clicked','bounced','unsubscribed','converted')),
-            recipient_email TEXT,
-            event_timestamp TEXT,
-            metadata        TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_evt_campaign ON crmadv_campaign_event(campaign_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_evt_type ON crmadv_campaign_event(event_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_evt_company ON crmadv_campaign_event(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TERRITORIES DOMAIN
-    # ==================================================================
-
-    # 5. crmadv_territory
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_territory (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            region          TEXT,
-            parent_territory_id TEXT REFERENCES crmadv_territory(id),
-            territory_type  TEXT DEFAULT 'geographic'
-                            CHECK(territory_type IN ('geographic','industry','named_account','product')),
-            territory_status TEXT DEFAULT 'active'
-                            CHECK(territory_status IN ('active','inactive')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_terr_company ON crmadv_territory(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_terr_parent ON crmadv_territory(parent_territory_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_terr_type ON crmadv_territory(territory_type)")
-    indexes_created += 3
-
-    # 6. crmadv_territory_assignment
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_territory_assignment (
-            id              TEXT PRIMARY KEY,
-            territory_id    TEXT NOT NULL REFERENCES crmadv_territory(id),
-            salesperson     TEXT NOT NULL,
-            start_date      TEXT,
-            end_date        TEXT,
-            assignment_status TEXT DEFAULT 'active'
-                            CHECK(assignment_status IN ('active','ended')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tassign_terr ON crmadv_territory_assignment(territory_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tassign_company ON crmadv_territory_assignment(company_id)")
-    indexes_created += 2
-
-    # 7. crmadv_territory_quota
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_territory_quota (
-            id              TEXT PRIMARY KEY,
-            territory_id    TEXT NOT NULL REFERENCES crmadv_territory(id),
-            period          TEXT NOT NULL,
-            quota_amount    TEXT NOT NULL,
-            actual_amount   TEXT DEFAULT '0',
-            attainment_pct  TEXT DEFAULT '0',
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tquota_terr ON crmadv_territory_quota(territory_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_tquota_company ON crmadv_territory_quota(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # CONTRACTS DOMAIN
-    # ==================================================================
-
-    # 8. crmadv_contract
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_contract (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            customer_name   TEXT NOT NULL,
-            contract_type   TEXT DEFAULT 'service'
-                            CHECK(contract_type IN ('service','subscription','licensing','license','maintenance','consulting')),
-            contract_status TEXT DEFAULT 'draft'
-                            CHECK(contract_status IN ('draft','active','expired','renewed','terminated')),
-            start_date      TEXT,
-            end_date        TEXT,
-            total_value     TEXT,
-            annual_value    TEXT,
-            auto_renew      INTEGER DEFAULT 0,
-            renewal_terms   TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ctr_company ON crmadv_contract(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ctr_status ON crmadv_contract(contract_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ctr_type ON crmadv_contract(contract_type)")
-    indexes_created += 3
-
-    # 9. crmadv_contract_obligation
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_contract_obligation (
-            id              TEXT PRIMARY KEY,
-            contract_id     TEXT NOT NULL REFERENCES crmadv_contract(id),
-            description     TEXT NOT NULL,
-            due_date        TEXT,
-            obligee         TEXT,
-            obligation_status TEXT DEFAULT 'pending'
-                            CHECK(obligation_status IN ('pending','in_progress','completed','overdue')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_obl_contract ON crmadv_contract_obligation(contract_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_obl_status ON crmadv_contract_obligation(obligation_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_obl_company ON crmadv_contract_obligation(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # AUTOMATION DOMAIN
-    # ==================================================================
-
-    # 10. crmadv_automation_workflow
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_automation_workflow (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            trigger_event   TEXT,
-            conditions_json TEXT DEFAULT '{}',
-            actions_json    TEXT DEFAULT '[]',
-            workflow_status TEXT DEFAULT 'inactive'
-                            CHECK(workflow_status IN ('active','inactive','paused')),
-            execution_count INTEGER DEFAULT 0,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_wf_company ON crmadv_automation_workflow(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_wf_status ON crmadv_automation_workflow(workflow_status)")
-    indexes_created += 2
-
-    # 11. crmadv_lead_score_rule
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_lead_score_rule (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            criteria_json   TEXT NOT NULL,
-            points          INTEGER NOT NULL DEFAULT 0,
-            is_active       INTEGER DEFAULT 1,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_lsr_company ON crmadv_lead_score_rule(company_id)")
-    indexes_created += 1
-
-    # 12. crmadv_nurture_sequence
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_nurture_sequence (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            description     TEXT,
-            steps_json      TEXT DEFAULT '[]',
-            total_steps     INTEGER DEFAULT 0,
-            sequence_status TEXT DEFAULT 'draft'
-                            CHECK(sequence_status IN ('draft','active','paused','completed')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ns_company ON crmadv_nurture_sequence(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_ns_status ON crmadv_nurture_sequence(sequence_status)")
-    indexes_created += 2
-
-    # 13. crmadv_drip_sequence (M8 phase B -- drip campaign sequences)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_drip_sequence (
-            id            TEXT PRIMARY KEY,
-            company_id    TEXT NOT NULL REFERENCES company(id),
-            name          TEXT NOT NULL,
-            description   TEXT,
-            is_active     INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
-            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_company ON crmadv_drip_sequence(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_active ON crmadv_drip_sequence(is_active)")
-    indexes_created += 2
-
-    # 14. crmadv_drip_sequence_step (M8 phase B -- steps within a drip sequence)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_drip_sequence_step (
-            id                TEXT PRIMARY KEY,
-            sequence_id       TEXT NOT NULL REFERENCES crmadv_drip_sequence(id),
-            step_order        INTEGER NOT NULL,
-            delay_hours       INTEGER NOT NULL DEFAULT 0,
-            email_template_id TEXT,
-            is_active         INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
-            created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_step_seq ON crmadv_drip_sequence_step(sequence_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_step_seq_order ON crmadv_drip_sequence_step(sequence_id, step_order)")
-    indexes_created += 2
-
-    # 15. crmadv_drip_enrollment (M8 phase B -- contacts enrolled in a drip sequence)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crmadv_drip_enrollment (
-            id            TEXT PRIMARY KEY,
-            sequence_id   TEXT NOT NULL REFERENCES crmadv_drip_sequence(id),
-            contact_id    TEXT NOT NULL,
-            current_step  INTEGER NOT NULL DEFAULT 0,
-            status        TEXT NOT NULL DEFAULT 'active'
-                          CHECK(status IN ('active', 'completed', 'cancelled')),
-            next_send_at  TEXT,
-            enrolled_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_seq ON crmadv_drip_enrollment(sequence_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_contact ON crmadv_drip_enrollment(contact_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crmadv_drip_enr_status_send ON crmadv_drip_enrollment(status, next_send_at)")
-    indexes_created += 3
-
-    # ==================================================================
-    # CONTACT + COMPANY MODEL (Wave 1B F1)
-    # crm_contact / crm_company / crm_contact_role. Person + Org entities
-    # that the foundation lead/opportunity/customer/crm_activity tables point
-    # at via the nullable FK columns added in foundation migration 023
-    # (ADR-0023). Growth is the sole writer of both these tables and those
-    # foundation FK columns.
-    # ==================================================================
-
-    # crm_company — Org entity (defined before crm_contact: contact FKs company)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_company (
-            id                 TEXT PRIMARY KEY,
-            name               TEXT NOT NULL,
-            domain             TEXT,
-            industry           TEXT,
-            employee_count     INTEGER,
-            annual_revenue     TEXT,
-            address_line1      TEXT,
-            address_line2      TEXT,
-            city               TEXT,
-            state              TEXT,
-            postal_code        TEXT,
-            country            TEXT,
-            linkedin_url       TEXT,
-            lifecycle          TEXT NOT NULL DEFAULT 'prospect'
-                               CHECK(lifecycle IN ('prospect','customer','partner','vendor','other')),
-            linked_customer_id TEXT REFERENCES customer(id) ON DELETE SET NULL,
-            assigned_to_user_id TEXT,
-            notes              TEXT,
-            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_company ON crm_company(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_lifecycle ON crm_company(lifecycle)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_company_linked_customer ON crm_company(linked_customer_id)")
-    # domain UNIQUE where not NULL (case-insensitive): partial unique index on lower(domain)
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_company_domain ON crm_company(company_id, lower(domain)) WHERE domain IS NOT NULL")
-    indexes_created += 4
-
-    # crm_contact — Person entity
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_contact (
-            id                 TEXT PRIMARY KEY,
-            name               TEXT NOT NULL,
-            email              TEXT,
-            phone              TEXT,
-            mobile             TEXT,
-            job_title          TEXT,
-            linkedin_url       TEXT,
-            address_line1      TEXT,
-            address_line2      TEXT,
-            city               TEXT,
-            state              TEXT,
-            postal_code        TEXT,
-            country            TEXT,
-            lifecycle          TEXT NOT NULL DEFAULT 'lead'
-                               CHECK(lifecycle IN ('lead','mql','sql','customer','other')),
-            crm_company_id     TEXT REFERENCES crm_company(id) ON DELETE SET NULL,
-            assigned_to_user_id TEXT,
-            notes              TEXT,
-            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_company ON crm_contact(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_crm_company ON crm_contact(crm_company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_lifecycle ON crm_contact(lifecycle)")
-    # email UNIQUE where not NULL, case-insensitive: partial unique index on lower(email)
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_contact_email ON crm_contact(company_id, lower(email)) WHERE email IS NOT NULL")
-    indexes_created += 4
-
-    # crm_contact_role — many-to-many: a person can work at multiple companies
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_contact_role (
-            id                 TEXT PRIMARY KEY,
-            crm_contact_id     TEXT NOT NULL REFERENCES crm_contact(id) ON DELETE CASCADE,
-            crm_company_id     TEXT NOT NULL REFERENCES crm_company(id) ON DELETE CASCADE,
-            role_title         TEXT,
-            is_primary         INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0,1)),
-            started_at         TEXT,
-            ended_at           TEXT,
-            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_role_contact ON crm_contact_role(crm_contact_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_contact_role_company ON crm_contact_role(crm_company_id)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_contact_role ON crm_contact_role(crm_contact_id, crm_company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TASKS — FIRST-CLASS ENTITY (Wave 1B F2)
-    # crm_task / crm_task_link. A richer task row than crm_activity
-    # (status / priority / due_date lifecycle); crm_task_link is the
-    # many-to-many tie to any CRM entity (lead / opportunity / customer /
-    # crm_contact / crm_company). crm_activity is NOT replaced — legacy
-    # activity_type='task' rows stay valid. Growth-owned.
-    # ==================================================================
-
-    # crm_task — first-class task entity
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_task (
-            id                  TEXT PRIMARY KEY,
-            subject             TEXT NOT NULL,
-            description         TEXT,
-            status              TEXT NOT NULL DEFAULT 'open'
-                                CHECK(status IN ('open','in_progress','done','cancelled')),
-            priority            TEXT NOT NULL DEFAULT 'medium'
-                                CHECK(priority IN ('low','medium','high','urgent')),
-            due_date            TEXT,
-            assigned_to_user_id TEXT,
-            created_by_user_id  TEXT,
-            completed_at        TEXT,
-            cancel_reason       TEXT,
-            linked_count        INTEGER NOT NULL DEFAULT 0,
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_company ON crm_task(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_status ON crm_task(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_assigned ON crm_task(assigned_to_user_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_due ON crm_task(due_date)")
-    indexes_created += 4
-
-    # crm_task_link — many-to-many: a task can attach to any CRM entity
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_task_link (
-            id                 TEXT PRIMARY KEY,
-            crm_task_id        TEXT NOT NULL REFERENCES crm_task(id) ON DELETE CASCADE,
-            linked_entity_type TEXT NOT NULL
-                               CHECK(linked_entity_type IN ('lead','opportunity','customer','crm_contact','crm_company')),
-            linked_entity_id   TEXT NOT NULL,
-            company_id         TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_link_task ON crm_task_link(crm_task_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_task_link_entity ON crm_task_link(linked_entity_type, linked_entity_id)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_task_link ON crm_task_link(crm_task_id, linked_entity_type, linked_entity_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # Wave 1B F3 — Pipeline stages (customizable). crm_pipeline /
-    # crm_pipeline_stage (growth-owned). Foundation opportunity carries a
-    # nullable opaque FK column pipeline_stage_id -> crm_pipeline_stage (ADR-0023;
-    # growth is the SOLE writer of that column). The hardcoded opportunity.stage
-    # CHECK is dropped in foundation migration 024; the legacy `stage` text column
-    # stays for backward-compat (dual-path pipeline-report). A default
-    # "Standard Sales" 7-stage pipeline is seeded below so existing opportunity
-    # rows have somewhere to point. Pipelines are catalog rows (no company_id) —
-    # shared across the install, like a chart-of-accounts template.
-    # ==================================================================
-
-    # crm_pipeline — pipeline definition
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_pipeline (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            description TEXT,
-            is_default  INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
-            is_active   INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
-            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_name ON crm_pipeline(lower(name))")
-    indexes_created += 1
-
-    # crm_pipeline_stage — ordered stage within a pipeline
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_pipeline_stage (
-            id                  TEXT PRIMARY KEY,
-            crm_pipeline_id     TEXT NOT NULL REFERENCES crm_pipeline(id) ON DELETE CASCADE,
-            stage_order         INTEGER NOT NULL,
-            name                TEXT NOT NULL,
-            is_terminal_won     INTEGER NOT NULL DEFAULT 0 CHECK(is_terminal_won IN (0,1)),
-            is_terminal_lost    INTEGER NOT NULL DEFAULT 0 CHECK(is_terminal_lost IN (0,1)),
-            default_probability TEXT NOT NULL DEFAULT '0',
-            is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_pipeline_stage_pipeline ON crm_pipeline_stage(crm_pipeline_id)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_stage_order ON crm_pipeline_stage(crm_pipeline_id, stage_order)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_pipeline_stage_name ON crm_pipeline_stage(crm_pipeline_id, lower(name))")
-    indexes_created += 3
+    result = provision(METADATA, db_path)
 
     # Seed the default "Standard Sales" 7-stage pipeline (matches migration 024's
     # DEFAULT_PIPELINE_STAGES). Idempotent: only seed when no default pipeline exists.
-    _seed_default_pipeline(conn)
-
-    # ==================================================================
-    # Wave 1B F4 — Saved views (filter-JSON DSL + persistence). crm_saved_view
-    # (growth-owned). A persisted, named view over one CRM entity: a bounded
-    # filter-JSON (operator + column whitelist, validated at SAVE-time, never
-    # interpolated into SQL) plus optional sort / group-by / column-order JSON.
-    # company_id is NOT NULL (multi-company-safe; matches every other company-scoped
-    # growth table — DECISION #2, Wave 1B plan). is_shared 0/1: a shared view is
-    # readable by every user in the company; only the owner may update or delete it.
-    # entity_type is CHECK-bounded over the 6 supported CRM entities. No FK on the
-    # opaque list-side (the view simply filters whatever list-<entity> returns).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_saved_view (
-            id                TEXT PRIMARY KEY,
-            name              TEXT NOT NULL,
-            entity_type       TEXT NOT NULL
-                              CHECK(entity_type IN ('lead','opportunity','customer',
-                                                    'crm_contact','crm_company','crm_task')),
-            owner_user_id     TEXT,
-            is_shared         INTEGER NOT NULL DEFAULT 0 CHECK(is_shared IN (0,1)),
-            filter_json       TEXT,
-            sort_json         TEXT,
-            group_by_json     TEXT,
-            column_order_json TEXT,
-            company_id        TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_company ON crm_saved_view(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_entity ON crm_saved_view(entity_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_saved_view_owner ON crm_saved_view(owner_user_id)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_saved_view_name "
-                 "ON crm_saved_view(company_id, owner_user_id, lower(name))")
-    indexes_created += 4
-
-    # ==================================================================
-    # AI ENGINE / ANALYTICS TABLES (moved from core init_schema.py)
-    # ==================================================================
-
-    # 13. anomaly
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS anomaly (
-            id              TEXT PRIMARY KEY,
-            detected_at     TEXT DEFAULT CURRENT_TIMESTAMP,
-            anomaly_type    TEXT NOT NULL CHECK(anomaly_type IN (
-                                'price_spike','volume_change','duplicate_possible',
-                                'margin_erosion','unusual_vendor','pattern_break',
-                                'consumption_spike','late_pattern','round_number',
-                                'ghost_employee','vendor_concentration',
-                                'sequence_violation','benford_deviation','budget_overrun',
-                                'inventory_shrinkage','payment_pattern_shift',
-                                'asset_book_value_drift','dimension_tag_drift',
-                                'reservation_over_available','subcontract_receipt_mismatch',
-                                'rate_plan_mismatch'
-                            )),
-            severity        TEXT NOT NULL DEFAULT 'info'
-                            CHECK(severity IN ('info','warning','critical')),
-            entity_type     TEXT,
-            entity_id       TEXT,
-            description     TEXT NOT NULL,
-            evidence        TEXT,
-            baseline        TEXT,
-            actual          TEXT,
-            deviation_pct   TEXT,
-            status          TEXT NOT NULL DEFAULT 'new'
-                            CHECK(status IN ('new','acknowledged','investigated','dismissed','resolved')),
-            resolution_notes TEXT,
-            assigned_to     TEXT,
-            expires_at      TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_status ON anomaly(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_type ON anomaly(anomaly_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_severity ON anomaly(severity)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_entity ON anomaly(entity_type, entity_id)")
-    indexes_created += 4
-
-    # 14. scenario
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS scenario (
-            id              TEXT PRIMARY KEY,
-            question        TEXT NOT NULL,
-            scenario_type   TEXT NOT NULL CHECK(scenario_type IN (
-                                'price_change','supplier_loss','demand_shift','cost_change',
-                                'hiring_impact','expansion','contraction'
-                            )),
-            assumptions     TEXT,
-            baseline        TEXT,
-            projected       TEXT,
-            impact_summary  TEXT,
-            confidence      TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            expires_at      TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_scenario_type ON scenario(scenario_type)")
-    indexes_created += 1
-
-    # 15. correlation
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS correlation (
-            id              TEXT PRIMARY KEY,
-            discovered_at   TEXT DEFAULT CURRENT_TIMESTAMP,
-            module_a        TEXT NOT NULL,
-            module_b        TEXT NOT NULL,
-            description     TEXT NOT NULL,
-            evidence        TEXT,
-            strength        TEXT NOT NULL DEFAULT 'moderate'
-                            CHECK(strength IN ('weak','moderate','strong')),
-            statistical_confidence TEXT,
-            actionable      INTEGER NOT NULL DEFAULT 0 CHECK(actionable IN (0,1)),
-            suggested_action TEXT,
-            status          TEXT NOT NULL DEFAULT 'new'
-                            CHECK(status IN ('new','validated','dismissed')),
-            expires_at      TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_correlation_status ON correlation(status)")
-    indexes_created += 1
-
-    # 16. categorization_rule
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS categorization_rule (
-            id              TEXT PRIMARY KEY,
-            pattern         TEXT NOT NULL,
-            source          TEXT NOT NULL CHECK(source IN ('bank_feed','ocr_vendor','email_subject')),
-            target_account_id TEXT,
-            target_cost_center_id TEXT,
-            confidence      TEXT NOT NULL DEFAULT '0',
-            times_applied   INTEGER NOT NULL DEFAULT 0,
-            times_overridden INTEGER NOT NULL DEFAULT 0,
-            last_applied_at TEXT,
-            created_by      TEXT NOT NULL DEFAULT 'ai'
-                            CHECK(created_by IN ('user','ai')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_categorization_source ON categorization_rule(source)")
-    indexes_created += 1
-
-    # 17. business_rule
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS business_rule (
-            id              TEXT PRIMARY KEY,
-            rule_text       TEXT NOT NULL,
-            parsed_condition TEXT,
-            applies_to      TEXT,
-            action          TEXT NOT NULL DEFAULT 'warn'
-                            CHECK(action IN ('block','warn','notify','auto_execute','suggest')),
-            active          INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
-            times_triggered INTEGER NOT NULL DEFAULT 0,
-            last_triggered_at TEXT,
-            created_by      TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_business_rule_active ON business_rule(active)")
-    indexes_created += 1
-
-    # 18. pending_decision
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS pending_decision (
-            id              TEXT PRIMARY KEY,
-            context_id      TEXT,
-            question        TEXT NOT NULL,
-            options         TEXT,
-            deadline        TEXT,
-            impact          TEXT,
-            status          TEXT NOT NULL DEFAULT 'pending'
-                            CHECK(status IN ('pending','decided','expired')),
-            decision_made   TEXT,
-            decided_at      TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_decision_status ON pending_decision(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_decision_context ON pending_decision(context_id)")
-    indexes_created += 2
-
-    # 19. usage_event — OWNED BY FOUNDATION (erpclaw-setup/init_schema.py) as of
-    # the 2026-05-31 migration audit (BUG-007). erpclaw-billing (foundation) also
-    # uses it, so a foundation module can't depend on an addon-owned table. growth
-    # reads/writes it as a foundation table; the definition + indexes live there.
-
-    # 20. audit_conversation
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_conversation (
-            id              TEXT PRIMARY KEY,
-            timestamp       TEXT DEFAULT CURRENT_TIMESTAMP,
-            voucher_type    TEXT,
-            voucher_id      TEXT,
-            user_message    TEXT,
-            ai_interpretation TEXT,
-            actions_taken   TEXT,
-            confidence_score TEXT,
-            user_confirmed  INTEGER CHECK(user_confirmed IN (0,1)),
-            entity_changes  TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_conv_voucher ON audit_conversation(voucher_type, voucher_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_conv_timestamp ON audit_conversation(timestamp)")
-    indexes_created += 2
-
-    # 21. conversation_context
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS conversation_context (
-            id              TEXT PRIMARY KEY,
-            user_id         TEXT,
-            context_type    TEXT NOT NULL CHECK(context_type IN (
-                                'active_workflow','pending_decision','in_progress_analysis'
-                            )),
-            summary         TEXT,
-            related_entities TEXT,
-            state           TEXT,
-            last_active     TEXT DEFAULT CURRENT_TIMESTAMP,
-            priority        INTEGER NOT NULL DEFAULT 0,
-            expires_at      TEXT
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_ctx_user ON conversation_context(user_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_ctx_type ON conversation_context(context_type)")
-    indexes_created += 2
-
-    # 22. relationship_score
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS relationship_score (
-            id              TEXT PRIMARY KEY,
-            party_type      TEXT NOT NULL CHECK(party_type IN ('customer','supplier')),
-            party_id        TEXT NOT NULL,
-            score_date      TEXT NOT NULL,
-            overall_score   TEXT NOT NULL DEFAULT '0',
-            payment_score   TEXT NOT NULL DEFAULT '0',
-            volume_trend    TEXT CHECK(volume_trend IN ('growing','stable','declining')),
-            profitability_score TEXT NOT NULL DEFAULT '0',
-            risk_score      TEXT NOT NULL DEFAULT '0',
-            lifetime_value  TEXT NOT NULL DEFAULT '0',
-            factors         TEXT,
-            ai_summary      TEXT,
-            expires_at      TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_score_party ON relationship_score(party_type, party_id)")
-    indexes_created += 1
-
-    # 23. elimination_rule (intercompany elimination, moved from GL)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS elimination_rule (
-            id                  TEXT PRIMARY KEY,
-            name                TEXT NOT NULL,
-            source_company_id   TEXT NOT NULL,
-            target_company_id   TEXT NOT NULL,
-            source_account_id   TEXT NOT NULL,
-            target_account_id   TEXT NOT NULL,
-            status              TEXT NOT NULL DEFAULT 'active'
-                                CHECK(status IN ('active','disabled')),
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_rule_source ON elimination_rule(source_company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_rule_target ON elimination_rule(target_company_id)")
-    indexes_created += 2
-
-    # 24. elimination_entry (intercompany elimination, moved from GL)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS elimination_entry (
-            id                      TEXT PRIMARY KEY,
-            elimination_rule_id     TEXT NOT NULL REFERENCES elimination_rule(id) ON DELETE RESTRICT,
-            fiscal_year_id          TEXT,
-            posting_date            TEXT NOT NULL,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            source_gl_entry_id      TEXT,
-            target_gl_entry_id      TEXT,
-            status                  TEXT NOT NULL DEFAULT 'posted'
-                                    CHECK(status IN ('posted','reversed')),
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_entry_rule ON elimination_entry(elimination_rule_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_elim_entry_fy ON elimination_entry(fiscal_year_id)")
-    indexes_created += 2
-
-    conn.commit()
-    conn.close()
+    conn = get_connection(db_path)
+    try:
+        _seed_default_pipeline(conn)
+        conn.commit()
+    finally:
+        conn.close()
 
     return {
         "database": db_path,
-        "tables": tables_created,
-        "indexes": indexes_created,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
     }
 
 

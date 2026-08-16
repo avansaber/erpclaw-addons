@@ -34,9 +34,18 @@ INIT_SCHEMA_PATH = os.path.join(SETUP_DIR, "init_schema.py")
 STRIPE_INIT_PATH = os.path.join(MODULE_DIR, "init_db.py")
 
 # Make erpclaw_lib importable
-ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(SETUP_DIR, "lib")
+ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+               else os.path.join(os.path.expanduser(
+                   os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 if ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, ERPCLAW_LIB)
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, ERPCLAW_LIB)
 
 # Make scripts dir importable for domain modules
 if SCRIPTS_DIR not in sys.path:

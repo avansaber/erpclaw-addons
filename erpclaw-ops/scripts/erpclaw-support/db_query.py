@@ -18,7 +18,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # Add shared lib to path
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
@@ -28,9 +30,9 @@ try:
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL,
-        DecimalSum, DecimalAbs, insert_row, update_row,
+        DecimalSum, DecimalAbs, insert_row, update_row, now as sql_now,
     )
-    from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
+    from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
     import json as _json
@@ -345,7 +347,7 @@ def update_issue(conn, args):
     if not data:
         err("No fields to update. Provide at least one optional flag.")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     values.append(args.issue_id)
 
     upd_sql = update_row("issue", data, where={"id": P()})
@@ -536,7 +538,7 @@ def add_issue_comment(conn, args):
         upd_sql = update_row("issue", {
             "first_response_at": P(),
             "sla_breached": P(),
-            "updated_at": LiteralValue("datetime('now')"),
+            "updated_at": sql_now(),
         }, where={"id": P()})
         conn.execute(upd_sql, (now_str, sla_breached, args.issue_id))
 
@@ -587,7 +589,7 @@ def resolve_issue(conn, args):
         "resolved_at": P(),
         "resolution_notes": P(),
         "sla_breached": P(),
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": sql_now(),
     }, where={"id": P()})
     conn.execute(upd_sql, ("resolved", now_str, args.resolution_notes,
                            sla_breached, args.issue_id))
@@ -633,7 +635,7 @@ def reopen_issue(conn, args):
         "status": P(),
         "resolved_at": P(),
         "resolution_notes": P(),
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": sql_now(),
     }, where={"id": P()})
     conn.execute(upd_sql, ("open", None, None, args.issue_id))
 
@@ -874,7 +876,7 @@ def update_warranty_claim(conn, args):
     if not data:
         err("No fields to update. Provide at least one optional flag.")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     values.append(args.warranty_claim_id)
     upd_sql = update_row("warranty_claim", data, where={"id": P()})
     conn.execute(upd_sql, values)
@@ -1113,7 +1115,7 @@ def record_maintenance_visit(conn, args):
                 "last_completed_date": P(),
                 "next_due_date": P(),
                 "status": P(),
-                "updated_at": LiteralValue("datetime('now')"),
+                "updated_at": sql_now(),
             }, where={"id": P()})
             conn.execute(upd_sql, (args.visit_date, new_next_due, "expired",
                                    args.schedule_id))
@@ -1121,7 +1123,7 @@ def record_maintenance_visit(conn, args):
             upd_sql = update_row("maintenance_schedule", {
                 "last_completed_date": P(),
                 "next_due_date": P(),
-                "updated_at": LiteralValue("datetime('now')"),
+                "updated_at": sql_now(),
             }, where={"id": P()})
             conn.execute(upd_sql, (args.visit_date, new_next_due,
                                    args.schedule_id))

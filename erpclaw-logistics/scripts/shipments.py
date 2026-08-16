@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Field, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
     from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("logistics_shipment", "SHIP-")
@@ -163,7 +165,7 @@ def update_shipment(conn, args):
     if not data:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("logistics_shipment", data, {"id": shipment_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "logistics-update-shipment", "logistics_shipment", shipment_id,
@@ -256,7 +258,7 @@ def update_shipment_status(conn, args):
 
     old_status = data["shipment_status"]
 
-    upd_data = {"shipment_status": new_status, "updated_at": LiteralValue("datetime('now')")}
+    upd_data = {"shipment_status": new_status, "updated_at": sql_now()}
 
     # Auto-set actual_delivery when delivered
     if new_status == "delivered" and not data.get("actual_delivery"):
@@ -270,7 +272,7 @@ def update_shipment_status(conn, args):
         t_carrier = Table("logistics_carrier")
         sql = (Q.update(t_carrier)
                .set(t_carrier.total_shipments, LiteralValue("total_shipments + 1"))
-               .set(t_carrier.updated_at, LiteralValue("datetime('now')"))
+               .set(t_carrier.updated_at, sql_now())
                .where(t_carrier.id == P())
                .get_sql())
         conn.execute(sql, (data["carrier_id"],))
@@ -375,7 +377,7 @@ def add_proof_of_delivery(conn, args):
            .set(t_ship.pod_timestamp, P())
            .set(t_ship.shipment_status, "delivered")
            .set(t_ship.actual_delivery, LiteralValue("COALESCE(actual_delivery, ?)"))
-           .set(t_ship.updated_at, LiteralValue("datetime('now')"))
+           .set(t_ship.updated_at, sql_now())
            .where(t_ship.id == P())
            .get_sql())
     conn.execute(sql, (pod_signature, pod_timestamp, pod_timestamp, shipment_id))
@@ -385,7 +387,7 @@ def add_proof_of_delivery(conn, args):
         t_carrier = Table("logistics_carrier")
         sql = (Q.update(t_carrier)
                .set(t_carrier.total_shipments, LiteralValue("total_shipments + 1"))
-               .set(t_carrier.updated_at, LiteralValue("datetime('now')"))
+               .set(t_carrier.updated_at, sql_now())
                .where(t_carrier.id == P())
                .get_sql())
         conn.execute(sql, (data["carrier_id"],))

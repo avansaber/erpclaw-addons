@@ -94,8 +94,7 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 ## Cross-Skill Integration
 - **erpclaw-selling:** submit-transaction creates sales_invoice
 - **erpclaw-payments:** submit-transaction creates payment_entry
-- **erpclaw-inventory:** lookup-item reads item/item_barcode; submit updates stock
-- **item_barcode table:** Fast barcode scanning
+- **erpclaw-inventory:** lookup-item reads item; submit updates stock
 
 ## Technical Details (Tier 3)
 **Tables:** pos_profile, pos_session, pos_transaction, pos_transaction_item, pos_payment. **Data:** Money=TEXT(Decimal), IDs=TEXT(UUID4).

@@ -15,7 +15,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
@@ -630,33 +632,6 @@ def handle_disburse_loan(conn, args):
         now, now,
     ))
 
-    # Post GL entries: Debit Loan Receivable, Credit Bank/Disbursement
-    gl_entries = [
-        {
-            "account_id": loan_account_id,
-            "debit": loan_amount_str,
-            "credit": "0",
-        },
-        {
-            "account_id": disbursement_account_id,
-            "debit": "0",
-            "credit": loan_amount_str,
-        },
-    ]
-
-    try:
-        insert_gl_entries(
-            conn,
-            entries=gl_entries,
-            voucher_type="Loan Disbursement",
-            voucher_id=loan_id,
-            posting_date=disbursement_date,
-            company_id=company_id,
-            remarks=f"Loan disbursement {naming}",
-        )
-    except Exception:
-        pass  # GL posting is best-effort during testing
-
     # Auto-generate repayment schedule
     schedule = _generate_schedule(
         loan_amount_dec, interest_rate_dec, repayment_periods,
@@ -677,6 +652,56 @@ def handle_disburse_loan(conn, args):
             "pending",
             None,  # payment_date
         ))
+
+    # Post GL entries: DR Loan Receivable / CR Bank (disbursement account).
+    #
+    # Posted LAST, and never swallowed. Everything above — the loan row, the
+    # schedule rows — is uncommitted at this point, so a GL failure rolls the
+    # whole disbursement back rather than leaving a loan on the books that the
+    # ledger has never heard of (M62 / F21-FINDING-4: this call used to sit in
+    # `except Exception: pass`, and the action returned ok with an empty
+    # gl_entry table).
+    #
+    # voucher_type is the registered 'journal_entry' catch-all; loan vouchers
+    # are not first-class types in foundation's voucher_type_registry, so the
+    # semantic identity rides on voucher_id (the loan) + remarks. Same choice,
+    # for the same reason, as the write-off path in repayments.py.
+    #
+    # The receivable leg carries the party because GL validation step 5 demands
+    # it for receivable accounts. No cost_center_id: both legs are balance-sheet
+    # (receivable + bank), so step 6 does not apply and adding one would enroll
+    # the posting in the step-12 budget check for no reason.
+    gl_entries = [
+        {
+            "account_id": loan_account_id,
+            "debit": loan_amount_str,
+            "credit": "0",
+            "party_type": app["applicant_type"],
+            "party_id": app["applicant_id"],
+        },
+        {
+            "account_id": disbursement_account_id,
+            "debit": "0",
+            "credit": loan_amount_str,
+        },
+    ]
+
+    try:
+        insert_gl_entries(
+            conn,
+            entries=gl_entries,
+            voucher_type="journal_entry",
+            voucher_id=loan_id,
+            posting_date=disbursement_date,
+            company_id=company_id,
+            remarks=f"Loan disbursement {naming}",
+        )
+    except Exception as e:
+        # Single-transaction rule: any failure = full rollback. err() raises
+        # SystemExit, which the router's `except Exception` does not catch, so
+        # the rollback happens here rather than relying on process exit.
+        conn.rollback()
+        err(f"GL posting failed, disbursement rolled back: {e}")
 
     audit(conn, "erpclaw-loans", "loan-disburse-loan", "loan", loan_id,
           new_values={

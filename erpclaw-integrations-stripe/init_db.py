@@ -7,10 +7,30 @@ invoices, Connect platform fees, and automated GL posting rules.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. Every amount here — charge, refund, dispute, payout, fee,
+subscription plan, reconciliation total — stays TEXT (Decimal strings) on every
+backend, which is ADR-0034 dec. 1 and matters more in this module than in any
+other addon: the invariant tier compares those strings exactly.
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    UniqueConstraint, provision, reference_table, text,
+)
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "ERPClaw Integrations — Stripe"
@@ -20,569 +40,643 @@ REQUIRED_FOUNDATION = [
     "payment_entry", "gl_entry", "naming_series", "audit_log",
 ]
 
+METADATA = MetaData()
 
-def create_stripe_tables(db_path=None):
-    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path)
+# Foundation tables this module points at but does not own — declared so the
+# foreign keys resolve, never created here.
+reference_table("company", METADATA)
+reference_table("account", METADATA)
+reference_table("customer", METADATA)
 
-    # Add erpclaw_lib to path for setup_pragmas
-    lib_path = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
-    if lib_path not in sys.path:
-        sys.path.insert(0, lib_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
+# ---------------------------------------------------------------------------
+# 1. stripe_account
+# Central configuration for each Stripe account (test or live).
+# Stores encrypted API key, webhook secret, and GL account mappings.
+# ---------------------------------------------------------------------------
+STRIPE_ACCOUNT = Table(
+    "stripe_account", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("account_name", Text, nullable=False),
+    Column("stripe_account_id", Text),
+    Column("restricted_key_enc", Text, nullable=False),
+    Column("webhook_secret_enc", Text),
+    Column("mode", Text, nullable=False, server_default=text("'test'")),
+    Column("is_connect_platform", Integer, nullable=False,
+           server_default=text("0")),
+    Column("default_currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("payout_schedule", Text),
+    Column("stripe_clearing_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("stripe_fees_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("stripe_payout_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("dispute_expense_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("unearned_revenue_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("platform_revenue_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("last_sync_at", Text),
+    Column("sync_from_date", Text),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("mode IN ('test','live')", name="ck_stripe_account_mode"),
+    CheckConstraint("is_connect_platform IN (0,1)",
+                    name="ck_stripe_account_is_connect_platform"),
+    CheckConstraint("status IN ('active','paused','error','disabled')",
+                    name="ck_stripe_account_status"),
+)
 
-    # -- Verify ERPClaw foundation --
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
+Index("idx_stripe_acct_company", STRIPE_ACCOUNT.c.company_id)
+Index("idx_stripe_acct_status", STRIPE_ACCOUNT.c.status)
+Index("idx_stripe_acct_mode", STRIPE_ACCOUNT.c.mode)
+
+# ---------------------------------------------------------------------------
+# 2. stripe_sync_job
+# Tracks each sync operation (full, incremental, webhook, historical).
+# ---------------------------------------------------------------------------
+STRIPE_SYNC_JOB = Table(
+    "stripe_sync_job", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("sync_type", Text, nullable=False),
+    Column("object_type", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("records_fetched", Integer, nullable=False, server_default=text("0")),
+    Column("records_processed", Integer, nullable=False, server_default=text("0")),
+    Column("records_failed", Integer, nullable=False, server_default=text("0")),
+    Column("cursor_position", Text),
+    Column("sync_from", Text),
+    Column("sync_to", Text),
+    Column("error_message", Text),
+    Column("started_at", Text),
+    Column("completed_at", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "sync_type IN ('full','incremental','webhook','historical_import')",
+        name="ck_stripe_sync_job_sync_type"),
+    CheckConstraint(
+        "object_type IN ('balance_transaction','charge','refund','dispute',"
+        "'payout','customer','invoice','subscription','transfer',"
+        "'credit_note','all')",
+        name="ck_stripe_sync_job_object_type"),
+    CheckConstraint(
+        "status IN ('pending','running','completed','failed','cancelled')",
+        name="ck_stripe_sync_job_status"),
+)
+
+Index("idx_stripe_sync_acct", STRIPE_SYNC_JOB.c.stripe_account_id)
+Index("idx_stripe_sync_status", STRIPE_SYNC_JOB.c.status)
+Index("idx_stripe_sync_company", STRIPE_SYNC_JOB.c.company_id)
+Index("idx_stripe_sync_type", STRIPE_SYNC_JOB.c.sync_type)
+
+# ---------------------------------------------------------------------------
+# 3. stripe_balance_transaction
+# Mirror of Stripe Balance Transaction objects. Core reconciliation entity.
+# Amounts stored in DOLLARS (Decimal TEXT), not cents.
+# ---------------------------------------------------------------------------
+STRIPE_BALANCE_TRANSACTION = Table(
+    "stripe_balance_transaction", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("type", Text),
+    Column("reporting_category", Text),
+    Column("source_id", Text),
+    Column("source_type", Text),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("fee", Text, nullable=False, server_default=text("'0'")),
+    Column("net", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("description", Text),
+    Column("available_on", Text),
+    Column("created_stripe", Text),
+    Column("payout_id", Text),
+    # Nullable status here, NOT NULL on most sibling tables — the original's
+    # asymmetry, transcribed rather than tidied.
+    Column("status", Text, server_default=text("'available'")),
+    Column("reconciled", Integer, nullable=False, server_default=text("0")),
+    Column("reconciled_at", Text),
+    Column("gl_voucher_id", Text),
+    Column("gl_voucher_type", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('available','pending')",
+                    name="ck_stripe_balance_transaction_status"),
+    CheckConstraint("reconciled IN (0,1)",
+                    name="ck_stripe_balance_transaction_reconciled"),
+)
+
+Index("idx_stripe_bt_acct", STRIPE_BALANCE_TRANSACTION.c.stripe_account_id)
+Index("idx_stripe_bt_stripe", STRIPE_BALANCE_TRANSACTION.c.stripe_id)
+Index("idx_stripe_bt_type", STRIPE_BALANCE_TRANSACTION.c.type)
+Index("idx_stripe_bt_status", STRIPE_BALANCE_TRANSACTION.c.status)
+Index("idx_stripe_bt_reconciled", STRIPE_BALANCE_TRANSACTION.c.reconciled)
+Index("idx_stripe_bt_payout", STRIPE_BALANCE_TRANSACTION.c.payout_id)
+Index("idx_stripe_bt_company", STRIPE_BALANCE_TRANSACTION.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 4. stripe_charge
+# Mirror of Stripe Charge objects, linked to erpclaw customer/invoice/payment.
+# ---------------------------------------------------------------------------
+STRIPE_CHARGE = Table(
+    "stripe_charge", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("customer_stripe_id", Text),
+    Column("description", Text),
+    Column("payment_method_type", Text),
+    Column("payment_intent_id", Text),
+    Column("invoice_stripe_id", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("amount_refunded", Text, nullable=False, server_default=text("'0'")),
+    Column("disputed", Integer, nullable=False, server_default=text("0")),
+    Column("failure_code", Text),
+    # The erpclaw_* links carry no foreign key here, unlike stripe_customer_map's
+    # erpclaw_customer_id. Original asymmetry, preserved.
+    Column("erpclaw_customer_id", Text),
+    Column("erpclaw_invoice_id", Text),
+    Column("erpclaw_payment_entry_id", Text),
+    Column("metadata", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "status IN ('succeeded','pending','failed','refunded','disputed')",
+        name="ck_stripe_charge_status"),
+    CheckConstraint("disputed IN (0,1)", name="ck_stripe_charge_disputed"),
+)
+
+Index("idx_stripe_chg_acct", STRIPE_CHARGE.c.stripe_account_id)
+Index("idx_stripe_chg_stripe", STRIPE_CHARGE.c.stripe_id)
+Index("idx_stripe_chg_status", STRIPE_CHARGE.c.status)
+Index("idx_stripe_chg_customer", STRIPE_CHARGE.c.customer_stripe_id)
+Index("idx_stripe_chg_company", STRIPE_CHARGE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 5. stripe_refund
+# Mirror of Stripe Refund objects.
+# ---------------------------------------------------------------------------
+STRIPE_REFUND = Table(
+    "stripe_refund", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("charge_id", Text,
+           ForeignKey("stripe_charge.id", ondelete="RESTRICT")),
+    Column("charge_stripe_id", Text),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("reason", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("erpclaw_credit_note_id", Text),
+    Column("erpclaw_payment_entry_id", Text),
+    Column("metadata", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('pending','succeeded','failed','canceled')",
+                    name="ck_stripe_refund_status"),
+)
+
+Index("idx_stripe_ref_acct", STRIPE_REFUND.c.stripe_account_id)
+Index("idx_stripe_ref_stripe", STRIPE_REFUND.c.stripe_id)
+Index("idx_stripe_ref_charge", STRIPE_REFUND.c.charge_id)
+Index("idx_stripe_ref_company", STRIPE_REFUND.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 6. stripe_dispute
+# Mirror of Stripe Dispute objects (chargebacks).
+# ---------------------------------------------------------------------------
+STRIPE_DISPUTE = Table(
+    "stripe_dispute", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("charge_id", Text,
+           ForeignKey("stripe_charge.id", ondelete="RESTRICT")),
+    Column("charge_stripe_id", Text),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("reason", Text),
+    Column("status", Text, nullable=False,
+           server_default=text("'needs_response'")),
+    Column("evidence_due_by", Text),
+    Column("erpclaw_journal_entry_id", Text),
+    Column("resolution_amount", Text),
+    Column("metadata", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "status IN ('warning_needs_response','warning_under_review',"
+        "'needs_response','under_review','won','lost')",
+        name="ck_stripe_dispute_status"),
+)
+
+Index("idx_stripe_dsp_acct", STRIPE_DISPUTE.c.stripe_account_id)
+Index("idx_stripe_dsp_stripe", STRIPE_DISPUTE.c.stripe_id)
+Index("idx_stripe_dsp_charge", STRIPE_DISPUTE.c.charge_id)
+Index("idx_stripe_dsp_status", STRIPE_DISPUTE.c.status)
+Index("idx_stripe_dsp_company", STRIPE_DISPUTE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 7. stripe_payout
+# Mirror of Stripe Payout objects (bank transfers from Stripe balance).
+# ---------------------------------------------------------------------------
+STRIPE_PAYOUT = Table(
+    "stripe_payout", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("arrival_date", Text),
+    Column("method", Text),
+    Column("description", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("failure_code", Text),
+    Column("destination_bank_last4", Text),
+    Column("transaction_count", Integer, nullable=False, server_default=text("0")),
+    Column("reconciled", Integer, nullable=False, server_default=text("0")),
+    Column("erpclaw_payment_entry_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "status IN ('paid','pending','in_transit','canceled','failed')",
+        name="ck_stripe_payout_status"),
+    CheckConstraint("reconciled IN (0,1)", name="ck_stripe_payout_reconciled"),
+)
+
+Index("idx_stripe_pay_acct", STRIPE_PAYOUT.c.stripe_account_id)
+Index("idx_stripe_pay_stripe", STRIPE_PAYOUT.c.stripe_id)
+Index("idx_stripe_pay_status", STRIPE_PAYOUT.c.status)
+Index("idx_stripe_pay_company", STRIPE_PAYOUT.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 8. stripe_invoice
+# Mirror of Stripe Invoice objects (for recurring billing / subscriptions).
+# ---------------------------------------------------------------------------
+STRIPE_INVOICE = Table(
+    "stripe_invoice", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("customer_stripe_id", Text),
+    Column("number", Text),
+    Column("amount_due", Text, nullable=False, server_default=text("'0'")),
+    Column("amount_paid", Text, nullable=False, server_default=text("'0'")),
+    Column("amount_remaining", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    # Nullable, unlike the NOT NULL status on charge / refund / payout.
+    Column("status", Text, server_default=text("'draft'")),
+    Column("subscription_stripe_id", Text),
+    Column("period_start", Text),
+    Column("period_end", Text),
+    Column("erpclaw_invoice_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "status IN ('draft','open','paid','void','uncollectible')",
+        name="ck_stripe_invoice_status"),
+)
+
+Index("idx_stripe_inv_acct", STRIPE_INVOICE.c.stripe_account_id)
+Index("idx_stripe_inv_stripe", STRIPE_INVOICE.c.stripe_id)
+Index("idx_stripe_inv_status", STRIPE_INVOICE.c.status)
+Index("idx_stripe_inv_customer", STRIPE_INVOICE.c.customer_stripe_id)
+Index("idx_stripe_inv_company", STRIPE_INVOICE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 9. stripe_subscription
+# Mirror of Stripe Subscription objects.
+# ---------------------------------------------------------------------------
+STRIPE_SUBSCRIPTION = Table(
+    "stripe_subscription", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("customer_stripe_id", Text),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("current_period_start", Text),
+    Column("current_period_end", Text),
+    Column("cancel_at_period_end", Integer, nullable=False,
+           server_default=text("0")),
+    Column("canceled_at", Text),
+    Column("plan_interval", Text),
+    Column("plan_amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("erpclaw_revenue_contract_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "status IN ('active','past_due','canceled','unpaid','trialing',"
+        "'incomplete')",
+        name="ck_stripe_subscription_status"),
+    CheckConstraint("cancel_at_period_end IN (0,1)",
+                    name="ck_stripe_subscription_cancel_at_period_end"),
+)
+
+Index("idx_stripe_sub_acct", STRIPE_SUBSCRIPTION.c.stripe_account_id)
+Index("idx_stripe_sub_stripe", STRIPE_SUBSCRIPTION.c.stripe_id)
+Index("idx_stripe_sub_status", STRIPE_SUBSCRIPTION.c.status)
+Index("idx_stripe_sub_customer", STRIPE_SUBSCRIPTION.c.customer_stripe_id)
+Index("idx_stripe_sub_company", STRIPE_SUBSCRIPTION.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 10. stripe_customer_map
+# Maps Stripe customer IDs to erpclaw customer IDs.
+# ---------------------------------------------------------------------------
+STRIPE_CUSTOMER_MAP = Table(
+    "stripe_customer_map", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("stripe_customer_id", Text, nullable=False),
+    Column("erpclaw_customer_id", Text,
+           ForeignKey("customer.id", ondelete="RESTRICT")),
+    Column("stripe_email", Text),
+    Column("stripe_name", Text),
+    Column("match_method", Text, server_default=text("'manual'")),
+    # A confidence score, but TEXT like every other decimal in the module.
+    Column("match_confidence", Text, nullable=False, server_default=text("'1.0'")),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("match_method IN ('manual','email','name','metadata')",
+                    name="ck_stripe_customer_map_match_method"),
+    UniqueConstraint("stripe_account_id", "stripe_customer_id"),
+)
+
+Index("idx_stripe_cmap_acct", STRIPE_CUSTOMER_MAP.c.stripe_account_id)
+Index("idx_stripe_cmap_erpclaw", STRIPE_CUSTOMER_MAP.c.erpclaw_customer_id)
+Index("idx_stripe_cmap_company", STRIPE_CUSTOMER_MAP.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 11. stripe_deep_webhook_event
+# Incoming Stripe webhook events with idempotent processing.
+# ---------------------------------------------------------------------------
+STRIPE_DEEP_WEBHOOK_EVENT = Table(
+    "stripe_deep_webhook_event", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("stripe_event_id", Text, nullable=False, unique=True),
+    Column("event_type", Text, nullable=False),
+    Column("api_version", Text),
+    Column("object_id", Text),
+    Column("object_type", Text),
+    Column("payload", Text),
+    Column("processed", Integer, nullable=False, server_default=text("0")),
+    Column("process_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("max_attempts", Integer, nullable=False, server_default=text("3")),
+    Column("processed_at", Text),
+    Column("error_message", Text),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("processed IN (0,1)",
+                    name="ck_stripe_deep_webhook_event_processed"),
+)
+
+Index("idx_stripe_dwh_acct", STRIPE_DEEP_WEBHOOK_EVENT.c.stripe_account_id)
+Index("idx_stripe_dwh_event", STRIPE_DEEP_WEBHOOK_EVENT.c.stripe_event_id)
+Index("idx_stripe_dwh_type", STRIPE_DEEP_WEBHOOK_EVENT.c.event_type)
+Index("idx_stripe_dwh_processed", STRIPE_DEEP_WEBHOOK_EVENT.c.processed)
+
+# ---------------------------------------------------------------------------
+# 12. stripe_credit_note
+# Mirror of Stripe Credit Note objects.
+# ---------------------------------------------------------------------------
+STRIPE_CREDIT_NOTE = Table(
+    "stripe_credit_note", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("invoice_stripe_id", Text),
+    Column("customer_stripe_id", Text),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("reason", Text),
+    # Defaulted but unconstrained: the only status column in the module with no
+    # CHECK behind it. Transcribed as shipped.
+    Column("status", Text, server_default=text("'issued'")),
+    Column("erpclaw_credit_note_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_stripe_cn_acct", STRIPE_CREDIT_NOTE.c.stripe_account_id)
+Index("idx_stripe_cn_stripe", STRIPE_CREDIT_NOTE.c.stripe_id)
+Index("idx_stripe_cn_company", STRIPE_CREDIT_NOTE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 13. stripe_application_fee
+# Connect platform application fees collected.
+# ---------------------------------------------------------------------------
+STRIPE_APPLICATION_FEE = Table(
+    "stripe_application_fee", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("charge_stripe_id", Text),
+    Column("account_stripe_id", Text),
+    Column("refunded_amount", Text, nullable=False, server_default=text("'0'")),
+    Column("erpclaw_journal_entry_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_stripe_af_acct", STRIPE_APPLICATION_FEE.c.stripe_account_id)
+Index("idx_stripe_af_stripe", STRIPE_APPLICATION_FEE.c.stripe_id)
+Index("idx_stripe_af_company", STRIPE_APPLICATION_FEE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 14. stripe_transfer
+# Connect platform transfers between accounts.
+# ---------------------------------------------------------------------------
+STRIPE_TRANSFER = Table(
+    "stripe_transfer", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_id", Text, nullable=False, unique=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("destination_account", Text),
+    Column("description", Text),
+    Column("reversed", Integer, nullable=False, server_default=text("0")),
+    Column("erpclaw_journal_entry_id", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_stripe", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("reversed IN (0,1)", name="ck_stripe_transfer_reversed"),
+)
+
+Index("idx_stripe_xfr_acct", STRIPE_TRANSFER.c.stripe_account_id)
+Index("idx_stripe_xfr_stripe", STRIPE_TRANSFER.c.stripe_id)
+Index("idx_stripe_xfr_company", STRIPE_TRANSFER.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 15. stripe_gl_rule
+# Configurable rules for mapping Stripe transaction types to GL accounts.
+# ---------------------------------------------------------------------------
+STRIPE_GL_RULE = Table(
+    "stripe_gl_rule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("transaction_type", Text, nullable=False),
+    Column("match_field", Text),
+    Column("match_value", Text),
+    Column("debit_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("credit_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    Column("fee_account_id", Text,
+           ForeignKey("account.id", ondelete="RESTRICT")),
+    # cost_center_id carries no foreign key, unlike the three account columns
+    # above it. Original asymmetry, preserved.
+    Column("cost_center_id", Text),
+    Column("priority", Integer, nullable=False, server_default=text("0")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "transaction_type IN ('charge','refund','dispute','payout',"
+        "'connect_fee','other')",
+        name="ck_stripe_gl_rule_transaction_type"),
+    CheckConstraint("is_active IN (0,1)", name="ck_stripe_gl_rule_is_active"),
+)
+
+Index("idx_stripe_glr_acct", STRIPE_GL_RULE.c.stripe_account_id)
+Index("idx_stripe_glr_type", STRIPE_GL_RULE.c.transaction_type)
+Index("idx_stripe_glr_company", STRIPE_GL_RULE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 16. stripe_fee_detail
+# Breakdown of fees per balance transaction (processing, Stripe fee, etc.).
+# The only CASCADE in the module, and the only table with no company_id.
+# ---------------------------------------------------------------------------
+STRIPE_FEE_DETAIL = Table(
+    "stripe_fee_detail", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("balance_transaction_id", Text,
+           ForeignKey("stripe_balance_transaction.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("fee_type", Text, nullable=False),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("description", Text),
+    Column("application", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_stripe_fd_bt", STRIPE_FEE_DETAIL.c.balance_transaction_id)
+Index("idx_stripe_fd_type", STRIPE_FEE_DETAIL.c.fee_type)
+
+# ---------------------------------------------------------------------------
+# 17. stripe_reconciliation_run
+# Tracks each reconciliation run between Stripe and GL.
+# ---------------------------------------------------------------------------
+STRIPE_RECONCILIATION_RUN = Table(
+    "stripe_reconciliation_run", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("stripe_account_id", Text,
+           ForeignKey("stripe_account.id", ondelete="RESTRICT"), nullable=False),
+    Column("run_date", Text, nullable=False),
+    Column("period_start", Text, nullable=False),
+    Column("period_end", Text, nullable=False),
+    Column("transactions_processed", Integer, nullable=False,
+           server_default=text("0")),
+    Column("transactions_matched", Integer, nullable=False,
+           server_default=text("0")),
+    Column("transactions_unmatched", Integer, nullable=False,
+           server_default=text("0")),
+    Column("amount_reconciled", Text, nullable=False, server_default=text("'0'")),
+    Column("amount_unreconciled", Text, nullable=False,
+           server_default=text("'0'")),
+    Column("status", Text, nullable=False, server_default=text("'running'")),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('running','completed','failed')",
+                    name="ck_stripe_reconciliation_run_status"),
+)
+
+Index("idx_stripe_rr_acct", STRIPE_RECONCILIATION_RUN.c.stripe_account_id)
+Index("idx_stripe_rr_status", STRIPE_RECONCILIATION_RUN.c.status)
+Index("idx_stripe_rr_company", STRIPE_RECONCILIATION_RUN.c.company_id)
+
+
+def _require_foundation(db_path):
+    """The pre-conversion installer's foundation probe, asked through the seam.
+
+    The original read ``sqlite_master`` directly, so the guard that exists to
+    produce a friendly error was itself SQLite-only — on PostgreSQL it would have
+    raised before it could explain anything. ``seam.table_exists`` answers on both
+    backends (ADR-0034 bulk-39).
+    """
+    from erpclaw_lib import seam
+
+    missing = [t for t in REQUIRED_FOUNDATION if not seam.table_exists(t, db_path)]
     if missing:
         print(f"ERROR: Foundation tables missing: {', '.join(missing)}")
         print("Run erpclaw first: clawhub install erpclaw")
-        conn.close()
         sys.exit(1)
 
-    tables_created = 0
-    indexes_created = 0
 
-    # ==================================================================
-    # TABLE 1: stripe_account
-    # Central configuration for each Stripe account (test or live).
-    # Stores encrypted API key, webhook secret, and GL account mappings.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_account (
-            id                          TEXT PRIMARY KEY,
-            naming_series               TEXT,
-            company_id                  TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            account_name                TEXT NOT NULL,
-            stripe_account_id           TEXT,
-            restricted_key_enc          TEXT NOT NULL,
-            webhook_secret_enc          TEXT,
-            mode                        TEXT NOT NULL DEFAULT 'test'
-                                        CHECK(mode IN ('test','live')),
-            is_connect_platform         INTEGER NOT NULL DEFAULT 0 CHECK(is_connect_platform IN (0,1)),
-            default_currency            TEXT NOT NULL DEFAULT 'USD',
-            payout_schedule             TEXT,
-            stripe_clearing_account_id  TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            stripe_fees_account_id      TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            stripe_payout_account_id    TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            dispute_expense_account_id  TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            unearned_revenue_account_id TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            platform_revenue_account_id TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            last_sync_at                TEXT,
-            sync_from_date              TEXT,
-            status                      TEXT NOT NULL DEFAULT 'active'
-                                        CHECK(status IN ('active','paused','error','disabled')),
-            created_at                  TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at                  TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_acct_company ON stripe_account(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_acct_status ON stripe_account(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_acct_mode ON stripe_account(mode)")
-    indexes_created += 3
+def create_stripe_tables(db_path=None):
+    """Create Stripe tables and indexes on whichever backend is configured.
 
-    # ==================================================================
-    # TABLE 2: stripe_sync_job
-    # Tracks each sync operation (full, incremental, webhook, historical).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_sync_job (
-            id                  TEXT PRIMARY KEY,
-            stripe_account_id   TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            sync_type           TEXT NOT NULL
-                                CHECK(sync_type IN ('full','incremental','webhook','historical_import')),
-            object_type         TEXT NOT NULL
-                                CHECK(object_type IN ('balance_transaction','charge','refund','dispute','payout','customer','invoice','subscription','transfer','credit_note','all')),
-            status              TEXT NOT NULL DEFAULT 'pending'
-                                CHECK(status IN ('pending','running','completed','failed','cancelled')),
-            records_fetched     INTEGER NOT NULL DEFAULT 0,
-            records_processed   INTEGER NOT NULL DEFAULT 0,
-            records_failed      INTEGER NOT NULL DEFAULT 0,
-            cursor_position     TEXT,
-            sync_from           TEXT,
-            sync_to             TEXT,
-            error_message       TEXT,
-            started_at          TEXT,
-            completed_at        TEXT,
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sync_acct ON stripe_sync_job(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sync_status ON stripe_sync_job(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sync_company ON stripe_sync_job(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sync_type ON stripe_sync_job(sync_type)")
-    indexes_created += 4
-
-    # ==================================================================
-    # TABLE 3: stripe_balance_transaction
-    # Mirror of Stripe Balance Transaction objects. Core reconciliation entity.
-    # Amounts stored in DOLLARS (Decimal TEXT), not cents.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_balance_transaction (
-            id                  TEXT PRIMARY KEY,
-            stripe_id           TEXT NOT NULL UNIQUE,
-            stripe_account_id   TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            type                TEXT,
-            reporting_category  TEXT,
-            source_id           TEXT,
-            source_type         TEXT,
-            amount              TEXT NOT NULL DEFAULT '0',
-            fee                 TEXT NOT NULL DEFAULT '0',
-            net                 TEXT NOT NULL DEFAULT '0',
-            currency            TEXT NOT NULL DEFAULT 'USD',
-            description         TEXT,
-            available_on        TEXT,
-            created_stripe      TEXT,
-            payout_id           TEXT,
-            status              TEXT DEFAULT 'available'
-                                CHECK(status IN ('available','pending')),
-            reconciled          INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)),
-            reconciled_at       TEXT,
-            gl_voucher_id       TEXT,
-            gl_voucher_type     TEXT,
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_acct ON stripe_balance_transaction(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_stripe ON stripe_balance_transaction(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_type ON stripe_balance_transaction(type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_status ON stripe_balance_transaction(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_reconciled ON stripe_balance_transaction(reconciled)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_payout ON stripe_balance_transaction(payout_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_bt_company ON stripe_balance_transaction(company_id)")
-    indexes_created += 7
-
-    # ==================================================================
-    # TABLE 4: stripe_charge
-    # Mirror of Stripe Charge objects, linked to erpclaw customer/invoice/payment.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_charge (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            customer_stripe_id      TEXT,
-            description             TEXT,
-            payment_method_type     TEXT,
-            payment_intent_id       TEXT,
-            invoice_stripe_id       TEXT,
-            status                  TEXT NOT NULL DEFAULT 'pending'
-                                    CHECK(status IN ('succeeded','pending','failed','refunded','disputed')),
-            amount_refunded         TEXT NOT NULL DEFAULT '0',
-            disputed                INTEGER NOT NULL DEFAULT 0 CHECK(disputed IN (0,1)),
-            failure_code            TEXT,
-            erpclaw_customer_id     TEXT,
-            erpclaw_invoice_id      TEXT,
-            erpclaw_payment_entry_id TEXT,
-            metadata                TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_chg_acct ON stripe_charge(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_chg_stripe ON stripe_charge(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_chg_status ON stripe_charge(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_chg_customer ON stripe_charge(customer_stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_chg_company ON stripe_charge(company_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # TABLE 5: stripe_refund
-    # Mirror of Stripe Refund objects.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_refund (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            charge_id               TEXT REFERENCES stripe_charge(id) ON DELETE RESTRICT,
-            charge_stripe_id        TEXT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            reason                  TEXT,
-            status                  TEXT NOT NULL DEFAULT 'pending'
-                                    CHECK(status IN ('pending','succeeded','failed','canceled')),
-            erpclaw_credit_note_id  TEXT,
-            erpclaw_payment_entry_id TEXT,
-            metadata                TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_ref_acct ON stripe_refund(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_ref_stripe ON stripe_refund(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_ref_charge ON stripe_refund(charge_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_ref_company ON stripe_refund(company_id)")
-    indexes_created += 4
-
-    # ==================================================================
-    # TABLE 6: stripe_dispute
-    # Mirror of Stripe Dispute objects (chargebacks).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_dispute (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            charge_id               TEXT REFERENCES stripe_charge(id) ON DELETE RESTRICT,
-            charge_stripe_id        TEXT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            reason                  TEXT,
-            status                  TEXT NOT NULL DEFAULT 'needs_response'
-                                    CHECK(status IN ('warning_needs_response','warning_under_review','needs_response','under_review','won','lost')),
-            evidence_due_by         TEXT,
-            erpclaw_journal_entry_id TEXT,
-            resolution_amount       TEXT,
-            metadata                TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dsp_acct ON stripe_dispute(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dsp_stripe ON stripe_dispute(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dsp_charge ON stripe_dispute(charge_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dsp_status ON stripe_dispute(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dsp_company ON stripe_dispute(company_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # TABLE 7: stripe_payout
-    # Mirror of Stripe Payout objects (bank transfers from Stripe balance).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_payout (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            arrival_date            TEXT,
-            method                  TEXT,
-            description             TEXT,
-            status                  TEXT NOT NULL DEFAULT 'pending'
-                                    CHECK(status IN ('paid','pending','in_transit','canceled','failed')),
-            failure_code            TEXT,
-            destination_bank_last4  TEXT,
-            transaction_count       INTEGER NOT NULL DEFAULT 0,
-            reconciled              INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)),
-            erpclaw_payment_entry_id TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pay_acct ON stripe_payout(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pay_stripe ON stripe_payout(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pay_status ON stripe_payout(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_pay_company ON stripe_payout(company_id)")
-    indexes_created += 4
-
-    # ==================================================================
-    # TABLE 8: stripe_invoice
-    # Mirror of Stripe Invoice objects (for recurring billing / subscriptions).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_invoice (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            customer_stripe_id      TEXT,
-            number                  TEXT,
-            amount_due              TEXT NOT NULL DEFAULT '0',
-            amount_paid             TEXT NOT NULL DEFAULT '0',
-            amount_remaining        TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            status                  TEXT DEFAULT 'draft'
-                                    CHECK(status IN ('draft','open','paid','void','uncollectible')),
-            subscription_stripe_id  TEXT,
-            period_start            TEXT,
-            period_end              TEXT,
-            erpclaw_invoice_id      TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_inv_acct ON stripe_invoice(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_inv_stripe ON stripe_invoice(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_inv_status ON stripe_invoice(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_inv_customer ON stripe_invoice(customer_stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_inv_company ON stripe_invoice(company_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # TABLE 9: stripe_subscription
-    # Mirror of Stripe Subscription objects.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_subscription (
-            id                          TEXT PRIMARY KEY,
-            stripe_id                   TEXT NOT NULL UNIQUE,
-            stripe_account_id           TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            customer_stripe_id          TEXT,
-            status                      TEXT NOT NULL DEFAULT 'active'
-                                        CHECK(status IN ('active','past_due','canceled','unpaid','trialing','incomplete')),
-            current_period_start        TEXT,
-            current_period_end          TEXT,
-            cancel_at_period_end        INTEGER NOT NULL DEFAULT 0 CHECK(cancel_at_period_end IN (0,1)),
-            canceled_at                 TEXT,
-            plan_interval               TEXT,
-            plan_amount                 TEXT NOT NULL DEFAULT '0',
-            currency                    TEXT NOT NULL DEFAULT 'USD',
-            erpclaw_revenue_contract_id TEXT,
-            company_id                  TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe              TEXT,
-            created_at                  TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sub_acct ON stripe_subscription(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sub_stripe ON stripe_subscription(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sub_status ON stripe_subscription(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sub_customer ON stripe_subscription(customer_stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_sub_company ON stripe_subscription(company_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # TABLE 10: stripe_customer_map
-    # Maps Stripe customer IDs to erpclaw customer IDs.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_customer_map (
-            id                  TEXT PRIMARY KEY,
-            stripe_account_id   TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            stripe_customer_id  TEXT NOT NULL,
-            erpclaw_customer_id TEXT REFERENCES customer(id) ON DELETE RESTRICT,
-            stripe_email        TEXT,
-            stripe_name         TEXT,
-            match_method        TEXT DEFAULT 'manual'
-                                CHECK(match_method IN ('manual','email','name','metadata')),
-            match_confidence    TEXT NOT NULL DEFAULT '1.0',
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(stripe_account_id, stripe_customer_id)
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cmap_acct ON stripe_customer_map(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cmap_erpclaw ON stripe_customer_map(erpclaw_customer_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cmap_company ON stripe_customer_map(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 11: stripe_webhook_event
-    # Incoming Stripe webhook events with idempotent processing.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_deep_webhook_event (
-            id                  TEXT PRIMARY KEY,
-            stripe_account_id   TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            stripe_event_id     TEXT NOT NULL UNIQUE,
-            event_type          TEXT NOT NULL,
-            api_version         TEXT,
-            object_id           TEXT,
-            object_type         TEXT,
-            payload             TEXT,
-            processed           INTEGER NOT NULL DEFAULT 0 CHECK(processed IN (0,1)),
-            process_attempts    INTEGER NOT NULL DEFAULT 0,
-            max_attempts        INTEGER NOT NULL DEFAULT 3,
-            processed_at        TEXT,
-            error_message       TEXT,
-            created_stripe      TEXT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dwh_acct ON stripe_deep_webhook_event(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dwh_event ON stripe_deep_webhook_event(stripe_event_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dwh_type ON stripe_deep_webhook_event(event_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_dwh_processed ON stripe_deep_webhook_event(processed)")
-    indexes_created += 4
-
-    # ==================================================================
-    # TABLE 12: stripe_credit_note
-    # Mirror of Stripe Credit Note objects.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_credit_note (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            invoice_stripe_id       TEXT,
-            customer_stripe_id      TEXT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            reason                  TEXT,
-            status                  TEXT DEFAULT 'issued',
-            erpclaw_credit_note_id  TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cn_acct ON stripe_credit_note(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cn_stripe ON stripe_credit_note(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_cn_company ON stripe_credit_note(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 13: stripe_application_fee
-    # Connect platform application fees collected.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_application_fee (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            charge_stripe_id        TEXT,
-            account_stripe_id       TEXT,
-            refunded_amount         TEXT NOT NULL DEFAULT '0',
-            erpclaw_journal_entry_id TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_af_acct ON stripe_application_fee(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_af_stripe ON stripe_application_fee(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_af_company ON stripe_application_fee(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 14: stripe_transfer
-    # Connect platform transfers between accounts.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_transfer (
-            id                      TEXT PRIMARY KEY,
-            stripe_id               TEXT NOT NULL UNIQUE,
-            stripe_account_id       TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            destination_account     TEXT,
-            description             TEXT,
-            reversed                INTEGER NOT NULL DEFAULT 0 CHECK(reversed IN (0,1)),
-            erpclaw_journal_entry_id TEXT,
-            company_id              TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_stripe          TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_xfr_acct ON stripe_transfer(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_xfr_stripe ON stripe_transfer(stripe_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_xfr_company ON stripe_transfer(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 15: stripe_gl_rule
-    # Configurable rules for mapping Stripe transaction types to GL accounts.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_gl_rule (
-            id                  TEXT PRIMARY KEY,
-            stripe_account_id   TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            transaction_type    TEXT NOT NULL
-                                CHECK(transaction_type IN ('charge','refund','dispute','payout','connect_fee','other')),
-            match_field         TEXT,
-            match_value         TEXT,
-            debit_account_id    TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            credit_account_id   TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            fee_account_id      TEXT REFERENCES account(id) ON DELETE RESTRICT,
-            cost_center_id      TEXT,
-            priority            INTEGER NOT NULL DEFAULT 0,
-            is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_glr_acct ON stripe_gl_rule(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_glr_type ON stripe_gl_rule(transaction_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_glr_company ON stripe_gl_rule(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # TABLE 16: stripe_fee_detail
-    # Breakdown of fees per balance transaction (processing, Stripe fee, etc.).
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_fee_detail (
-            id                      TEXT PRIMARY KEY,
-            balance_transaction_id  TEXT NOT NULL REFERENCES stripe_balance_transaction(id) ON DELETE CASCADE,
-            fee_type                TEXT NOT NULL,
-            amount                  TEXT NOT NULL DEFAULT '0',
-            currency                TEXT NOT NULL DEFAULT 'USD',
-            description             TEXT,
-            application             TEXT,
-            created_at              TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_fd_bt ON stripe_fee_detail(balance_transaction_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_fd_type ON stripe_fee_detail(fee_type)")
-    indexes_created += 2
-
-    # ==================================================================
-    # TABLE 17: stripe_reconciliation_run
-    # Tracks each reconciliation run between Stripe and GL.
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stripe_reconciliation_run (
-            id                          TEXT PRIMARY KEY,
-            stripe_account_id           TEXT NOT NULL REFERENCES stripe_account(id) ON DELETE RESTRICT,
-            run_date                    TEXT NOT NULL,
-            period_start                TEXT NOT NULL,
-            period_end                  TEXT NOT NULL,
-            transactions_processed      INTEGER NOT NULL DEFAULT 0,
-            transactions_matched        INTEGER NOT NULL DEFAULT 0,
-            transactions_unmatched      INTEGER NOT NULL DEFAULT 0,
-            amount_reconciled           TEXT NOT NULL DEFAULT '0',
-            amount_unreconciled         TEXT NOT NULL DEFAULT '0',
-            status                      TEXT NOT NULL DEFAULT 'running'
-                                        CHECK(status IN ('running','completed','failed')),
-            notes                       TEXT,
-            company_id                  TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at                  TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_rr_acct ON stripe_reconciliation_run(stripe_account_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_rr_status ON stripe_reconciliation_run(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stripe_rr_company ON stripe_reconciliation_run(company_id)")
-    indexes_created += 3
-
-    conn.commit()
-    conn.close()
-
+    Same contract as before the ADR-0034 conversion: idempotent, and the returned
+    counts are what was ACTUALLY created rather than what was declared.
+    """
+    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
+    _require_foundation(db_path)
+    result = provision(METADATA, db_path)
     return {
         "database": db_path,
-        "tables": tables_created,
-        "indexes": indexes_created,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
     }
 
 

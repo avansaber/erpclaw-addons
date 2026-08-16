@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
-"""ERPClaw Self-Service schema extension -- adds self-service permission tables.
+"""ERPClaw Self-Service schema extension -- adds portal tables to the shared database.
 
-5 tables across 4 domains: permissions, portal, sessions, reports.
+5 tables: selfservice_permission_profile, selfservice_profile_assignment,
+selfservice_portal_config, selfservice_session, selfservice_activity_log.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. Conversion rules are the pilot's (`erpclaw-esign`).
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    provision, reference_table, text,
+)
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "ERPClaw Self-Service"
@@ -17,169 +35,187 @@ REQUIRED_FOUNDATION = [
     "company", "naming_series", "audit_log",
 ]
 
+METADATA = MetaData()
 
-def create_selfservice_tables(db_path=None):
-    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
+# Foundation table this module points at but does not own — declared so the
+# foreign keys resolve, never created here.
+reference_table("company", METADATA)
 
-    # -- Verify ERPClaw foundation --
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
+# ---------------------------------------------------------------------------
+# 1. selfservice_permission_profile
+# ---------------------------------------------------------------------------
+PERMISSION_PROFILE = Table(
+    "selfservice_permission_profile", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("description", Text),
+    Column("target_role", Text, nullable=False, server_default=text("'employee'")),
+    Column("allowed_actions", Text, server_default=text("'[]'")),
+    Column("denied_actions", Text, server_default=text("'[]'")),
+    Column("record_scope", Text, server_default=text("'own'")),
+    Column("field_visibility", Text, server_default=text("'{}'")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "target_role IN ('employee','client','tenant','patient','vendor','other')",
+        name="ck_selfservice_profile_target_role"),
+    CheckConstraint("record_scope IN ('own','department','company')",
+                    name="ck_selfservice_profile_record_scope"),
+)
+
+Index("idx_ss_profile_company", PERMISSION_PROFILE.c.company_id)
+Index("idx_ss_profile_role", PERMISSION_PROFILE.c.target_role)
+Index("idx_ss_profile_active", PERMISSION_PROFILE.c.is_active)
+
+# ---------------------------------------------------------------------------
+# 2. selfservice_profile_assignment
+# ---------------------------------------------------------------------------
+PROFILE_ASSIGNMENT = Table(
+    "selfservice_profile_assignment", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("profile_id", Text,
+           ForeignKey("selfservice_permission_profile.id"), nullable=False),
+    Column("user_id", Text, nullable=False),
+    Column("user_email", Text),
+    Column("user_name", Text),
+    Column("assigned_by", Text),
+    Column("assignment_status", Text, nullable=False,
+           server_default=text("'active'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("assignment_status IN ('active','revoked')",
+                    name="ck_selfservice_assignment_status"),
+)
+
+Index("idx_ss_assign_profile", PROFILE_ASSIGNMENT.c.profile_id)
+Index("idx_ss_assign_user", PROFILE_ASSIGNMENT.c.user_id)
+Index("idx_ss_assign_company", PROFILE_ASSIGNMENT.c.company_id)
+Index("idx_ss_assign_status", PROFILE_ASSIGNMENT.c.assignment_status)
+
+# ---------------------------------------------------------------------------
+# 3. selfservice_portal_config
+# ---------------------------------------------------------------------------
+PORTAL_CONFIG = Table(
+    "selfservice_portal_config", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("branding_json", Text, server_default=text("'{}'")),
+    Column("welcome_message", Text),
+    Column("enabled_modules", Text, server_default=text("'[]'")),
+    Column("enabled_actions", Text, server_default=text("'[]'")),
+    Column("require_mfa", Integer, nullable=False, server_default=text("0")),
+    Column("session_timeout_minutes", Integer, nullable=False,
+           server_default=text("60")),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_ss_portal_company", PORTAL_CONFIG.c.company_id)
+Index("idx_ss_portal_active", PORTAL_CONFIG.c.is_active)
+
+# ---------------------------------------------------------------------------
+# 4. selfservice_session
+# ---------------------------------------------------------------------------
+SESSION = Table(
+    "selfservice_session", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("user_id", Text, nullable=False),
+    Column("profile_id", Text,
+           ForeignKey("selfservice_permission_profile.id"), nullable=False),
+    Column("portal_id", Text, ForeignKey("selfservice_portal_config.id")),
+    Column("token", Text, nullable=False),
+    Column("ip_address", Text),
+    Column("user_agent", Text),
+    Column("session_status", Text, nullable=False, server_default=text("'active'")),
+    Column("expires_at", Text, nullable=False),
+    Column("last_activity_at", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("session_status IN ('active','expired','ended')",
+                    name="ck_selfservice_session_status"),
+)
+
+Index("idx_ss_session_user", SESSION.c.user_id)
+Index("idx_ss_session_token", SESSION.c.token)
+Index("idx_ss_session_company", SESSION.c.company_id)
+Index("idx_ss_session_status", SESSION.c.session_status)
+Index("idx_ss_session_profile", SESSION.c.profile_id)
+
+# ---------------------------------------------------------------------------
+# 5. selfservice_activity_log
+# ---------------------------------------------------------------------------
+ACTIVITY_LOG = Table(
+    "selfservice_activity_log", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("session_id", Text, ForeignKey("selfservice_session.id")),
+    Column("user_id", Text, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("entity_type", Text),
+    Column("entity_id", Text),
+    Column("result", Text, nullable=False, server_default=text("'allowed'")),
+    Column("ip_address", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("result IN ('allowed','denied','error')",
+                    name="ck_selfservice_activity_result"),
+)
+
+Index("idx_ss_actlog_user", ACTIVITY_LOG.c.user_id)
+Index("idx_ss_actlog_company", ACTIVITY_LOG.c.company_id)
+Index("idx_ss_actlog_session", ACTIVITY_LOG.c.session_id)
+Index("idx_ss_actlog_result", ACTIVITY_LOG.c.result)
+Index("idx_ss_actlog_action", ACTIVITY_LOG.c.action)
+
+
+
+def _require_foundation(db_path):
+    """The pre-conversion installer's foundation probe, asked through the seam.
+
+    The original read ``sqlite_master`` directly, so the guard that exists to
+    produce a friendly error was itself SQLite-only — on PostgreSQL it would have
+    raised before it could explain anything. ``seam.table_exists`` answers on both
+    backends (ADR-0034 bulk-39).
+    """
+    from erpclaw_lib import seam
+
+    missing = [t for t in REQUIRED_FOUNDATION if not seam.table_exists(t, db_path)]
     if missing:
         print(f"ERROR: Foundation tables missing: {', '.join(missing)}")
         print("Run erpclaw-setup first: clawhub install erpclaw-setup")
-        conn.close()
         sys.exit(1)
 
-    tables_created = 0
-    indexes_created = 0
+def create_selfservice_tables(db_path=None):
+    """Create self-service tables and indexes on whichever backend is configured.
 
-    # ==================================================================
-    # PERMISSIONS DOMAIN
-    # ==================================================================
-
-    # 1. selfservice_permission_profile -- permission profile templates
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS selfservice_permission_profile (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            description     TEXT,
-            target_role     TEXT NOT NULL DEFAULT 'employee'
-                            CHECK(target_role IN ('employee','client','tenant','patient','vendor','other')),
-            allowed_actions TEXT DEFAULT '[]',
-            denied_actions  TEXT DEFAULT '[]',
-            record_scope    TEXT DEFAULT 'own'
-                            CHECK(record_scope IN ('own','department','company')),
-            field_visibility TEXT DEFAULT '{}',
-            is_active       INTEGER NOT NULL DEFAULT 1,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_profile_company ON selfservice_permission_profile(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_profile_role ON selfservice_permission_profile(target_role)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_profile_active ON selfservice_permission_profile(is_active)")
-    indexes_created += 3
-
-    # 2. selfservice_profile_assignment -- per-user profile assignments
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS selfservice_profile_assignment (
-            id              TEXT PRIMARY KEY,
-            profile_id      TEXT NOT NULL REFERENCES selfservice_permission_profile(id),
-            user_id         TEXT NOT NULL,
-            user_email      TEXT,
-            user_name       TEXT,
-            assigned_by     TEXT,
-            assignment_status TEXT NOT NULL DEFAULT 'active'
-                            CHECK(assignment_status IN ('active','revoked')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_assign_profile ON selfservice_profile_assignment(profile_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_assign_user ON selfservice_profile_assignment(user_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_assign_company ON selfservice_profile_assignment(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_assign_status ON selfservice_profile_assignment(assignment_status)")
-    indexes_created += 4
-
-    # ==================================================================
-    # PORTAL DOMAIN
-    # ==================================================================
-
-    # 3. selfservice_portal_config
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS selfservice_portal_config (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            branding_json   TEXT DEFAULT '{}',
-            welcome_message TEXT,
-            enabled_modules TEXT DEFAULT '[]',
-            enabled_actions TEXT DEFAULT '[]',
-            require_mfa     INTEGER NOT NULL DEFAULT 0,
-            session_timeout_minutes INTEGER NOT NULL DEFAULT 60,
-            is_active       INTEGER NOT NULL DEFAULT 1,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_portal_company ON selfservice_portal_config(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_portal_active ON selfservice_portal_config(is_active)")
-    indexes_created += 2
-
-    # ==================================================================
-    # SESSIONS DOMAIN
-    # ==================================================================
-
-    # 4. selfservice_session
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS selfservice_session (
-            id              TEXT PRIMARY KEY,
-            user_id         TEXT NOT NULL,
-            profile_id      TEXT NOT NULL REFERENCES selfservice_permission_profile(id),
-            portal_id       TEXT REFERENCES selfservice_portal_config(id),
-            token           TEXT NOT NULL,
-            ip_address      TEXT,
-            user_agent      TEXT,
-            session_status  TEXT NOT NULL DEFAULT 'active'
-                            CHECK(session_status IN ('active','expired','ended')),
-            expires_at      TEXT NOT NULL,
-            last_activity_at TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_session_user ON selfservice_session(user_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_session_token ON selfservice_session(token)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_session_company ON selfservice_session(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_session_status ON selfservice_session(session_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_session_profile ON selfservice_session(profile_id)")
-    indexes_created += 5
-
-    # ==================================================================
-    # REPORTS / ACTIVITY DOMAIN
-    # ==================================================================
-
-    # 5. selfservice_activity_log
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS selfservice_activity_log (
-            id              TEXT PRIMARY KEY,
-            session_id      TEXT REFERENCES selfservice_session(id),
-            user_id         TEXT NOT NULL,
-            action          TEXT NOT NULL,
-            entity_type     TEXT,
-            entity_id       TEXT,
-            result          TEXT NOT NULL DEFAULT 'allowed'
-                            CHECK(result IN ('allowed','denied','error')),
-            ip_address      TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_actlog_user ON selfservice_activity_log(user_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_actlog_company ON selfservice_activity_log(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_actlog_session ON selfservice_activity_log(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_actlog_result ON selfservice_activity_log(result)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ss_actlog_action ON selfservice_activity_log(action)")
-    indexes_created += 5
-
-    conn.commit()
-    conn.close()
-    print(f"{DISPLAY_NAME}: {tables_created} tables, {indexes_created} indexes ensured.")
+    Same contract as before the ADR-0034 conversion: idempotent, and the returned
+    counts are what was ACTUALLY created rather than what was declared.
+    """
+    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
+    _require_foundation(db_path)
+    result = provision(METADATA, db_path)
+    return {
+        "database": db_path,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
+    }
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    create_selfservice_tables(path)
+    db = sys.argv[1] if len(sys.argv) > 1 else None
+    result = create_selfservice_tables(db)
+    print(f"{DISPLAY_NAME} schema created in {result['database']}")
+    print(f"  Tables: {result['tables']}")
+    print(f"  Indexes: {result['indexes']}")

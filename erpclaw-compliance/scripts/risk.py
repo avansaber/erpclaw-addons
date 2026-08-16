@@ -10,11 +10,13 @@ import uuid
 from datetime import datetime, timezone
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 except ImportError:
     pass
 
@@ -200,7 +202,7 @@ def update_risk(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("risk_register", data, {"id": risk_id})
     conn.execute(sql, params)
     audit(conn, "risk_register", risk_id, "compliance-update-risk", None, {"updated_fields": changed})
@@ -397,7 +399,7 @@ def close_risk(conn, args):
         err("Risk is already closed")
 
     sql = update_row("risk_register",
-                     data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+                     data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("closed", risk_id))
     audit(conn, "risk_register", risk_id, "compliance-close-risk", None)

@@ -42,6 +42,10 @@ import argparse
 import os
 import sqlite3
 
+# M102: rebuilds a table and copies every row verbatim — nothing a row held
+# before this run is different afterwards.
+MIGRATION_DATA_CLASS = "none"
+
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
 # The new value — used purely as the idempotency probe against the stored

@@ -10,11 +10,13 @@ import uuid
 from datetime import datetime, timezone, date
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, Case, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Case, Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 except ImportError:
     pass
 
@@ -139,7 +141,7 @@ def update_control_test(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("control_test", data, {"id": test_id})
     conn.execute(sql, params)
     audit(conn, "control_test", test_id, "compliance-update-control-test", None, {"updated_fields": changed})
@@ -342,7 +344,7 @@ def update_calendar_item(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("compliance_calendar", data, {"id": item_id})
     conn.execute(sql, params)
     audit(conn, "compliance_calendar", item_id, "compliance-update-calendar-item", None, {"updated_fields": changed})

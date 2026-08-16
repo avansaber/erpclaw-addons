@@ -36,9 +36,23 @@ INIT_SCHEMA_PATH = os.path.join(SETUP_DIR, "init_schema.py")
 VERTICAL_INIT_PATH = os.path.join(ROOT_DIR, "init_db.py")
 
 # Make erpclaw_lib importable
-ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
-if ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, ERPCLAW_LIB)
+# Only when erpclaw_lib is not already reachable. An unconditional insert at
+# position 0 overrides a caller that deliberately bound a different tree — which
+# is how this suite imported the DEPLOYED lib instead of the one under test and
+# could not find `erpclaw_lib.seam` after the ADR-0034 conversion.
+import importlib.util  # noqa: E402
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(SETUP_DIR, "lib")
+ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+               else os.path.join(os.path.expanduser(
+                   os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+if importlib.util.find_spec("erpclaw_lib") is None and ERPCLAW_LIB not in sys.path:
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, ERPCLAW_LIB)
 
 from erpclaw_lib.db import setup_pragmas
 

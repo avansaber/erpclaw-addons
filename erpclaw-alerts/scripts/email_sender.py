@@ -15,7 +15,9 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import DEFAULT_DB_PATH
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit

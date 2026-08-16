@@ -5,332 +5,377 @@ Tables: equipment, equipment_reading, maintenance_plan, maintenance_plan_item,
 maintenance_work_order, maintenance_work_order_item, maintenance_checklist,
 maintenance_checklist_item, downtime_record,
 maintenance_schedule, maintenance_visit (moved from core init_schema.py).
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. Conversion rules are the pilot's (`erpclaw-esign`);
+``equipment`` carries a self-referential foreign key, which the metadata
+declaration resolves inside its own table.
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    provision, reference_table, text,
+)
 
 DB_PATH = os.environ.get("ERPCLAW_DB_PATH", os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite"))
 
+METADATA = MetaData()
+
+# Foundation tables this module points at but does not own — declared so the
+# foreign keys resolve, never created here.
+reference_table("company", METADATA)
+
+# ---------------------------------------------------------------------------
+# 1. equipment — tracked equipment / assets
+# ---------------------------------------------------------------------------
+EQUIPMENT = Table(
+    "equipment", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("equipment_type", Text, nullable=False, server_default=text("'machine'")),
+    Column("model", Text),
+    Column("manufacturer", Text),
+    Column("serial_number", Text),
+    Column("location", Text),
+    Column("parent_equipment_id", Text, ForeignKey("equipment.id")),
+    # asset_id and item_id carry no foreign key in the shipped DDL, unlike
+    # company_id below. Preserved as declared.
+    Column("asset_id", Text),
+    Column("item_id", Text),
+    Column("purchase_date", Text),
+    Column("warranty_expiry", Text),
+    Column("criticality", Text, nullable=False, server_default=text("'medium'")),
+    Column("status", Text, nullable=False, server_default=text("'operational'")),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "equipment_type IN ('machine','vehicle','tool','instrument','fixture','other')",
+        name="ck_equipment_equipment_type"),
+    CheckConstraint("criticality IN ('critical','high','medium','low')",
+                    name="ck_equipment_criticality"),
+    CheckConstraint(
+        "status IN ('operational','maintenance','breakdown','decommissioned')",
+        name="ck_equipment_status"),
+)
+
+Index("idx_equipment_company", EQUIPMENT.c.company_id)
+Index("idx_equipment_status", EQUIPMENT.c.status)
+Index("idx_equipment_type", EQUIPMENT.c.equipment_type)
+Index("idx_equipment_parent", EQUIPMENT.c.parent_equipment_id)
+Index("idx_equipment_criticality", EQUIPMENT.c.criticality)
+
+# ---------------------------------------------------------------------------
+# 2. equipment_reading — meter / sensor readings
+# ---------------------------------------------------------------------------
+EQUIPMENT_READING = Table(
+    "equipment_reading", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("equipment_id", Text,
+           ForeignKey("equipment.id", ondelete="RESTRICT"), nullable=False),
+    Column("reading_type", Text, nullable=False, server_default=text("'meter'")),
+    Column("reading_value", Text, nullable=False),
+    Column("reading_unit", Text),
+    Column("reading_date", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("recorded_by", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "reading_type IN ('meter','temperature','pressure','vibration','other')",
+        name="ck_equipment_reading_reading_type"),
+)
+
+Index("idx_equip_reading_equip", EQUIPMENT_READING.c.equipment_id)
+Index("idx_equip_reading_company", EQUIPMENT_READING.c.company_id)
+Index("idx_equip_reading_date", EQUIPMENT_READING.c.reading_date)
+
+# ---------------------------------------------------------------------------
+# 3. maintenance_plan — preventive / predictive schedules
+# ---------------------------------------------------------------------------
+MAINTENANCE_PLAN = Table(
+    "maintenance_plan", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("equipment_id", Text,
+           ForeignKey("equipment.id", ondelete="RESTRICT"), nullable=False),
+    Column("plan_type", Text, nullable=False, server_default=text("'preventive'")),
+    Column("frequency", Text, nullable=False, server_default=text("'monthly'")),
+    Column("frequency_days", Integer),
+    Column("last_performed", Text),
+    Column("next_due", Text),
+    Column("estimated_duration", Text),
+    Column("estimated_cost", Text, server_default=text("'0'")),
+    Column("assigned_to", Text),
+    Column("instructions", Text),
+    Column("is_active", Integer, nullable=False, server_default=text("1")),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "plan_type IN ('preventive','predictive','condition_based')",
+        name="ck_maintenance_plan_plan_type"),
+    CheckConstraint(
+        "frequency IN ('daily','weekly','biweekly','monthly','quarterly',"
+        "'semi_annual','annual')",
+        name="ck_maintenance_plan_frequency"),
+    CheckConstraint("is_active IN (0,1)", name="ck_maintenance_plan_is_active"),
+)
+
+Index("idx_maint_plan_equipment", MAINTENANCE_PLAN.c.equipment_id)
+Index("idx_maint_plan_company", MAINTENANCE_PLAN.c.company_id)
+Index("idx_maint_plan_next_due", MAINTENANCE_PLAN.c.next_due)
+Index("idx_maint_plan_active", MAINTENANCE_PLAN.c.is_active)
+
+# ---------------------------------------------------------------------------
+# 4. maintenance_plan_item — spare parts for plans
+# ---------------------------------------------------------------------------
+MAINTENANCE_PLAN_ITEM = Table(
+    "maintenance_plan_item", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("plan_id", Text,
+           ForeignKey("maintenance_plan.id", ondelete="CASCADE"), nullable=False),
+    Column("item_id", Text),
+    Column("item_name", Text, nullable=False),
+    Column("quantity", Text, nullable=False, server_default=text("'1'")),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_maint_plan_item_plan", MAINTENANCE_PLAN_ITEM.c.plan_id)
+Index("idx_maint_plan_item_company", MAINTENANCE_PLAN_ITEM.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 5. maintenance_work_order — corrective / preventive work orders
+# ---------------------------------------------------------------------------
+MAINTENANCE_WORK_ORDER = Table(
+    "maintenance_work_order", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("equipment_id", Text,
+           ForeignKey("equipment.id", ondelete="RESTRICT"), nullable=False),
+    # plan_id carries no ON DELETE action, unlike equipment_id above.
+    Column("plan_id", Text, ForeignKey("maintenance_plan.id")),
+    Column("work_order_type", Text, nullable=False,
+           server_default=text("'corrective'")),
+    Column("priority", Text, nullable=False, server_default=text("'medium'")),
+    Column("description", Text),
+    Column("assigned_to", Text),
+    Column("scheduled_date", Text),
+    Column("started_at", Text),
+    Column("completed_at", Text),
+    Column("actual_duration", Text),
+    Column("actual_cost", Text, server_default=text("'0'")),
+    Column("failure_mode", Text),
+    Column("root_cause", Text),
+    Column("resolution", Text),
+    Column("status", Text, nullable=False, server_default=text("'draft'")),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "work_order_type IN ('preventive','corrective','emergency','inspection')",
+        name="ck_maintenance_work_order_work_order_type"),
+    CheckConstraint("priority IN ('critical','high','medium','low')",
+                    name="ck_maintenance_work_order_priority"),
+    CheckConstraint(
+        "status IN ('draft','scheduled','in_progress','completed','cancelled')",
+        name="ck_maintenance_work_order_status"),
+)
+
+Index("idx_maint_wo_equipment", MAINTENANCE_WORK_ORDER.c.equipment_id)
+Index("idx_maint_wo_plan", MAINTENANCE_WORK_ORDER.c.plan_id)
+Index("idx_maint_wo_company", MAINTENANCE_WORK_ORDER.c.company_id)
+Index("idx_maint_wo_status", MAINTENANCE_WORK_ORDER.c.status)
+Index("idx_maint_wo_priority", MAINTENANCE_WORK_ORDER.c.priority)
+Index("idx_maint_wo_scheduled", MAINTENANCE_WORK_ORDER.c.scheduled_date)
+
+# ---------------------------------------------------------------------------
+# 6. maintenance_work_order_item — parts used in work orders
+# ---------------------------------------------------------------------------
+MAINTENANCE_WORK_ORDER_ITEM = Table(
+    "maintenance_work_order_item", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("work_order_id", Text,
+           ForeignKey("maintenance_work_order.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("item_id", Text),
+    Column("item_name", Text, nullable=False),
+    Column("quantity", Text, nullable=False, server_default=text("'1'")),
+    Column("unit_cost", Text, server_default=text("'0'")),
+    Column("total_cost", Text, server_default=text("'0'")),
+    Column("notes", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_maint_wo_item_wo", MAINTENANCE_WORK_ORDER_ITEM.c.work_order_id)
+Index("idx_maint_wo_item_company", MAINTENANCE_WORK_ORDER_ITEM.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 7. maintenance_checklist — checklists attached to work orders
+# ---------------------------------------------------------------------------
+MAINTENANCE_CHECKLIST = Table(
+    "maintenance_checklist", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("work_order_id", Text,
+           ForeignKey("maintenance_work_order.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("name", Text, nullable=False),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+Index("idx_maint_checklist_wo", MAINTENANCE_CHECKLIST.c.work_order_id)
+Index("idx_maint_checklist_company", MAINTENANCE_CHECKLIST.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 8. maintenance_checklist_item — individual checklist steps
+#    (no company_id in the shipped DDL, unlike every table above)
+# ---------------------------------------------------------------------------
+MAINTENANCE_CHECKLIST_ITEM = Table(
+    "maintenance_checklist_item", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("checklist_id", Text,
+           ForeignKey("maintenance_checklist.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("description", Text, nullable=False),
+    Column("is_completed", Integer, nullable=False, server_default=text("0")),
+    Column("completed_at", Text),
+    Column("completed_by", Text),
+    Column("notes", Text),
+    Column("sort_order", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_completed IN (0,1)",
+                    name="ck_maintenance_checklist_item_is_completed"),
+)
+
+Index("idx_maint_cl_item_checklist", MAINTENANCE_CHECKLIST_ITEM.c.checklist_id)
+
+# ---------------------------------------------------------------------------
+# 9. downtime_record — equipment downtime tracking
+# ---------------------------------------------------------------------------
+DOWNTIME_RECORD = Table(
+    "downtime_record", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("equipment_id", Text,
+           ForeignKey("equipment.id", ondelete="RESTRICT"), nullable=False),
+    # work_order_id carries no ON DELETE action, unlike equipment_id above.
+    Column("work_order_id", Text, ForeignKey("maintenance_work_order.id")),
+    Column("start_time", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("end_time", Text),
+    Column("duration_hours", Text),
+    Column("reason", Text, nullable=False, server_default=text("'breakdown'")),
+    Column("description", Text),
+    Column("impact", Text),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "reason IN ('breakdown','maintenance','setup','changeover','other')",
+        name="ck_downtime_record_reason"),
+)
+
+Index("idx_downtime_equipment", DOWNTIME_RECORD.c.equipment_id)
+Index("idx_downtime_wo", DOWNTIME_RECORD.c.work_order_id)
+Index("idx_downtime_company", DOWNTIME_RECORD.c.company_id)
+Index("idx_downtime_reason", DOWNTIME_RECORD.c.reason)
+
+# ---------------------------------------------------------------------------
+# 10. maintenance_schedule — customer-facing service schedules
+#     (moved from core erpclaw-support tables in init_schema.py; carries no
+#     company_id and no customer/item foreign keys, unlike the tables above)
+# ---------------------------------------------------------------------------
+MAINTENANCE_SCHEDULE = Table(
+    "maintenance_schedule", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("customer_id", Text),
+    Column("item_id", Text),
+    Column("serial_number_id", Text),
+    Column("schedule_frequency", Text, nullable=False,
+           server_default=text("'quarterly'")),
+    Column("start_date", Text, nullable=False),
+    Column("end_date", Text, nullable=False),
+    Column("last_completed_date", Text),
+    Column("next_due_date", Text),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("assigned_to", Text),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "schedule_frequency IN ('monthly','quarterly','semi_annual','annual')",
+        name="ck_maintenance_schedule_schedule_frequency"),
+    CheckConstraint("status IN ('active','expired','cancelled')",
+                    name="ck_maintenance_schedule_status"),
+)
+
+Index("idx_maint_sched_customer", MAINTENANCE_SCHEDULE.c.customer_id)
+Index("idx_maint_sched_status", MAINTENANCE_SCHEDULE.c.status)
+
+# ---------------------------------------------------------------------------
+# 11. maintenance_visit — on-site service visits
+#     (moved from core erpclaw-support tables in init_schema.py)
+# ---------------------------------------------------------------------------
+MAINTENANCE_VISIT = Table(
+    "maintenance_visit", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("maintenance_schedule_id", Text,
+           ForeignKey("maintenance_schedule.id", ondelete="RESTRICT"),
+           nullable=False),
+    Column("customer_id", Text),
+    Column("visit_date", Text, nullable=False),
+    Column("completed_by", Text),
+    Column("observations", Text),
+    Column("work_done", Text),
+    Column("status", Text, nullable=False, server_default=text("'scheduled'")),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('scheduled','completed','cancelled')",
+                    name="ck_maintenance_visit_status"),
+)
+
+Index("idx_maint_visit_schedule", MAINTENANCE_VISIT.c.maintenance_schedule_id)
+
 
 def init_maintenance_schema(db_path: str = DB_PATH) -> dict:
-    """Create maintenance tables and indexes."""
-    conn = sqlite3.connect(db_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
+    """Create maintenance tables and indexes on whichever backend is configured.
 
-    tables_created = 0
-    indexes_created = 0
-
-    # -----------------------------------------------------------------------
-    # 1. equipment — tracked equipment / assets
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS equipment (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            name                TEXT NOT NULL,
-            equipment_type      TEXT NOT NULL DEFAULT 'machine'
-                                CHECK(equipment_type IN ('machine','vehicle','tool','instrument','fixture','other')),
-            model               TEXT,
-            manufacturer        TEXT,
-            serial_number       TEXT,
-            location            TEXT,
-            parent_equipment_id TEXT REFERENCES equipment(id),
-            asset_id            TEXT,
-            item_id             TEXT,
-            purchase_date       TEXT,
-            warranty_expiry     TEXT,
-            criticality         TEXT NOT NULL DEFAULT 'medium'
-                                CHECK(criticality IN ('critical','high','medium','low')),
-            status              TEXT NOT NULL DEFAULT 'operational'
-                                CHECK(status IN ('operational','maintenance','breakdown','decommissioned')),
-            notes               TEXT,
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equipment_company ON equipment(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equipment_status ON equipment(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equipment_type ON equipment(equipment_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equipment_parent ON equipment(parent_equipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equipment_criticality ON equipment(criticality)")
-    indexes_created += 5
-
-    # -----------------------------------------------------------------------
-    # 2. equipment_reading — meter / sensor readings
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS equipment_reading (
-            id              TEXT PRIMARY KEY,
-            equipment_id    TEXT NOT NULL REFERENCES equipment(id) ON DELETE RESTRICT,
-            reading_type    TEXT NOT NULL DEFAULT 'meter'
-                            CHECK(reading_type IN ('meter','temperature','pressure','vibration','other')),
-            reading_value   TEXT NOT NULL,
-            reading_unit    TEXT,
-            reading_date    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            recorded_by     TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equip_reading_equip ON equipment_reading(equipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equip_reading_company ON equipment_reading(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_equip_reading_date ON equipment_reading(reading_date)")
-    indexes_created += 3
-
-    # -----------------------------------------------------------------------
-    # 3. maintenance_plan — preventive / predictive schedules
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_plan (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            name                TEXT NOT NULL,
-            equipment_id        TEXT NOT NULL REFERENCES equipment(id) ON DELETE RESTRICT,
-            plan_type           TEXT NOT NULL DEFAULT 'preventive'
-                                CHECK(plan_type IN ('preventive','predictive','condition_based')),
-            frequency           TEXT NOT NULL DEFAULT 'monthly'
-                                CHECK(frequency IN ('daily','weekly','biweekly','monthly','quarterly','semi_annual','annual')),
-            frequency_days      INTEGER,
-            last_performed      TEXT,
-            next_due            TEXT,
-            estimated_duration  TEXT,
-            estimated_cost      TEXT DEFAULT '0',
-            assigned_to         TEXT,
-            instructions        TEXT,
-            is_active           INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_equipment ON maintenance_plan(equipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_company ON maintenance_plan(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_next_due ON maintenance_plan(next_due)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_active ON maintenance_plan(is_active)")
-    indexes_created += 4
-
-    # -----------------------------------------------------------------------
-    # 4. maintenance_plan_item — spare parts for plans
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_plan_item (
-            id          TEXT PRIMARY KEY,
-            plan_id     TEXT NOT NULL REFERENCES maintenance_plan(id) ON DELETE CASCADE,
-            item_id     TEXT,
-            item_name   TEXT NOT NULL,
-            quantity    TEXT NOT NULL DEFAULT '1',
-            notes       TEXT,
-            company_id  TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_item_plan ON maintenance_plan_item(plan_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_plan_item_company ON maintenance_plan_item(company_id)")
-    indexes_created += 2
-
-    # -----------------------------------------------------------------------
-    # 5. maintenance_work_order — corrective / preventive work orders
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_work_order (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            equipment_id        TEXT NOT NULL REFERENCES equipment(id) ON DELETE RESTRICT,
-            plan_id             TEXT REFERENCES maintenance_plan(id),
-            work_order_type     TEXT NOT NULL DEFAULT 'corrective'
-                                CHECK(work_order_type IN ('preventive','corrective','emergency','inspection')),
-            priority            TEXT NOT NULL DEFAULT 'medium'
-                                CHECK(priority IN ('critical','high','medium','low')),
-            description         TEXT,
-            assigned_to         TEXT,
-            scheduled_date      TEXT,
-            started_at          TEXT,
-            completed_at        TEXT,
-            actual_duration     TEXT,
-            actual_cost         TEXT DEFAULT '0',
-            failure_mode        TEXT,
-            root_cause          TEXT,
-            resolution          TEXT,
-            status              TEXT NOT NULL DEFAULT 'draft'
-                                CHECK(status IN ('draft','scheduled','in_progress','completed','cancelled')),
-            company_id          TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_equipment ON maintenance_work_order(equipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_plan ON maintenance_work_order(plan_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_company ON maintenance_work_order(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_status ON maintenance_work_order(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_priority ON maintenance_work_order(priority)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_scheduled ON maintenance_work_order(scheduled_date)")
-    indexes_created += 6
-
-    # -----------------------------------------------------------------------
-    # 6. maintenance_work_order_item — parts used in work orders
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_work_order_item (
-            id              TEXT PRIMARY KEY,
-            work_order_id   TEXT NOT NULL REFERENCES maintenance_work_order(id) ON DELETE CASCADE,
-            item_id         TEXT,
-            item_name       TEXT NOT NULL,
-            quantity        TEXT NOT NULL DEFAULT '1',
-            unit_cost       TEXT DEFAULT '0',
-            total_cost      TEXT DEFAULT '0',
-            notes           TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_item_wo ON maintenance_work_order_item(work_order_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_wo_item_company ON maintenance_work_order_item(company_id)")
-    indexes_created += 2
-
-    # -----------------------------------------------------------------------
-    # 7. maintenance_checklist — checklists attached to work orders
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_checklist (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            work_order_id   TEXT NOT NULL REFERENCES maintenance_work_order(id) ON DELETE CASCADE,
-            name            TEXT NOT NULL,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_checklist_wo ON maintenance_checklist(work_order_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_checklist_company ON maintenance_checklist(company_id)")
-    indexes_created += 2
-
-    # -----------------------------------------------------------------------
-    # 8. maintenance_checklist_item — individual checklist steps
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_checklist_item (
-            id              TEXT PRIMARY KEY,
-            checklist_id    TEXT NOT NULL REFERENCES maintenance_checklist(id) ON DELETE CASCADE,
-            description     TEXT NOT NULL,
-            is_completed    INTEGER NOT NULL DEFAULT 0 CHECK(is_completed IN (0,1)),
-            completed_at    TEXT,
-            completed_by    TEXT,
-            notes           TEXT,
-            sort_order      INTEGER NOT NULL DEFAULT 0,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_cl_item_checklist ON maintenance_checklist_item(checklist_id)")
-    indexes_created += 1
-
-    # -----------------------------------------------------------------------
-    # 9. downtime_record — equipment downtime tracking
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS downtime_record (
-            id              TEXT PRIMARY KEY,
-            equipment_id    TEXT NOT NULL REFERENCES equipment(id) ON DELETE RESTRICT,
-            work_order_id   TEXT REFERENCES maintenance_work_order(id),
-            start_time      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            end_time        TEXT,
-            duration_hours  TEXT,
-            reason          TEXT NOT NULL DEFAULT 'breakdown'
-                            CHECK(reason IN ('breakdown','maintenance','setup','changeover','other')),
-            description     TEXT,
-            impact          TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id) ON DELETE RESTRICT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_equipment ON downtime_record(equipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_wo ON downtime_record(work_order_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_company ON downtime_record(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_downtime_reason ON downtime_record(reason)")
-    indexes_created += 4
-
-    # -----------------------------------------------------------------------
-    # 10. maintenance_schedule — customer-facing service schedules
-    #     (moved from core erpclaw-support tables in init_schema.py)
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_schedule (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            customer_id     TEXT,
-            item_id         TEXT,
-            serial_number_id TEXT,
-            schedule_frequency TEXT NOT NULL DEFAULT 'quarterly'
-                            CHECK(schedule_frequency IN ('monthly','quarterly','semi_annual','annual')),
-            start_date      TEXT NOT NULL,
-            end_date        TEXT NOT NULL,
-            last_completed_date TEXT,
-            next_due_date   TEXT,
-            status          TEXT NOT NULL DEFAULT 'active'
-                            CHECK(status IN ('active','expired','cancelled')),
-            assigned_to     TEXT,
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_sched_customer ON maintenance_schedule(customer_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_sched_status ON maintenance_schedule(status)")
-    indexes_created += 2
-
-    # -----------------------------------------------------------------------
-    # 11. maintenance_visit — on-site service visits
-    #     (moved from core erpclaw-support tables in init_schema.py)
-    # -----------------------------------------------------------------------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_visit (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            maintenance_schedule_id TEXT NOT NULL REFERENCES maintenance_schedule(id) ON DELETE RESTRICT,
-            customer_id     TEXT,
-            visit_date      TEXT NOT NULL,
-            completed_by    TEXT,
-            observations    TEXT,
-            work_done       TEXT,
-            status          TEXT NOT NULL DEFAULT 'scheduled'
-                            CHECK(status IN ('scheduled','completed','cancelled')),
-            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_maint_visit_schedule ON maintenance_visit(maintenance_schedule_id)")
-    indexes_created += 1
-
-    conn.commit()
-    conn.close()
-
+    Same contract as before the ADR-0034 conversion: idempotent (a re-run creates
+    nothing), and the returned counts are what was ACTUALLY created rather than
+    what was declared.
+    """
+    result = provision(METADATA, db_path)
     return {
         "database": db_path,
-        "tables": tables_created,
-        "indexes": indexes_created,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
     }
 
 

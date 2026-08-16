@@ -219,7 +219,9 @@ Run: python3 init_db.py [db_path]
 import os
 import sqlite3
 import sys
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
@@ -749,11 +751,13 @@ Usage: python3 db_query.py --action <action-name> [flags]
 Routes all {len(all_actions)} {module_name} actions to the {module_short} domain module.
 """
 import argparse
+import importlib.util
 import os
 import sys
 
 # Shared library
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 # Domain module (same directory)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
@@ -970,7 +974,8 @@ MODULE_INIT_PATH = os.path.join(ROOT_DIR, "init_db.py")
 # Make erpclaw_lib importable
 ERPCLAW_LIB = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib")
 if ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, ERPCLAW_LIB)
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, ERPCLAW_LIB)
 
 
 def load_db_query():

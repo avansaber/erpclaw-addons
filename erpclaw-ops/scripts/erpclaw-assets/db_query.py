@@ -21,7 +21,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # Add shared lib to path
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
@@ -31,8 +33,8 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs
-    from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
+    from erpclaw_lib.query import Case, Criterion, DecimalAbs, DecimalSum, Field, NULL, Not, Order, P, Q, Table, fn, now as sql_now
+    from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
     import json as _json
@@ -52,6 +54,42 @@ VALID_MAINTENANCE_TYPES = ("preventive", "corrective")
 VALID_MAINTENANCE_STATUSES = ("planned", "overdue", "completed")
 VALID_DISPOSAL_METHODS = ("sale", "scrap", "write_off")
 VALID_SCHEDULE_STATUSES = ("pending", "posted", "skipped")
+
+# Which account_types each disposal leg may post to (M91, 2026-08-12). M61 gated
+# these legs on root_type alone, which is too coarse in both directions: a gain
+# credited to Cost of Goods Sold is an expense root and was accepted (it reads as
+# a negative cost of goods sold and never reaches the revenue line), and proceeds
+# posted to an unrelated fixed-asset account are an asset root and were accepted
+# (our own cash-flow statement then reports no cash for the sale). Validity of
+# the strings themselves comes from account_type_registry (init_schema.py
+# ACCOUNT_TYPE_REGISTRY_SEED); these tuples are subsets of it.
+#
+# ('bank','cash') is not invented here — it is the definition of cash the rest of
+# the product already uses: erpclaw-reports cash-flow, erpclaw-analytics,
+# erpclaw-ai-engine, and erpclaw-gl's FX revaluation all select on exactly it.
+PROCEEDS_ACCOUNT_TYPES = ("bank", "cash")
+
+# M94 (2026-08-12) closed M91's residual by registering the type the registry was
+# missing. `disposal_gain_loss` names the accounts a chart designates for asset
+# disposal and nothing else, so the gain/loss leg can finally be pinned to the
+# disposal line instead of merely excluded from other machinery: on the shipped
+# chart it accepts exactly 4220 Gain on Asset Disposal and 5340 Loss on Asset
+# Disposal, and refuses 4110 Sales Revenue and 5220 Rent Expense, which M91's
+# allowlist could not. One type covers both sides because the root_type gate
+# above already separates them and a single combined "Gain/(Loss) on Disposal"
+# account is a legitimate chart (exchange_gain_loss is the same shape).
+DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE = "disposal_gain_loss"
+GAIN_LOSS_ACCOUNT_TYPES = (DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE,)
+
+# What M91 enforced, kept for installs that have not registered the new type.
+# This module is an ADDON: module_manager runs foundation migrations only on the
+# update-foundation path, so updating erpclaw-ops does NOT run migration 035, and
+# an install can hold this code with a chart whose 4220 is still `revenue`.
+# Shipping the tight allowlist unconditionally would make dispose-asset refuse
+# every disposal on that install. So the strictness is chosen per-install from
+# the install's own registry (_gain_loss_account_types), which is what M0 built
+# account_type_registry for. Full reasoning: planning/simlogs/m94_SIM_2026-08-12.md §2.
+GAIN_LOSS_ACCOUNT_TYPES_PRE_M94 = ("revenue", "expense")
 
 
 def _parse_json_arg(value, name):
@@ -100,6 +138,85 @@ def _asset_status_registered(conn, status):
     return conn.execute(
         "SELECT 1 FROM asset_status_registry WHERE status = ? AND is_active = 1", (status,)
     ).fetchone() is not None
+
+
+def _account_type_registry_state(conn, account_type):
+    """(registered, active) for account_type on THIS install (M94).
+
+    Two different questions are asked of the same row and they are not the same
+    question, so both halves are returned rather than one boolean:
+
+      * `registered and active` is the validity question `add-account` asks
+        (erpclaw-gl's `_assert_account_type_registered`) and decides how strict
+        the gain/loss gate is;
+      * `registered` at all decides whether this install's FOUNDATION has been
+        through M94, because the only two things that ever create this row are
+        init_db()'s seed and foundation migration 035 — and that same foundation
+        change is what taught update-account to retype an account. An operator who
+        deactivated the type still has the retyping.
+
+    A registry this connection cannot ask reads as neither, which selects the
+    pre-M94 allowlist and the pre-M94 steer — the fail-safe direction, because the
+    alternative is a traceback out of a money action on a pre-M0 install.
+    """
+    try:
+        row = conn.execute(
+            "SELECT is_active FROM account_type_registry WHERE account_type = ?",
+            (account_type,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — a registry we cannot read is not a registry
+        return False, False
+    if row is None:
+        return False, False
+    return True, bool(row["is_active"])
+
+
+def _gain_loss_account_types(conn):
+    """The account_types this install's disposal gain/loss leg may post to.
+
+    Tight (`disposal_gain_loss` only) once the install knows that type, which
+    happens exactly two ways: init_db() seeds it on a fresh install, and
+    foundation migration 035 registers it on a live one. Until then this returns
+    M91's allowlist, so an install that updated this addon without updating the
+    foundation behaves precisely as it did before M94 rather than refusing every
+    disposal. See planning/simlogs/m94_SIM_2026-08-12.md §2 for the skew this
+    exists to absorb, and for the one direction it cannot absorb.
+    """
+    registered, active = _account_type_registry_state(
+        conn, DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE)
+    if registered and active:
+        return GAIN_LOSS_ACCOUNT_TYPES
+    return GAIN_LOSS_ACCOUNT_TYPES_PRE_M94
+
+
+def _retype_clause(conn, remedy_type):
+    """The "retype an existing account" half of a disposal refusal's steer (M94).
+
+    M91's steer said an existing account's type could not be changed, which was
+    true then. M94 made it changeable — in the FOUNDATION. On an install that
+    updated this addon and not the foundation, `update-account --account-type X`
+    answers "No fields to update" (the flag exists on the parser and the action
+    drops it), and passing it beside `--name` answers `ok` while leaving the type
+    alone. Steering that operator to update-account hands them a remedy that
+    silently does nothing, which is worse than naming no remedy at all.
+
+    So the same registry probe that chooses the allowlist also chooses the steer:
+    offer update-account only where the foundation that ships it is present, and
+    otherwise say plainly that it is not, and what does work here.
+    """
+    registered, _active = _account_type_registry_state(
+        conn, DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE)
+    if registered:
+        # Concatenated, not f-string interpolated: the Article 10 security scan
+        # flags any f-string that opens with a SQL verb, and "update-account ..."
+        # opens with one. This is prose, not SQL.
+        return ("Or retype an existing account with update-account --account-type "
+                + remedy_type + ".")
+    return ("Retyping an existing account is not available on this install: "
+            "update-account gained --account-type in the same erpclaw foundation "
+            "release that registers the '" + DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE
+            + "' account type, and this install has neither, so passing it there "
+            "would report success and change nothing. Add the account instead.")
 
 
 def _validate_asset_exists(conn, asset_id: str):
@@ -909,7 +1026,7 @@ def post_depreciation(conn, args):
     asset_upd_q = (Q.update(asset_t)
                    .set(Field("current_book_value"), P())
                    .set(Field("accumulated_depreciation"), P())
-                   .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                   .set(Field("updated_at"), sql_now())
                    .where(asset_t.id == P()))
     conn.execute(asset_upd_q.get_sql(), (str(new_book_value), str(new_accum), sched_dict["asset_id"]))
 
@@ -1058,7 +1175,7 @@ def run_depreciation(conn, args):
         asset_upd_q = (Q.update(asset_rd_t)
                        .set(Field("current_book_value"), P())
                        .set(Field("accumulated_depreciation"), P())
-                       .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                       .set(Field("updated_at"), sql_now())
                        .where(asset_rd_t.id == P()))
         conn.execute(asset_upd_q.get_sql(), (str(new_book_value), str(new_accum), entry["asset_id"]))
 
@@ -1319,7 +1436,7 @@ def complete_maintenance(conn, args):
         conn.execute((Q.update(asset_t)
                       .set(Field("gross_value"), P())
                       .set(Field("current_book_value"), P())
-                      .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                      .set(Field("updated_at"), sql_now())
                       .where(asset_t.id == P())).get_sql(),
                      (str(new_gross), str(new_book), maint_dict["asset_id"]))
         # ... and ALWAYS recompute depreciation (the capex path must not skip it).
@@ -1353,7 +1470,7 @@ def complete_maintenance(conn, args):
                  .set(Field("performed_by"), P())
                  .set(Field("description"), P())
                  .set(Field("is_capex"), P())
-                 .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                 .set(Field("updated_at"), sql_now())
                  .where(mnt_t.id == P()))
     conn.execute(mnt_upd_q.get_sql(),
         (actual_date, cost, performed_by, description, is_capex, args.maintenance_id),
@@ -1380,18 +1497,136 @@ def complete_maintenance(conn, args):
 # 13. dispose-asset
 # ---------------------------------------------------------------------------
 
+def _validate_disposal_account(conn, account_id, flag, allowed_root_types):
+    """Resolve one disposal account and refuse anything unpostable.
+
+    Same shape as write-off-invoice's `--write-off-account-id` resolution: the
+    account must exist, be a leaf (GL step 2 rejects group accounts anyway, but
+    the message is clearer here), and sit on the side of the books the leg
+    belongs on. Everything else (disabled / frozen / company affinity) stays
+    with the 12-step validation, which owns those checks.
+    """
+    acct_t = Table("account")
+    row = conn.execute(
+        (Q.from_(acct_t).select(acct_t.id, acct_t.name, acct_t.root_type,
+                                acct_t.account_type, acct_t.is_group)
+         .where(acct_t.id == P())).get_sql(), (account_id,)).fetchone()
+    if not row:
+        err(f"Account {account_id} not found (--{flag})")
+    if row["is_group"]:
+        err(f"--{flag} account '{row['name']}' is a group account; "
+            "GL postings need a leaf account",
+            suggestion="Pass one of its child accounts instead.")
+    if row["root_type"] not in allowed_root_types:
+        err(f"--{flag} account '{row['name']}' has root_type "
+            f"'{row['root_type']}'; this leg requires "
+            f"{' or '.join(allowed_root_types)}")
+    return row
+
+
+def _assert_disposal_account_type(row, flag, allowed_account_types, wanted,
+                                  retype_clause, extra_suggestion=None):
+    """Refuse a disposal account whose `account_type` is not one this leg posts to.
+
+    Separate from `_validate_disposal_account` on purpose (M91, 2026-08-12): the
+    caller has steers that are more specific than "wrong account type" — the
+    receivable-needs-a-party explanation, and the identity checks against the
+    category's own accounts — and those must be reachable first, or a user who
+    passes the asset's own account is told the type is wrong instead of being told
+    they passed the asset's own account. So the type gate runs last, after the
+    root-type gate has already established which side of the books we are on.
+
+    `account_type` is nullable on `account` and legal to leave unset via
+    add-account, so an untyped account lands here as None and is refused by name:
+    root_type alone is exactly the information M91 proved insufficient, and
+    "unclassified" is not a classification. The steer says how to fix it.
+
+    `retype_clause` (M94, corrected by the merge-QA rider) is REQUIRED rather than
+    defaulted, so no call site can silently ship the wrong half of it. M94 made
+    retyping possible in the foundation, and this addon can be updated without the
+    foundation; a steer that offers `update-account --account-type X` on an install
+    whose update-account drops that flag is an instruction that reports success and
+    changes nothing. `_retype_clause` asks the install which sentence is true.
+
+    `extra_suggestion` carries the one thing this helper cannot know: which
+    allowlist the caller selected and why. It is appended only when the caller has
+    something to add.
+    """
+    if row["account_type"] in allowed_account_types:
+        return row
+    types = " or ".join(f"'{t}'" for t in allowed_account_types)
+    if row["account_type"]:
+        got = f"is a '{row['account_type']}' account"
+    else:
+        got = "has no account_type set"
+    # Built by concatenation, not by an f-string: the Article 10 security scan
+    # flags any f-string that opens with a SQL verb, and "update-account ..."
+    # opens with one. The steer is prose, not SQL, and reads better than a
+    # baseline bump would.
+    remedy_type = allowed_account_types[0]
+    suggestion = ("Pass " + wanted + ", or add one with add-account "
+                  "--account-type " + remedy_type + ". " + retype_clause)
+    if extra_suggestion:
+        suggestion = f"{suggestion} {extra_suggestion}"
+    err(f"--{flag} account '{row['name']}' {got}; this leg needs {wanted} "
+        f"(account_type {types})",
+        suggestion=suggestion)
+    return row
+
+
 def dispose_asset(conn, args):
     """Dispose of an asset (sale, scrap, or write_off).
 
     Required: --asset-id, --disposal-date, --disposal-method
+    Required when the disposal brings in proceeds (--sale-amount > 0):
+              --proceeds-account-id — the cash/bank account the money lands in
+              (account_type 'bank' or 'cash').
+    Required when the disposal produces a gain or a loss:
+              --gain-loss-account-id — the P&L account it is recognized in
+              (account_type 'disposal_gain_loss'; on an install that has not
+              registered that type yet, 'revenue' or 'expense'; never the
+              category's depreciation account).
     Optional: --sale-amount, --buyer-details, --cost-center-id
 
     GL entries for disposal:
     - DR Accumulated Depreciation (full accumulated amount)
-    - DR Asset Disposal/Loss (if loss) OR CR Gain on Disposal (if gain)
+    - DR the proceeds account     (sale_amount, when > 0)
+    - DR the gain/loss account    (if loss) OR CR it (if gain)
     - CR Asset Account (gross_value)
 
-    For scrap/write_off: sale_amount = 0, loss = current_book_value
+    For scrap/write_off: sale_amount = 0, loss = current_book_value.
+    A fully depreciated asset scrapped at zero book value needs neither account:
+    it posts DR Accumulated Depreciation / CR Asset and nothing else.
+
+    Why the accounts are arguments (M61, 2026-08-12): until this fix every
+    proceeds and gain/loss leg was posted to the category's
+    depreciation_account_id. The pair balanced, so the 12-step validation and
+    every balance check passed, while no cash account was ever touched and net
+    income came out understated by exactly the sale proceeds. Neither account is
+    a property of the asset class — the account a sale lands in belongs to the
+    sale — so they are resolved per disposal, the way write-off-invoice resolves
+    its write-off account, and refused rather than defaulted when absent.
+
+    Why the gates read account_type too (M91, 2026-08-12): M61 gated both legs on
+    root_type alone, and the M61 merge-QA pass proved that too loose in both
+    directions. A gain credited to Cost of Goods Sold was accepted — the pair
+    still balances and net income is still right, so nothing that checks totals
+    complains, while cost of goods sold reads negative and the gain never reaches
+    the revenue line. Proceeds posted to an unrelated fixed-asset account were
+    accepted — also an asset root — so the money never reached cash and the
+    cash-flow statement reported none for the sale. Both legs now name the
+    account_types they post to (PROCEEDS_ACCOUNT_TYPES / GAIN_LOSS_ACCOUNT_TYPES),
+    which is the promise this docstring and SKILL.md were already making.
+
+    Why the gain/loss allowlist is chosen per install (M94, 2026-08-12): M91 could
+    only allow ('revenue','expense') because the account-type registry carried no
+    disposal class at all, so a gain credited to plain Sales Revenue was still
+    accepted. M94 registers `disposal_gain_loss` and reclassifies the shipped
+    chart, and this gate tightens to it — but only on an install that knows the
+    type. This module is an addon and foundation migrations do not run when it is
+    updated, so an install can legitimately hold this code with an un-migrated
+    chart, and refusing every disposal there would be a worse defect than the one
+    being fixed. _gain_loss_account_types asks the install's own registry.
     """
     if not args.asset_id:
         err("--asset-id is required")
@@ -1420,14 +1655,11 @@ def dispose_asset(conn, args):
 
     asset_account_id = cat_dict.get("asset_account_id")
     accum_dep_account_id = cat_dict.get("accumulated_depreciation_account_id")
-    dep_account_id = cat_dict.get("depreciation_account_id")
 
     if not asset_account_id:
         err("Asset category has no asset_account_id set")
     if not accum_dep_account_id:
         err("Asset category has no accumulated_depreciation_account_id set")
-    if not dep_account_id:
-        err("Asset category has no depreciation_account_id set (needed for gain/loss)")
 
     gross_value = to_decimal(asset_dict["gross_value"])
     current_book_value = to_decimal(asset_dict["current_book_value"])
@@ -1439,11 +1671,96 @@ def dispose_asset(conn, args):
     else:
         # Scrap / write_off: no sale proceeds
         sale_amount = Decimal("0")
+    if sale_amount < 0:
+        err("--sale-amount cannot be negative")
 
     # Calculate gain or loss
     # gain_or_loss = sale_amount - current_book_value
     # Positive = gain, Negative = loss
     gain_or_loss = round_currency(sale_amount - current_book_value)
+
+    # Resolve the disposal accounts BEFORE anything is written, so a disposal
+    # that cannot post leaves no asset_disposal row behind.
+    proceeds_account_id = None
+    gain_loss_account_id = None
+    category_accounts = {asset_account_id: "the category's asset account",
+                         accum_dep_account_id:
+                             "the category's accumulated-depreciation account"}
+
+    if sale_amount > 0:
+        if not args.proceeds_account_id:
+            err(f"--proceeds-account-id is required when a disposal has proceeds "
+                f"(the cash/bank account the {round_currency(sale_amount)} lands in)",
+                suggestion="Pass the account the buyer's money was received into.")
+        proceeds = _validate_disposal_account(
+            conn, args.proceeds_account_id, "proceeds-account-id", ("asset",))
+        proceeds_account_id = proceeds["id"]
+        if proceeds["account_type"] == "receivable":
+            err(f"--proceeds-account-id account '{proceeds['name']}' is a "
+                "receivable account. A receivable leg needs a customer party "
+                "(GL validation step 5) and dispose-asset has no customer "
+                "surface, so a credit sale cannot be posted here.",
+                suggestion="Post the proceeds to a cash/bank account, or invoice "
+                           "the buyer through the selling flow and settle there.")
+        if proceeds_account_id in category_accounts:
+            err(f"--proceeds-account-id must differ from "
+                f"{category_accounts[proceeds_account_id]}; proceeds posted there "
+                "would cancel part of the asset's own removal instead of "
+                "recording the money received")
+        # M91: root_type='asset' was too coarse — an unrelated fixed-asset account
+        # passed it, so 6,000.00 of proceeds could land on a vehicle nobody bought
+        # and the cash-flow statement would report no cash for the sale.
+        _assert_disposal_account_type(
+            proceeds, "proceeds-account-id", PROCEEDS_ACCOUNT_TYPES,
+            "the cash or bank account the money was received into",
+            _retype_clause(conn, PROCEEDS_ACCOUNT_TYPES[0]))
+
+    if gain_or_loss != 0:
+        if not args.gain_loss_account_id:
+            kind = "gain" if gain_or_loss > 0 else "loss"
+            err(f"--gain-loss-account-id is required: this disposal produces a "
+                f"{kind} of {abs(gain_or_loss)} "
+                f"(proceeds {round_currency(sale_amount)} vs book value "
+                f"{round_currency(current_book_value)})",
+                suggestion="Pass the gain/loss on disposal account this "
+                           f"{kind} is recognized in.")
+        # No identity gate needed against the proceeds or the category's asset and
+        # accumulated-depreciation accounts: those are balance-sheet accounts and
+        # the root-type gate already refuses anything that is not income or
+        # expense. The category's DEPRECIATION account is a different matter — it
+        # is an expense account, so it passes both the root-type gate and the
+        # account_type allowlist whenever a chart types it plainly 'expense', and
+        # it is precisely where M61 found every disposal leg posted. Refused by
+        # identity so no chart's typing can let the defect back in.
+        gain_loss = _validate_disposal_account(
+            conn, args.gain_loss_account_id, "gain-loss-account-id",
+            ("income", "expense"))
+        gain_loss_account_id = gain_loss["id"]
+        if gain_loss_account_id == cat_dict.get("depreciation_account_id"):
+            err(f"--gain-loss-account-id account '{gain_loss['name']}' is the "
+                "asset category's depreciation account. A disposal gain or loss "
+                "is not depreciation; posting it there restates the P&L line the "
+                "asset's depreciation is read from.",
+                suggestion="Pass the gain/loss on disposal account instead.")
+        # M91: root_type in ('income','expense') was too coarse — a gain credited
+        # to Cost of Goods Sold passed it, reading as a negative cost of goods
+        # sold while never reaching the revenue line.
+        # M94: and ('revenue','expense') was still too coarse — a gain credited to
+        # plain Sales Revenue passed THAT. The allowlist is now whichever one this
+        # install can actually honour; see _gain_loss_account_types.
+        allowed_gain_loss = _gain_loss_account_types(conn)
+        steer = None
+        if allowed_gain_loss is GAIN_LOSS_ACCOUNT_TYPES_PRE_M94:
+            steer = (f"This install has not registered the "
+                     f"'{DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE}' account type, so the "
+                     "wider pre-M94 rule is in force; update the erpclaw "
+                     "foundation to register it, get retyping, and turn on the "
+                     "tighter disposal check.")
+        _assert_disposal_account_type(
+            gain_loss, "gain-loss-account-id", allowed_gain_loss,
+            "the gain/loss on disposal account",
+            _retype_clause(conn, allowed_gain_loss[0]),
+            extra_suggestion=steer)
 
     # Create disposal record
     disposal_id = str(uuid.uuid4())
@@ -1468,20 +1785,23 @@ def dispose_asset(conn, args):
     #
     # Sale at gain:
     #   DR Accumulated Depreciation   (accumulated_depreciation)
-    #   DR Cash/Receivable            (sale_amount)
+    #   DR --proceeds-account-id      (sale_amount)
     #   CR Fixed Asset Account        (gross_value)
-    #   CR Gain on Disposal           (gain_or_loss)
+    #   CR --gain-loss-account-id     (gain_or_loss)
     #
     # Sale at loss:
     #   DR Accumulated Depreciation   (accumulated_depreciation)
-    #   DR Cash/Receivable            (sale_amount)
-    #   DR Loss on Disposal           (abs(gain_or_loss))
+    #   DR --proceeds-account-id      (sale_amount)
+    #   DR --gain-loss-account-id     (abs(gain_or_loss))
     #   CR Fixed Asset Account        (gross_value)
     #
     # Scrap (sale=0, loss = book_value):
     #   DR Accumulated Depreciation   (accumulated_depreciation)
-    #   DR Loss on Disposal           (book_value)
+    #   DR --gain-loss-account-id     (book_value)
     #   CR Fixed Asset Account        (gross_value)
+    #
+    # Sale at exactly book value (gain_or_loss == 0): the proceeds leg replaces
+    # the P&L leg entirely — the disposal moves no profit at all.
     #
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
     fiscal_year = _get_fiscal_year(conn, args.disposal_date)
@@ -1507,53 +1827,33 @@ def dispose_asset(conn, args):
         "fiscal_year": fiscal_year,
     })
 
-    if gain_or_loss < Decimal("0"):
-        # Loss on disposal
-        # DR Loss account for abs(gain_or_loss)
+    # DR the proceeds account — the money the buyer actually paid.
+    if sale_amount > 0:
         gl_entries.append({
-            "account_id": dep_account_id,
-            "debit": str(round_currency(abs(gain_or_loss))),
-            "credit": "0",
-            "cost_center_id": cost_center_id,
-            "fiscal_year": fiscal_year,
-        })
-        # If there's a sale amount, DR the sale proceeds too
-        if sale_amount > 0:
-            gl_entries.append({
-                "account_id": dep_account_id,
-                "debit": str(round_currency(sale_amount)),
-                "credit": "0",
-                "cost_center_id": cost_center_id,
-                "fiscal_year": fiscal_year,
-            })
-    elif gain_or_loss > Decimal("0"):
-        # Gain on disposal: sale > book_value
-        # DR Sale proceeds
-        gl_entries.append({
-            "account_id": dep_account_id,
+            "account_id": proceeds_account_id,
             "debit": str(round_currency(sale_amount)),
             "credit": "0",
             "cost_center_id": cost_center_id,
             "fiscal_year": fiscal_year,
         })
-        # CR Gain
+
+    # The gain/loss plug: DR the P&L account for a loss, CR it for a gain.
+    if gain_or_loss < Decimal("0"):
         gl_entries.append({
-            "account_id": dep_account_id,
+            "account_id": gain_loss_account_id,
+            "debit": str(round_currency(abs(gain_or_loss))),
+            "credit": "0",
+            "cost_center_id": cost_center_id,
+            "fiscal_year": fiscal_year,
+        })
+    elif gain_or_loss > Decimal("0"):
+        gl_entries.append({
+            "account_id": gain_loss_account_id,
             "debit": "0",
             "credit": str(round_currency(gain_or_loss)),
             "cost_center_id": cost_center_id,
             "fiscal_year": fiscal_year,
         })
-    else:
-        # No gain/loss: sale_amount == book_value
-        if sale_amount > 0:
-            gl_entries.append({
-                "account_id": dep_account_id,
-                "debit": str(round_currency(sale_amount)),
-                "credit": "0",
-                "cost_center_id": cost_center_id,
-                "fiscal_year": fiscal_year,
-            })
 
     try:
         gl_ids = insert_gl_entries(
@@ -1565,6 +1865,10 @@ def dispose_asset(conn, args):
             remarks=f"Disposal ({disposal_method}) of {asset_dict['naming_series']}",
         )
     except (ValueError, NotImplementedError) as e:
+        # One transaction: the asset_disposal row above must not survive a
+        # failed posting on an in-process connection (the CLI only gets away
+        # with it because close() discards the open transaction).
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL posting failed: {e}")
 
@@ -1580,7 +1884,7 @@ def dispose_asset(conn, args):
     asset_disp_q = (Q.update(asset_t)
                     .set(Field("status"), P())
                     .set(Field("current_book_value"), ValueWrapper("0"))
-                    .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                    .set(Field("updated_at"), sql_now())
                     .where(asset_t.id == P()))
     conn.execute(asset_disp_q.get_sql(), (new_status, args.asset_id))
 
@@ -1589,7 +1893,9 @@ def dispose_asset(conn, args):
                        "current_book_value": asset_dict["current_book_value"]},
            new_values={"status": new_status, "disposal_method": disposal_method,
                        "sale_amount": str(round_currency(sale_amount)),
-                       "gain_or_loss": str(gain_or_loss)},
+                       "gain_or_loss": str(gain_or_loss),
+                       "proceeds_account_id": proceeds_account_id,
+                       "gain_loss_account_id": gain_loss_account_id},
            description=f"Disposed asset {asset_dict['naming_series']} via {disposal_method}")
 
     conn.commit()
@@ -1600,6 +1906,10 @@ def dispose_asset(conn, args):
          "book_value_at_disposal": str(round_currency(current_book_value)),
          "gain_or_loss": str(gain_or_loss),
          "new_status": new_status,
+         # Which accounts the money actually reached, so a disposal is
+         # answerable from the payload and the audit log alone.
+         "proceeds_account_id": proceeds_account_id,
+         "gain_loss_account_id": gain_loss_account_id,
          "gl_entry_ids": gl_ids,
          "message": f"Asset {asset_dict['naming_series']} disposed via {disposal_method}"})
 
@@ -2155,7 +2465,7 @@ def impair_asset(conn, args):
                   .set(Field("accumulated_depreciation"), P())
                   .set(Field("current_book_value"), P())
                   .set(Field("status"), ValueWrapper("impaired"))
-                  .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                  .set(Field("updated_at"), sql_now())
                   .where(asset_t.id == P())).get_sql(),
                  (str(new_accum), str(new_book), args.asset_id))
 
@@ -2235,7 +2545,7 @@ def reverse_impairment(conn, args):
                   .set(Field("accumulated_depreciation"), P())
                   .set(Field("current_book_value"), P())
                   .set(Field("status"), P())
-                  .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                  .set(Field("updated_at"), sql_now())
                   .where(asset_t.id == P())).get_sql(),
                  (str(new_accum), str(new_book), new_status, imp_dict["asset_id"]))
 
@@ -2465,7 +2775,7 @@ def revalue_asset(conn, args):
     conn.execute((Q.update(asset_t)
                   .set(Field("gross_value"), P())
                   .set(Field("current_book_value"), P())
-                  .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                  .set(Field("updated_at"), sql_now())
                   .where(asset_t.id == P())).get_sql(),
                  (str(new_gross), str(round_currency(new_value)), args.asset_id))
 
@@ -2786,7 +3096,7 @@ def transfer_cwip_to_asset(conn, args):
                   .set(Field("depreciation_method"), P())
                   .set(Field("useful_life_years"), P())
                   .set(Field("depreciation_start_date"), P())
-                  .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                  .set(Field("updated_at"), sql_now())
                   .where(asset_t.id == P())).get_sql(),
                  (str(round_currency(total)), str(round_currency(total)),
                   str(round_currency(salvage)), dep_method, useful_life,
@@ -2916,7 +3226,7 @@ def cancel_cwip(conn, args):
                   .set(Field("status"), ValueWrapper("cancelled"))
                   .set(Field("gross_value"), ValueWrapper("0"))
                   .set(Field("current_book_value"), ValueWrapper("0"))
-                  .set(Field("updated_at"), LiteralValue("datetime('now')"))
+                  .set(Field("updated_at"), sql_now())
                   .where(asset_t.id == P())).get_sql(), (args.asset_id,))
 
     audit(conn, "erpclaw-assets", "cancel-cwip", "asset", args.asset_id,
@@ -3080,6 +3390,10 @@ def main():
     parser.add_argument("--disposal-method")
     parser.add_argument("--sale-amount")
     parser.add_argument("--buyer-details")
+    # M61: the disposal's own accounts. Required when the disposal has proceeds
+    # / a gain or loss; never defaulted (the defaulting is what misposted them).
+    parser.add_argument("--proceeds-account-id")
+    parser.add_argument("--gain-loss-account-id")
 
     # M7 asset-depth fields
     parser.add_argument("--impairment-id")

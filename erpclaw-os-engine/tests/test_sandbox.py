@@ -33,9 +33,18 @@ _SRC_DIR = _ADDONS_DIR.parent                  # source/
 _PROJECT_ROOT = _SRC_DIR.parent                # project root
 
 # Ensure erpclaw_lib is importable
-_ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(_SRC_DIR, "erpclaw", "scripts", "erpclaw-setup", "lib")
+_ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+                else os.path.join(os.path.expanduser(
+                    os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 if _ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, _ERPCLAW_LIB)
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, _ERPCLAW_LIB)
 
 from erpclaw_lib.db import setup_pragmas
 

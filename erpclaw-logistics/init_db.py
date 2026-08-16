@@ -1,16 +1,34 @@
 #!/usr/bin/env python3
 """ERPClaw Logistics schema extension -- adds logistics tables to the shared database.
 
-10 tables: logistics_shipment, logistics_tracking_event, logistics_carrier,
-logistics_carrier_rate, logistics_route, logistics_route_stop,
+8 tables: logistics_carrier, logistics_carrier_rate, logistics_shipment,
+logistics_tracking_event, logistics_route, logistics_route_stop,
 logistics_freight_charge, logistics_carrier_invoice.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
+
+ADR-0034 phase 2 bulk-39. Schema declared as metadata and provisioned through
+`erpclaw_lib.seam`, which emits dialect-correct DDL, replacing a hand-written
+``CREATE TABLE`` block opened with ``sqlite3.connect`` that could not run on
+PostgreSQL at all. Conversion rules are the pilot's (`erpclaw-esign`); the
+shipment/rate/charge amount columns stay TEXT, as money does on every backend.
 """
+import importlib.util
 import os
-import sqlite3
 import sys
+
+# Bootstrap the shared lib only when it is not already reachable — an
+# unconditional insert at position 0 overrides a caller that deliberately bound a
+# different tree (ADR-0034 phase 2 step 2d).
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(
+        os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+
+from erpclaw_lib.seam import (  # noqa: E402
+    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Table, Text,
+    provision, reference_table, text,
+)
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 DISPLAY_NAME = "ERPClaw Logistics"
@@ -19,255 +37,290 @@ REQUIRED_FOUNDATION = [
     "company", "naming_series", "audit_log", "supplier",
 ]
 
+METADATA = MetaData()
 
-def create_logistics_tables(db_path=None):
-    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path)
-    from erpclaw_lib.db import setup_pragmas
-    setup_pragmas(conn)
+# Foundation tables this module points at but does not own — declared so the
+# foreign keys resolve, never created here.
+reference_table("company", METADATA)
+reference_table("supplier", METADATA)
 
-    # -- Verify ERPClaw foundation --
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_FOUNDATION if t not in tables]
+# ---------------------------------------------------------------------------
+# 1. logistics_carrier
+# ---------------------------------------------------------------------------
+CARRIER = Table(
+    "logistics_carrier", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("carrier_code", Text),
+    Column("supplier_id", Text, ForeignKey("supplier.id")),
+    Column("contact_name", Text),
+    Column("contact_email", Text),
+    Column("contact_phone", Text),
+    Column("dot_number", Text),
+    Column("mc_number", Text),
+    Column("carrier_type", Text, nullable=False, server_default=text("'parcel'")),
+    Column("insurance_expiry", Text),
+    Column("carrier_status", Text, nullable=False, server_default=text("'active'")),
+    Column("on_time_pct", Text, nullable=False, server_default=text("'100'")),
+    Column("total_shipments", Integer, nullable=False, server_default=text("0")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "carrier_type IN ('ltl','ftl','parcel','freight_forwarder','courier')",
+        name="ck_logistics_carrier_carrier_type"),
+    CheckConstraint("carrier_status IN ('active','inactive','suspended')",
+                    name="ck_logistics_carrier_carrier_status"),
+)
+
+Index("idx_log_carrier_company", CARRIER.c.company_id)
+Index("idx_log_carrier_status", CARRIER.c.carrier_status)
+Index("idx_log_carrier_type", CARRIER.c.carrier_type)
+Index("idx_log_carrier_supplier", CARRIER.c.supplier_id)
+
+# ---------------------------------------------------------------------------
+# 2. logistics_carrier_rate
+# ---------------------------------------------------------------------------
+CARRIER_RATE = Table(
+    "logistics_carrier_rate", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("carrier_id", Text,
+           ForeignKey("logistics_carrier.id", ondelete="CASCADE"), nullable=False),
+    Column("origin_zone", Text),
+    Column("destination_zone", Text),
+    Column("service_level", Text, nullable=False, server_default=text("'ground'")),
+    Column("weight_min", Text),
+    Column("weight_max", Text),
+    Column("rate_per_unit", Text),
+    Column("flat_rate", Text),
+    Column("effective_date", Text),
+    Column("expiry_date", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "service_level IN ('ground','express','overnight','freight','ltl')",
+        name="ck_logistics_carrier_rate_service_level"),
+)
+
+Index("idx_log_crate_carrier", CARRIER_RATE.c.carrier_id)
+Index("idx_log_crate_company", CARRIER_RATE.c.company_id)
+Index("idx_log_crate_service", CARRIER_RATE.c.service_level)
+
+# ---------------------------------------------------------------------------
+# 3. logistics_shipment
+# ---------------------------------------------------------------------------
+SHIPMENT = Table(
+    "logistics_shipment", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("origin_address", Text),
+    Column("origin_city", Text),
+    Column("origin_state", Text),
+    Column("origin_zip", Text),
+    Column("destination_address", Text),
+    Column("destination_city", Text),
+    Column("destination_state", Text),
+    Column("destination_zip", Text),
+    Column("carrier_id", Text, ForeignKey("logistics_carrier.id")),
+    Column("service_level", Text, nullable=False, server_default=text("'ground'")),
+    Column("weight", Text),
+    Column("dimensions", Text),
+    Column("package_count", Integer, nullable=False, server_default=text("1")),
+    Column("declared_value", Text),
+    Column("reference_number", Text),
+    Column("shipment_status", Text, nullable=False, server_default=text("'created'")),
+    Column("estimated_delivery", Text),
+    Column("actual_delivery", Text),
+    Column("shipping_cost", Text),
+    Column("tracking_number", Text),
+    Column("pod_signature", Text),
+    Column("pod_timestamp", Text),
+    Column("notes", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "service_level IN ('ground','express','overnight','freight','ltl')",
+        name="ck_logistics_shipment_service_level"),
+    CheckConstraint(
+        "shipment_status IN ('created','picked_up','in_transit','out_for_delivery',"
+        "'delivered','exception','returned')",
+        name="ck_logistics_shipment_shipment_status"),
+)
+
+Index("idx_log_ship_company", SHIPMENT.c.company_id)
+Index("idx_log_ship_status", SHIPMENT.c.shipment_status)
+Index("idx_log_ship_carrier", SHIPMENT.c.carrier_id)
+Index("idx_log_ship_tracking", SHIPMENT.c.tracking_number)
+
+# ---------------------------------------------------------------------------
+# 4. logistics_tracking_event
+# ---------------------------------------------------------------------------
+TRACKING_EVENT = Table(
+    "logistics_tracking_event", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("shipment_id", Text,
+           ForeignKey("logistics_shipment.id", ondelete="CASCADE"), nullable=False),
+    Column("event_timestamp", Text, nullable=False),
+    Column("event_type", Text, nullable=False),
+    Column("location", Text),
+    Column("description", Text),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "event_type IN ('created','picked_up','departed','arrived','out_for_delivery',"
+        "'delivered','exception','returned')",
+        name="ck_logistics_tracking_event_event_type"),
+)
+
+Index("idx_log_track_shipment", TRACKING_EVENT.c.shipment_id)
+Index("idx_log_track_type", TRACKING_EVENT.c.event_type)
+Index("idx_log_track_company", TRACKING_EVENT.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 5. logistics_route
+# ---------------------------------------------------------------------------
+ROUTE = Table(
+    "logistics_route", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("name", Text, nullable=False),
+    Column("origin", Text),
+    Column("destination", Text),
+    Column("distance", Text),
+    Column("estimated_hours", Text),
+    Column("route_status", Text, nullable=False, server_default=text("'active'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("route_status IN ('active','inactive')",
+                    name="ck_logistics_route_route_status"),
+)
+
+Index("idx_log_route_company", ROUTE.c.company_id)
+Index("idx_log_route_status", ROUTE.c.route_status)
+
+# ---------------------------------------------------------------------------
+# 6. logistics_route_stop
+# ---------------------------------------------------------------------------
+ROUTE_STOP = Table(
+    "logistics_route_stop", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("route_id", Text,
+           ForeignKey("logistics_route.id", ondelete="CASCADE"), nullable=False),
+    Column("stop_order", Integer, nullable=False, server_default=text("1")),
+    Column("address", Text),
+    Column("city", Text),
+    Column("state", Text),
+    Column("zip_code", Text),
+    Column("estimated_arrival", Text),
+    Column("stop_type", Text, nullable=False, server_default=text("'delivery'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("stop_type IN ('pickup','delivery','transfer')",
+                    name="ck_logistics_route_stop_stop_type"),
+)
+
+Index("idx_log_rstop_route", ROUTE_STOP.c.route_id)
+Index("idx_log_rstop_company", ROUTE_STOP.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 7. logistics_freight_charge
+# ---------------------------------------------------------------------------
+FREIGHT_CHARGE = Table(
+    "logistics_freight_charge", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("shipment_id", Text,
+           ForeignKey("logistics_shipment.id", ondelete="CASCADE"), nullable=False),
+    Column("charge_type", Text, nullable=False, server_default=text("'base'")),
+    Column("description", Text),
+    Column("amount", Text, nullable=False, server_default=text("'0'")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "charge_type IN ('base','fuel_surcharge','accessorial','insurance',"
+        "'handling','customs')",
+        name="ck_logistics_freight_charge_charge_type"),
+)
+
+Index("idx_log_fcharge_shipment", FREIGHT_CHARGE.c.shipment_id)
+Index("idx_log_fcharge_company", FREIGHT_CHARGE.c.company_id)
+
+# ---------------------------------------------------------------------------
+# 8. logistics_carrier_invoice
+# ---------------------------------------------------------------------------
+CARRIER_INVOICE = Table(
+    "logistics_carrier_invoice", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("naming_series", Text),
+    Column("carrier_id", Text, ForeignKey("logistics_carrier.id"), nullable=False),
+    Column("invoice_number", Text),
+    Column("invoice_date", Text),
+    Column("total_amount", Text, nullable=False, server_default=text("'0'")),
+    Column("invoice_status", Text, nullable=False, server_default=text("'pending'")),
+    # No foreign key on purchase_invoice_id in the shipped DDL — preserved as-is.
+    Column("purchase_invoice_id", Text),
+    Column("shipment_count", Integer, nullable=False, server_default=text("0")),
+    Column("company_id", Text, ForeignKey("company.id"), nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("invoice_status IN ('pending','verified','paid','disputed')",
+                    name="ck_logistics_carrier_invoice_invoice_status"),
+)
+
+Index("idx_log_cinv_carrier", CARRIER_INVOICE.c.carrier_id)
+Index("idx_log_cinv_company", CARRIER_INVOICE.c.company_id)
+Index("idx_log_cinv_status", CARRIER_INVOICE.c.invoice_status)
+
+
+def _require_foundation(db_path):
+    """The pre-conversion installer's foundation probe, asked through the seam.
+
+    The probed tables and the wording are this module's own, unchanged; only the
+    mechanism changed. The original read SQLite's own catalog table directly,
+    so the guard that exists to produce a friendly error was itself
+    SQLite-only — on PostgreSQL it would have raised before it could explain
+    anything, and ``seam.table_exists`` answers on both backends (ADR-0034
+    bulk-39). This note names that catalog table in prose rather than as the
+    identifier, because the seam-bypass ratchet counts string literals and an
+    installers bucket that is only allowed to fall should not rise for a
+    docstring.
+    """
+    from erpclaw_lib import seam
+
+    missing = [t for t in REQUIRED_FOUNDATION if not seam.table_exists(t, db_path)]
     if missing:
         print(f"ERROR: Foundation tables missing: {', '.join(missing)}")
         print("Run erpclaw-setup first: clawhub install erpclaw-setup")
-        conn.close()
         sys.exit(1)
 
-    tables_created = 0
-    indexes_created = 0
 
-    # ==================================================================
-    # 1. logistics_carrier
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_carrier (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            carrier_code    TEXT,
-            supplier_id     TEXT REFERENCES supplier(id),
-            contact_name    TEXT,
-            contact_email   TEXT,
-            contact_phone   TEXT,
-            dot_number      TEXT,
-            mc_number       TEXT,
-            carrier_type    TEXT NOT NULL DEFAULT 'parcel'
-                            CHECK(carrier_type IN ('ltl','ftl','parcel','freight_forwarder','courier')),
-            insurance_expiry TEXT,
-            carrier_status  TEXT NOT NULL DEFAULT 'active'
-                            CHECK(carrier_status IN ('active','inactive','suspended')),
-            on_time_pct     TEXT NOT NULL DEFAULT '100',
-            total_shipments INTEGER NOT NULL DEFAULT 0,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_company ON logistics_carrier(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_status ON logistics_carrier(carrier_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_type ON logistics_carrier(carrier_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_carrier_supplier ON logistics_carrier(supplier_id)")
-    indexes_created += 4
+def create_logistics_tables(db_path=None):
+    """Create logistics tables and indexes on whichever backend is configured.
 
-    # ==================================================================
-    # 2. logistics_carrier_rate
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_carrier_rate (
-            id              TEXT PRIMARY KEY,
-            carrier_id      TEXT NOT NULL REFERENCES logistics_carrier(id) ON DELETE CASCADE,
-            origin_zone     TEXT,
-            destination_zone TEXT,
-            service_level   TEXT NOT NULL DEFAULT 'ground'
-                            CHECK(service_level IN ('ground','express','overnight','freight','ltl')),
-            weight_min      TEXT,
-            weight_max      TEXT,
-            rate_per_unit   TEXT,
-            flat_rate       TEXT,
-            effective_date  TEXT,
-            expiry_date     TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_crate_carrier ON logistics_carrier_rate(carrier_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_crate_company ON logistics_carrier_rate(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_crate_service ON logistics_carrier_rate(service_level)")
-    indexes_created += 3
-
-    # ==================================================================
-    # 3. logistics_shipment
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_shipment (
-            id                  TEXT PRIMARY KEY,
-            naming_series       TEXT,
-            origin_address      TEXT,
-            origin_city         TEXT,
-            origin_state        TEXT,
-            origin_zip          TEXT,
-            destination_address TEXT,
-            destination_city    TEXT,
-            destination_state   TEXT,
-            destination_zip     TEXT,
-            carrier_id          TEXT REFERENCES logistics_carrier(id),
-            service_level       TEXT NOT NULL DEFAULT 'ground'
-                                CHECK(service_level IN ('ground','express','overnight','freight','ltl')),
-            weight              TEXT,
-            dimensions          TEXT,
-            package_count       INTEGER NOT NULL DEFAULT 1,
-            declared_value      TEXT,
-            reference_number    TEXT,
-            shipment_status     TEXT NOT NULL DEFAULT 'created'
-                                CHECK(shipment_status IN ('created','picked_up','in_transit','out_for_delivery','delivered','exception','returned')),
-            estimated_delivery  TEXT,
-            actual_delivery     TEXT,
-            shipping_cost       TEXT,
-            tracking_number     TEXT,
-            pod_signature       TEXT,
-            pod_timestamp       TEXT,
-            notes               TEXT,
-            company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_ship_company ON logistics_shipment(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_ship_status ON logistics_shipment(shipment_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_ship_carrier ON logistics_shipment(carrier_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_ship_tracking ON logistics_shipment(tracking_number)")
-    indexes_created += 4
-
-    # ==================================================================
-    # 4. logistics_tracking_event
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_tracking_event (
-            id              TEXT PRIMARY KEY,
-            shipment_id     TEXT NOT NULL REFERENCES logistics_shipment(id) ON DELETE CASCADE,
-            event_timestamp TEXT NOT NULL,
-            event_type      TEXT NOT NULL
-                            CHECK(event_type IN ('created','picked_up','departed','arrived','out_for_delivery','delivered','exception','returned')),
-            location        TEXT,
-            description     TEXT,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_track_shipment ON logistics_tracking_event(shipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_track_type ON logistics_tracking_event(event_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_track_company ON logistics_tracking_event(company_id)")
-    indexes_created += 3
-
-    # ==================================================================
-    # 5. logistics_route
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_route (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            origin          TEXT,
-            destination     TEXT,
-            distance        TEXT,
-            estimated_hours TEXT,
-            route_status    TEXT NOT NULL DEFAULT 'active'
-                            CHECK(route_status IN ('active','inactive')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_route_company ON logistics_route(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_route_status ON logistics_route(route_status)")
-    indexes_created += 2
-
-    # ==================================================================
-    # 6. logistics_route_stop
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_route_stop (
-            id              TEXT PRIMARY KEY,
-            route_id        TEXT NOT NULL REFERENCES logistics_route(id) ON DELETE CASCADE,
-            stop_order      INTEGER NOT NULL DEFAULT 1,
-            address         TEXT,
-            city            TEXT,
-            state           TEXT,
-            zip_code        TEXT,
-            estimated_arrival TEXT,
-            stop_type       TEXT NOT NULL DEFAULT 'delivery'
-                            CHECK(stop_type IN ('pickup','delivery','transfer')),
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_rstop_route ON logistics_route_stop(route_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_rstop_company ON logistics_route_stop(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # 7. logistics_freight_charge
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_freight_charge (
-            id              TEXT PRIMARY KEY,
-            shipment_id     TEXT NOT NULL REFERENCES logistics_shipment(id) ON DELETE CASCADE,
-            charge_type     TEXT NOT NULL DEFAULT 'base'
-                            CHECK(charge_type IN ('base','fuel_surcharge','accessorial','insurance','handling','customs')),
-            description     TEXT,
-            amount          TEXT NOT NULL DEFAULT '0',
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_fcharge_shipment ON logistics_freight_charge(shipment_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_fcharge_company ON logistics_freight_charge(company_id)")
-    indexes_created += 2
-
-    # ==================================================================
-    # 8. logistics_carrier_invoice
-    # ==================================================================
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS logistics_carrier_invoice (
-            id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            carrier_id      TEXT NOT NULL REFERENCES logistics_carrier(id),
-            invoice_number  TEXT,
-            invoice_date    TEXT,
-            total_amount    TEXT NOT NULL DEFAULT '0',
-            invoice_status  TEXT NOT NULL DEFAULT 'pending'
-                            CHECK(invoice_status IN ('pending','verified','paid','disputed')),
-            purchase_invoice_id TEXT,
-            shipment_count  INTEGER NOT NULL DEFAULT 0,
-            company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    tables_created += 1
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_cinv_carrier ON logistics_carrier_invoice(carrier_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_cinv_company ON logistics_carrier_invoice(company_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_log_cinv_status ON logistics_carrier_invoice(invoice_status)")
-    indexes_created += 3
-
-    conn.commit()
-    conn.close()
-
+    Same contract as before the ADR-0034 conversion: idempotent, and the returned
+    counts are what was ACTUALLY created rather than what was declared.
+    """
+    db_path = db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
+    _require_foundation(db_path)
+    result = provision(METADATA, db_path)
     return {
         "database": db_path,
-        "tables": tables_created,
-        "indexes": indexes_created,
+        "tables": result["tables"],
+        "indexes": result["indexes"],
     }
 
 

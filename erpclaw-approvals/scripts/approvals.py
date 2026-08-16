@@ -10,11 +10,13 @@ import uuid
 from datetime import datetime, timezone
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+    from erpclaw_lib.query import Field, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
     from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
     ENTITY_PREFIXES.setdefault("approval_rule", "ARULE-")
@@ -352,7 +354,7 @@ def approve_request(conn, args):
         q_upd = (Q.update(t_ar)
                  .set(t_ar.request_status, P())
                  .set(t_ar.notes, LiteralValue('COALESCE(?,\"notes\")'))
-                 .set(t_ar.updated_at, LiteralValue("datetime('now')"))
+                 .set(t_ar.updated_at, sql_now())
                  .where(t_ar.id == P()))
         conn.execute(q_upd.get_sql(), ("approved", notes, req_id))
         new_status = "approved"
@@ -365,7 +367,7 @@ def approve_request(conn, args):
                  .set(t_ar.current_step, P())
                  .set(t_ar.request_status, P())
                  .set(t_ar.notes, LiteralValue('COALESCE(?,\"notes\")'))
-                 .set(t_ar.updated_at, LiteralValue("datetime('now')"))
+                 .set(t_ar.updated_at, sql_now())
                  .where(t_ar.id == P()))
         conn.execute(q_upd.get_sql(), (new_step, "in_progress", notes, req_id))
         new_status = "in_progress"
@@ -397,7 +399,7 @@ def reject_request(conn, args):
     sql, params = dynamic_update("approval_request",
                                   data={"request_status": "rejected",
                                         "notes": notes,
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "approval-reject-request", "approval_request", req_id,
@@ -425,7 +427,7 @@ def cancel_request(conn, args):
 
     sql, params = dynamic_update("approval_request",
                                   data={"request_status": "cancelled",
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "approval-cancel-request", "approval_request", req_id,

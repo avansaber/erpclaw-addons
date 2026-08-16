@@ -8,11 +8,15 @@ import os
 import sys
 import uuid
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import (Field, Order, P, Q, Table, dynamic_update, fn,
+                               hours_between, insert_row, now as sql_now,
+                               update_row)
 from erpclaw_lib.vendor.pypika.terms import LiteralValue
 
 SKILL = "erpclaw-esign"
@@ -279,7 +283,7 @@ def send_signature_request(conn, args):
 
     sql, params = dynamic_update("esign_signature_request",
                                   data={"request_status": "sent",
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
     _add_event(conn, req_id, "sent", row["company_id"],
@@ -346,10 +350,10 @@ def sign_document(conn, args):
         "signers": json.dumps(signers),
         "signed_count": signed_count,
         "request_status": new_status,
-        "updated_at": LiteralValue("datetime('now')"),
+        "updated_at": sql_now(),
     }
     if new_status == "completed":
-        upd_data["completed_at"] = LiteralValue("datetime('now')")
+        upd_data["completed_at"] = sql_now()
     sql, params = dynamic_update("esign_signature_request",
                                   data=upd_data,
                                   where={"id": req_id})
@@ -411,7 +415,7 @@ def decline_signature(conn, args):
 
     sql, params = dynamic_update("esign_signature_request",
                                   data={"request_status": "declined",
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
 
@@ -446,7 +450,7 @@ def cancel_signature_request(conn, args):
 
     sql, params = dynamic_update("esign_signature_request",
                                   data={"request_status": "cancelled",
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
 
@@ -476,7 +480,7 @@ def void_signature_request(conn, args):
 
     sql, params = dynamic_update("esign_signature_request",
                                   data={"request_status": "voided",
-                                        "updated_at": LiteralValue("datetime('now')")},
+                                        "updated_at": sql_now()},
                                   where={"id": req_id})
     conn.execute(sql, params)
 
@@ -569,7 +573,7 @@ def signature_summary_report(conn, args):
 
     # Average completion time (completed requests only)
     q_avg = (Q.from_(t)
-             .select(fn.Avg(LiteralValue('CAST((julianday("completed_at") - julianday("created_at")) * 24 AS REAL)')).as_("avg_hours"))
+             .select(fn.Avg(hours_between('"completed_at"', '"created_at"')).as_("avg_hours"))
              .where(t.company_id == P())
              .where(t.request_status == "completed")
              .where(t.completed_at.isnotnull()))

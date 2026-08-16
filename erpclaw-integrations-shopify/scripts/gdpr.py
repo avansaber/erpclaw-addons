@@ -1,14 +1,21 @@
 """shopify-handle-gdpr: process a GDPR event the Worker forwarded to us.
 
-Three topics (per Shopify's compliance contract):
-  - customers/data_request   -> produce a JSON export of the customer's
-                                data in our local DB so the merchant can
-                                forward it to Shopify. We DO NOT email or
-                                otherwise transmit; the file lives on the
-                                merchant's own machine.
-  - customers/redact         -> null out PII on shopify_order rows tied
-                                to the customer: customer_email,
-                                billing/shipping address, phone.
+Three topics (per Shopify's compliance contract). Automated per-customer
+fulfilment is NOT built yet (a later-wave capability), so the two
+customer-scoped topics are acknowledgement-only today: we record the
+request and leave the data change to a merchant-run step. Shopify's
+contract only requires acknowledgement within 30 days.
+  - customers/data_request   -> record the request and write a small
+                                pointer/receipt JSON file (shop, account,
+                                customer id, timestamp) to the logs dir.
+                                The file does NOT contain the customer's
+                                data; it is a receipt the merchant can act
+                                on manually. We do not gather, email, or
+                                otherwise transmit customer data.
+  - customers/redact         -> record the request in the audit log only.
+                                We do NOT yet null out PII on shopify_order
+                                rows; per-customer redaction is a
+                                merchant-run step.
   - shop/redact              -> hard delete all shopify_* rows for the
                                 shop. GL entries are PRESERVED per
                                 ERPClaw immutability rule; this is
@@ -81,14 +88,15 @@ def _write_audit(topic, shop, detail):
 # ---------------------------------------------------------------------------
 
 def _handle_data_request(conn, shop, payload):
-    """Write a pointer file the merchant can act on.
+    """Record the request and write a receipt/pointer file.
 
     The shopify_order table links customers via ERPClaw's `customer_id`
     (foreign key to the core `customer` table), not directly by Shopify
-    customer id. Rather than reach into the ERPClaw customer redaction
-    flow (which is a separate core concern not owned by this connector),
-    we drop an audit record + pointer file so the merchant knows to run
-    their own customer DSR workflow. Shopify's contract only requires
+    customer id. Automated assembly of a customer's stored data is not
+    implemented in this connector yet (a later-wave capability), so we
+    drop an audit record + a pointer/receipt file recording that the
+    request was received. The file contains no customer data; fulfilment
+    is a manual, merchant-run step. Shopify's contract only requires
     acknowledgement within 30 days.
     """
     shopify_customer_id = None
@@ -108,9 +116,11 @@ def _handle_data_request(conn, shop, payload):
         "shopify_customer_id": shopify_customer_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "note": (
-            "ERPClaw's Shopify connector does not store customer PII directly. "
-            "Customer contact data lives in the ERPClaw core `customer` table. "
-            "Run the core ERPClaw DSR workflow to complete this request."
+            "ERPClaw's Shopify connector does not store customer PII directly, "
+            "and does not yet assemble a customer data export automatically. "
+            "This file is a receipt that the request was received; it contains "
+            "no customer data. Customer contact data lives in the ERPClaw core "
+            "`customer` table; fulfil this request manually from there."
         ),
     }
     out_path = None
@@ -133,11 +143,12 @@ def _handle_data_request(conn, shop, payload):
 
 
 def _handle_customers_redact(conn, shop, payload):
-    """Log the redaction request for merchant follow-up.
+    """Record the redaction request in the audit log for merchant follow-up.
 
     Same rationale as _handle_data_request: the connector does not hold
-    the customer's contact PII. ERPClaw's core customer redaction flow
-    handles the actual deletion/anonymisation.
+    the customer's contact PII, and automated per-customer redaction is
+    not implemented yet (a later-wave capability). We record the request;
+    the actual deletion/anonymisation is a manual, merchant-run step.
     """
     shopify_customer_id = None
     if isinstance(payload, dict):
@@ -153,7 +164,7 @@ def _handle_customers_redact(conn, shop, payload):
     _write_audit("customers/redact", shop, {
         "shopify_customer_id": shopify_customer_id,
         "shopify_account_id": shopify_account_id,
-        "note": "forwarded to ERPClaw core customer redaction flow",
+        "note": "recorded for merchant follow-up; per-customer redaction not automated",
     })
     return {"shopify_customer_id": shopify_customer_id, "logged": True}
 

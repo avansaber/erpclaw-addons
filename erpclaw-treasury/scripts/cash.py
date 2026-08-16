@@ -9,11 +9,13 @@ import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
+from erpclaw_lib.query import Field, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, today as sql_today, update_row
 
 register_prefix("bank_account_extended", "BACC-")
 register_prefix("cash_forecast", "CFST-")
@@ -122,7 +124,7 @@ def update_bank_account(conn, args):
     if not changed:
         err("No fields to update")
 
-    data["updated_at"] = LiteralValue("datetime('now')")
+    data["updated_at"] = sql_now()
     sql, params = dynamic_update("bank_account_extended", data, {"id": acct_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-bank-account", "bank_account_extended", acct_id,
@@ -214,8 +216,8 @@ def record_bank_balance(conn, args):
     company_id = row_to_dict(row)["company_id"]
 
     sql = update_row("bank_account_extended",
-        data={"current_balance": P(), "last_reconciled_date": LiteralValue("date('now')"),
-              "updated_at": LiteralValue("datetime('now')")},
+        data={"current_balance": P(), "last_reconciled_date": sql_today(),
+              "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, (balance, acct_id))
 
@@ -225,7 +227,7 @@ def record_bank_balance(conn, args):
     total_cash = balance  # simplified: snapshot from this balance update
 
     sql, _ = insert_row("cash_position", {
-        "id": P(), "naming_series": P(), "position_date": LiteralValue("date('now')"),
+        "id": P(), "naming_series": P(), "position_date": sql_today(),
         "total_cash": P(), "total_receivables": P(), "total_payables": P(),
         "net_position": P(), "notes": P(), "company_id": P(),
     })
@@ -355,7 +357,7 @@ def add_cash_forecast(conn, args):
 
     sql, _ = insert_row("cash_forecast", {
         "id": P(), "naming_series": P(), "forecast_name": P(),
-        "forecast_date": LiteralValue("date('now')"), "period_start": P(),
+        "forecast_date": sql_today(), "period_start": P(),
         "period_end": P(), "expected_inflows": P(), "expected_outflows": P(),
         "net_forecast": P(), "assumptions": P(), "forecast_type": P(), "company_id": P(),
     })
@@ -434,7 +436,7 @@ def update_cash_forecast(conn, args):
     if not changed:
         err("No fields to update")
 
-    upd_data["updated_at"] = LiteralValue("datetime('now')")
+    upd_data["updated_at"] = sql_now()
     sql, params = dynamic_update("cash_forecast", upd_data, {"id": fc_id})
     conn.execute(sql, params)
     audit(conn, SKILL, "treasury-update-cash-forecast", "cash_forecast", fc_id,
@@ -554,7 +556,7 @@ def generate_cash_forecast(conn, args):
 
     sql, _ = insert_row("cash_forecast", {
         "id": P(), "naming_series": P(), "forecast_name": P(),
-        "forecast_date": LiteralValue("date('now')"), "period_start": P(),
+        "forecast_date": sql_today(), "period_start": P(),
         "period_end": P(), "expected_inflows": P(), "expected_outflows": P(),
         "net_forecast": P(), "assumptions": P(), "forecast_type": P(), "company_id": P(),
     })

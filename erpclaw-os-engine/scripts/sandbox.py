@@ -28,7 +28,8 @@ from pathlib import Path
 # erpclaw_lib.gl_invariants. Both foundation and addon import from there.
 import sys as _sys
 import os as _os
-_sys.path.insert(0, _os.path.join(_os.path.expanduser(_os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+if importlib.util.find_spec("erpclaw_lib") is None:
+    _sys.path.insert(0, _os.path.join(_os.path.expanduser(_os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.gl_invariants import check_gl_invariants
 
 

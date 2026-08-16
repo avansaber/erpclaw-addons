@@ -8,7 +8,9 @@ import uuid
 import sqlite3
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.audit import audit
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row

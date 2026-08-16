@@ -38,7 +38,7 @@ relationship scoring, business rules). All data lives in a single local SQLite d
 
 Activate this skill when the user mentions: lead, prospect, opportunity, pipeline, deal, campaign,
 CRM, sales funnel, KPI, dashboard, scorecard, ratio, liquidity, profitability, ROA, ROE, revenue
-analysis, expense breakdown, ABC analysis, inventory turnover, anomaly, suspicious transaction,
+analysis, expense breakdown, ABC analysis, inventory turnover, anomaly, suspicious transaction, unusual/irregular/off, "doesn't look right" in the books,
 cash flow forecast, business rule, relationship score, customer health, scenario analysis,
 executive dashboard, company scorecard, what-if analysis, trend, correlation, email campaign,
 territory, territory quota, contract, contract obligation, renewal, automation workflow,
@@ -249,7 +249,7 @@ Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
-| `detect-anomalies` | `--company-id` | `--from-date`, `--to-date` — scans 21 anomaly types incl. `asset_book_value_drift`, `dimension_tag_drift`, `consumption_spike` (meter usage vs historical baseline) and `rate_plan_mismatch` (usage beyond plan allowance, Wave F) |
+| `detect-anomalies` | `--company-id` | `--from-date`, `--to-date` — scans 21 anomaly types incl. `asset_book_value_drift`, `dimension_tag_drift`, `consumption_spike` (meter usage vs historical baseline) and `rate_plan_mismatch` (usage beyond plan allowance, Wave F). **Steer:** business English like "anything unusual in the books?" or "does anything look off / irregular?" ⇒ ✓ run `detect-anomalies` (a fresh 21-type sweep); ✗ don't keyword-search the ledger or reach for `list-anomalies`, which only re-reads prior finds |
 | `list-anomalies` | | `--company-id`, `--severity`, `--status`, `--limit`, `--offset` |
 | `acknowledge-anomaly` | `--anomaly-id` | |
 | `dismiss-anomaly` | `--anomaly-id` | `--reason` |

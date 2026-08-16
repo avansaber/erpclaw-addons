@@ -2,6 +2,22 @@
 
 All notable changes to the erpclaw-integrations-shopify addon.
 
+## [Unreleased]
+
+### Fixed
+- **GDPR webhook text now matches shipped behavior (`shopify-handle-gdpr`).**
+  The shipped, merchant-facing text in `scripts/gdpr.py` promised a "core
+  ERPClaw DSR workflow" / "core customer redaction flow" that does not exist
+  in the codebase, and described `customers/redact` as nulling out PII on
+  `shopify_order` rows when the handler only records the request. Corrected
+  the module docstring, both handler docstrings, the `customers/data_request`
+  receipt-file `note`, and the `customers/redact` audit note to state what the
+  code actually does: the two customer-scoped topics are acknowledgement-only
+  today (record the request; `data_request` also writes a receipt/pointer file
+  that contains no customer data), and automated per-customer fulfilment is a
+  later-wave capability. Text only — no behavior change; `shop/redact` (real
+  hard-delete, GL preserved) and `app/uninstalled` were already accurate.
+
 ## [1.3.0] — 2026-07-05 — M33 / B8 (integrations deep-sync completion)
 
 ### Added

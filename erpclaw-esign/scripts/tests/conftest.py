@@ -6,6 +6,17 @@ _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
+# Bind erpclaw_lib to THIS TREE's lib, not the deployed ~/.openclaw symlink.
+# Same reasoning the L0 constitution conftest records: a branch that ADDS a lib
+# module would otherwise import the OLD one — and pass, or in this module's case
+# fail, for the wrong reason. ADR-0034 phase 2 converted this installer to
+# `erpclaw_lib.seam`, which exists in the tree under test and may not exist in
+# whatever is deployed on the machine running the suite.
+_IN_TREE_LIB = os.path.abspath(os.path.join(
+    _TESTS_DIR, "..", "..", "..", "..", "erpclaw", "scripts", "erpclaw-setup", "lib"))
+if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib")) and _IN_TREE_LIB not in sys.path:
+    sys.path.insert(0, _IN_TREE_LIB)
+
 import pytest
 from esign_helpers import init_all_tables, get_conn, build_env
 

@@ -22,7 +22,9 @@ from decimal import Decimal
 
 # Add shared lib to path
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.query import Q, Table, Field, P, fn
 except ImportError:
     pass
@@ -126,7 +128,12 @@ DEFAULT_RULES = [
             "check": "payment_account_type",
             "party_type": "customer",
             "expected_account_types": ["receivable", "bank", "cash"],
-            "forbidden_account_types": ["revenue"],
+            # disposal_gain_loss joined this list with M94 (2026-08-12), when
+            # "Gain on Asset Disposal" stopped being typed `revenue`. Crediting a
+            # customer payment there bypasses receivable tracking exactly as
+            # crediting Sales Revenue does, and without this the rule would have
+            # silently lost the account it used to catch.
+            "forbidden_account_types": ["revenue", "disposal_gain_loss"],
         }),
         "severity": "warning",
     },
@@ -139,7 +146,9 @@ DEFAULT_RULES = [
             "check": "payment_account_type",
             "party_type": "supplier",
             "expected_account_types": ["payable", "bank", "cash"],
-            "forbidden_account_types": ["expense"],
+            # Mirror of the customer rule above; "Loss on Asset Disposal" left
+            # `expense` in the same change (M94).
+            "forbidden_account_types": ["expense", "disposal_gain_loss"],
         }),
         "severity": "warning",
     },

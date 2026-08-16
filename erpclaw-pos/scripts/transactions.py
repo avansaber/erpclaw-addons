@@ -12,7 +12,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
@@ -125,19 +127,10 @@ def add_transaction_item(conn, args):
     item_name = getattr(args, "item_name", None) or item["item_name"]
     item_code = item["item_code"]
 
-    # Try to get barcode (item_barcode table may not exist)
+    # Barcode is caller-supplied. The `item_barcode` fast-lookup table exists in
+    # no schema today (F19: created by no init/migration); its lookup here was
+    # dead code behind a live fallback. The real table is a Phase-3 (P3-1) build.
     barcode = getattr(args, "barcode", None)
-    if not barcode:
-        try:
-            t_bc = Table("item_barcode")
-            bc_row = conn.execute(
-                Q.from_(t_bc).select(t_bc.barcode)
-                .where(t_bc.item_id == P()).limit(1).get_sql(),
-                (item_id,)).fetchone()
-            if bc_row:
-                barcode = bc_row["barcode"]
-        except sqlite3.OperationalError:
-            pass  # item_barcode table may not exist
 
     qty = _dec(getattr(args, "qty", None) or "1")
     rate = _dec(getattr(args, "rate", None) or "0")
@@ -604,19 +597,9 @@ def lookup_item(conn, args):
     results = []
 
     if barcode:
-        # Try item_barcode table first
-        try:
-            t_ib = Table("item_barcode")
-            t_i = Table("item")
-            q_bc = (Q.from_(t_ib).join(t_i).on(t_ib.item_id == t_i.id)
-                    .select(t_ib.item_id, t_ib.barcode, t_i.item_name, t_i.item_code)
-                    .where(t_ib.barcode == P()).limit(P()))
-            bc_rows = conn.execute(q_bc.get_sql(), (barcode, limit)).fetchall()
-            results.extend([row_to_dict(r) for r in bc_rows])
-        except sqlite3.OperationalError:
-            pass  # item_barcode table may not exist
-
-        # If no results from barcode table, search item.item_code
+        # The `item_barcode` fast-lookup table exists in no schema today (F19:
+        # created by no init/migration); the barcode search resolves against
+        # item.item_code. The real table is a Phase-3 (P3-1) build.
         if not results:
             t_item = Table("item")
             q_ic = (Q.from_(t_item)

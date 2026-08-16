@@ -28,11 +28,13 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 # Add shared lib to path
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.query import (
-    Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update,
+    Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update, now as sql_now,
 )
 
 from variant_manager import (
@@ -286,7 +288,7 @@ def handle_dgm_run_variant(args):
             "action_name": P(),
             "variant_count": P(),
             "status": P(),
-            "started_at": LiteralValue("datetime('now')"),
+            "started_at": sql_now(),
         })
         conn.execute(sql, [run_id, module_name, action_name, variant_count, "running"])
         conn.commit()

@@ -9,12 +9,14 @@ import uuid
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+import importlib.util
+if importlib.util.find_spec("erpclaw_lib") is None:
+    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name, register_prefix
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
-from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row
+from erpclaw_lib.query import Field, Order, P, Q, Table, fn, insert_row, now as sql_now, update_row
 
 register_prefix("inter_company_transfer", "ICT-")
 
@@ -170,7 +172,7 @@ def approve_transfer(conn, args):
         err(f"Can only approve draft transfers, current status: {data['status']}")
 
     sql = update_row("inter_company_transfer",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, ("approved", xfer_id))
     audit(conn, SKILL, "treasury-approve-transfer", "inter_company_transfer", xfer_id,
@@ -204,7 +206,7 @@ def complete_transfer(conn, args):
     ba = Table("bank_account_extended")
     ba_bal_sql = Q.from_(ba).select(ba.current_balance).where(ba.id == P()).get_sql()
     ba_upd_sql = update_row("bank_account_extended",
-        data={"current_balance": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"current_balance": P(), "updated_at": sql_now()},
         where={"id": P()})
 
     if from_acct:
@@ -220,7 +222,7 @@ def complete_transfer(conn, args):
             conn.execute(ba_upd_sql, (str(new_bal), to_acct))
 
     sql = update_row("inter_company_transfer",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, ("completed", xfer_id))
     audit(conn, SKILL, "treasury-complete-transfer", "inter_company_transfer", xfer_id,
@@ -247,7 +249,7 @@ def cancel_transfer(conn, args):
         err("Transfer is already cancelled")
 
     sql = update_row("inter_company_transfer",
-        data={"status": P(), "updated_at": LiteralValue("datetime('now')")},
+        data={"status": P(), "updated_at": sql_now()},
         where={"id": P()})
     conn.execute(sql, ("cancelled", xfer_id))
     audit(conn, SKILL, "treasury-cancel-transfer", "inter_company_transfer", xfer_id,
