@@ -14,6 +14,38 @@ OS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "scripts")
 if OS_DIR not in sys.path:
     sys.path.insert(0, OS_DIR)
 
+# ── M97 canonical block: product SUBPROCESSES bind this checkout ─────────────
+# This conftest does not import erpclaw_lib, so the anchor is the foundation
+# lib in the same checkout (source/erpclaw/scripts/erpclaw-setup/lib), reached
+# from tests/ -> erpclaw-os-engine -> erpclaw-addons -> source. `run_in_sandbox`
+# runs the generated module's tests as a SUBPROCESS and builds its PYTHONPATH
+# from $ERPCLAW_HOME/lib (scripts/sandbox.py), so with ERPCLAW_HOME unset the
+# sandbox verifies the developer's install rather than this tree. The symlink
+# into the temp home is seeded deliberately: under a BARE temp home the child
+# dies with a structured "foundation not installed" error that most assertions
+# accept, so the suite would go green having verified nothing.
+# Full reasoning + the poison proof: testing/unit/L0/test_subprocess_home_pin.py
+_M97_CHILD_LIB = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(TESTS_DIR))),
+    "erpclaw", "scripts", "erpclaw-setup", "lib")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_erpclaw_home(tmp_path_factory):
+    """Pin ERPCLAW_HOME at a throwaway install seeded with this tree's lib."""
+    if not os.path.isdir(os.path.join(_M97_CHILD_LIB, "erpclaw_lib")):
+        yield None          # published module repo: the deployed install is right
+        return
+    home = str(tmp_path_factory.mktemp("erpclaw_home"))
+    os.symlink(_M97_CHILD_LIB, os.path.join(home, "lib"))
+    _prev = os.environ.get("ERPCLAW_HOME")
+    os.environ["ERPCLAW_HOME"] = home
+    yield home
+    if _prev is None:
+        os.environ.pop("ERPCLAW_HOME", None)
+    else:
+        os.environ["ERPCLAW_HOME"] = _prev
+
 
 @pytest.fixture
 def temp_module_dir(tmp_path):
