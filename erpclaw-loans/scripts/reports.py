@@ -10,6 +10,7 @@ if importlib.util.find_spec("erpclaw_lib") is None:
     sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.response import ok, err
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+from erpclaw_lib.query_helpers import resolve_company_id, resolve_scope_company
 
 
 def _dec(val):
@@ -86,7 +87,7 @@ def handle_loan_statement(conn, args):
 
 def handle_overdue_loans(conn, args):
     """List overdue installments across all loans."""
-    company_id = getattr(args, "company_id", None)
+    company_id = resolve_scope_company(conn, getattr(args, "company_id", None), getattr(args, "company_name", None))
     today = date.today().isoformat()
 
     query = """
@@ -101,9 +102,8 @@ def handle_overdue_loans(conn, args):
     """
     params = [today]
 
-    if company_id:
-        query += " AND l.company_id = ?"
-        params.append(company_id)
+    query += " AND l.company_id = ?"
+    params.append(company_id)
 
     query += " ORDER BY s.due_date"
 

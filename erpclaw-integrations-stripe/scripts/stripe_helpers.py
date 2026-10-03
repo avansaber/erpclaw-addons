@@ -4,20 +4,42 @@ Provides encryption/decryption for API keys, Stripe amount conversion
 (cents <-> Decimal dollars), and common imports used by all domain modules.
 """
 import os
-import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-# Auto-install stripe SDK if not present (transparent to user)
-try:
-    import stripe as _stripe_check  # noqa: F401
-except ImportError:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "stripe", "-q"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+STRIPE_PACKAGE = "stripe"
+STRIPE_INSTALL_HINT = (
+    "The 'stripe' Python package is required by erpclaw-integrations-stripe "
+    "and is not installed in this Python environment. Install it with: "
+    "python3 -m pip install stripe"
+)
+
+
+class MissingDependencyError(ImportError):
+    """A required third-party package is absent.
+
+    Subclasses ImportError so callers that already guard their own direct
+    imports with `except ImportError` keep working unchanged.
+    """
+
+
+def require_stripe():
+    """Return the imported stripe module.
+
+    Raises MissingDependencyError naming the package and the install command
+    when stripe is not importable. ERPClaw does not install packages on the
+    operator's behalf: the environment that runs ERPClaw may be read-only,
+    shared, or managed by the operator's own packaging, and an install that
+    happens as a side effect of an import makes behaviour depend on who ran
+    the process.
+    """
+    try:
+        import stripe
+    except ImportError as exc:
+        raise MissingDependencyError(STRIPE_INSTALL_HINT) from exc
+    return stripe
 
 try:
     import importlib.util
@@ -114,7 +136,7 @@ def get_stripe_client(conn, stripe_account_id):
     Returns the stripe module with api_key set, or None if account not found.
     Requires the `stripe` package to be installed.
     """
-    import stripe
+    stripe = require_stripe()
     t = Table("stripe_account")
     row = conn.execute(
         Q.from_(t).select(t.restricted_key_enc, t.mode).where(t.id == P()).get_sql(),

@@ -20,6 +20,8 @@ try:
 except ImportError:
     pass
 
+SKILL = "erpclaw-compliance"
+
 # Register naming prefixes
 ENTITY_PREFIXES.setdefault("risk_register", "RISK-")
 
@@ -101,7 +103,7 @@ def add_risk(conn, args):
         getattr(args, "review_date", None),
         args.company_id, now, now,
     ))
-    audit(conn, "risk_register", risk_id, "compliance-add-risk", args.company_id)
+    audit(conn, SKILL, "compliance-add-risk", "risk_register", risk_id)
     conn.commit()
     ok({
         "id": risk_id, "naming_series": naming, "name": name,
@@ -205,7 +207,7 @@ def update_risk(conn, args):
     data["updated_at"] = sql_now()
     sql, params = dynamic_update("risk_register", data, {"id": risk_id})
     conn.execute(sql, params)
-    audit(conn, "risk_register", risk_id, "compliance-update-risk", None, {"updated_fields": changed})
+    audit(conn, SKILL, "compliance-update-risk", "risk_register", risk_id, new_values={"updated_fields": changed})
     conn.commit()
     ok({"id": risk_id, "updated_fields": changed})
 
@@ -311,7 +313,7 @@ def add_risk_assessment(conn, args):
         getattr(args, "notes", None),
         args.company_id, now,
     ))
-    audit(conn, "risk_assessment", assess_id, "compliance-add-risk-assessment", args.company_id)
+    audit(conn, SKILL, "compliance-add-risk-assessment", "risk_assessment", assess_id)
     conn.commit()
     ok({"id": assess_id, "risk_id": risk_id, "score": score, "risk_level": _calc_risk_level(score)})
 
@@ -402,7 +404,7 @@ def close_risk(conn, args):
                      data={"status": P(), "updated_at": sql_now()},
                      where={"id": P()})
     conn.execute(sql, ("closed", risk_id))
-    audit(conn, "risk_register", risk_id, "compliance-close-risk", None)
+    audit(conn, SKILL, "compliance-close-risk", "risk_register", risk_id)
     conn.commit()
     ok({"id": risk_id, "risk_status": "closed"})
 

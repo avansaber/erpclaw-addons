@@ -54,9 +54,56 @@ def parse(text: str) -> dict:
             account_hint = f[1] or account_hint
             if len(f) > 2 and f[2]:
                 currency = f[2]
-            # 03,acct,ccy,type,amount,... — type 010 = opening ledger balance
-            if len(f) > 4 and f[3] == "010" and f[4]:
-                opening_balance = norm_amount(f[4], scale=2)
+            # 03,acct,ccy,(type,amount,count,funds[,extra...])* — type 010 is
+            # the opening ledger balance, type 015 the closing ledger
+            # balance. Funds types carry extra sub-fields per BAI2: S +3, V
+            # +2, D +count and that many pairs, 0/1/2/Z +none. Other type
+            # codes are ignored; 49/98/99 trailers are never read here.
+            idx = 3
+            if idx < len(f) and all(g == "" for g in f[idx:]):
+                idx = len(f)
+            while idx < len(f):
+                if idx + 3 >= len(f):
+                    raise BankStatementParseError(
+                        f"malformed BAI2 03 record: {rec!r}")
+                type_code = f[idx]
+                amount_raw = f[idx + 1]
+                funds = f[idx + 3]
+                idx += 4
+                if funds == "S":
+                    if idx + 3 > len(f):
+                        raise BankStatementParseError(
+                            f"malformed BAI2 03 record: {rec!r}")
+                    idx += 3
+                elif funds == "V":
+                    if idx + 2 > len(f):
+                        raise BankStatementParseError(
+                            f"malformed BAI2 03 record: {rec!r}")
+                    idx += 2
+                elif funds == "D":
+                    if idx >= len(f):
+                        raise BankStatementParseError(
+                            f"malformed BAI2 03 record: {rec!r}")
+                    try:
+                        pairs = int(f[idx])
+                    except (TypeError, ValueError):
+                        raise BankStatementParseError(
+                            f"malformed BAI2 03 record: {rec!r}")
+                    idx += 1
+                    if idx + 2 * pairs > len(f):
+                        raise BankStatementParseError(
+                            f"malformed BAI2 03 record: {rec!r}")
+                    idx += 2 * pairs
+                elif funds in ("", "0", "1", "2", "Z"):
+                    pass
+                else:
+                    pass
+                if not amount_raw:
+                    continue
+                if type_code == "010":
+                    opening_balance = norm_amount(amount_raw, scale=2)
+                elif type_code == "015":
+                    closing_balance = norm_amount(amount_raw, scale=2)
         elif code == "16":
             if len(f) < 5:
                 raise BankStatementParseError(f"malformed BAI2 detail record: {rec!r}")

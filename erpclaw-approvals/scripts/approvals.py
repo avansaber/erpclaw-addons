@@ -114,7 +114,7 @@ def update_approval_rule(conn, args):
     if not updates:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
     params.append(rule_id)
     conn.execute(f"UPDATE approval_rule SET {', '.join(updates)} WHERE id = ?", params)
     audit(conn, SKILL, "approval-update-approval-rule", "approval_rule", rule_id,

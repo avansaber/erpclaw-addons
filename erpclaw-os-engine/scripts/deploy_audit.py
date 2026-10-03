@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
 
+RECORDABLE_OUTCOMES = ("deployed", "queued", "rejected", "failed")
+
 
 def ensure_deploy_audit_table(db_path=None):
     """Create erpclaw_deploy_audit table if it doesn't exist."""
@@ -60,6 +62,8 @@ def record_deployment(module_name, pipeline_result, tier=None, steps=None,
     Returns:
         str: The audit record ID
     """
+    if pipeline_result not in RECORDABLE_OUTCOMES:
+        raise ValueError("outcome '%s' is not a recordable audit outcome" % (pipeline_result,))
     db_path = db_path or DEFAULT_DB_PATH
     ensure_deploy_audit_table(db_path)
 

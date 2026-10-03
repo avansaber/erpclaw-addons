@@ -10,7 +10,7 @@ import os
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 # Add shared lib to path
@@ -21,6 +21,7 @@ if importlib.util.find_spec("erpclaw_lib") is None:
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.query import (
     Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update, now as sql_now,
+    update_row,
 )
 
 
@@ -167,9 +168,10 @@ def select_best(conn, run_id):
             improvement_pct = str(pct.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
     conn.execute(
-        'UPDATE erpclaw_dgm_run SET best_variant_id = ?, best_exec_ms = ?, '
-        'improvement_pct = ?, improvement_id = ?, status = ?, completed_at = datetime(\'now\') '
-        'WHERE id = ?',
+        update_row("erpclaw_dgm_run", {
+            "best_variant_id": P(), "best_exec_ms": P(), "improvement_pct": P(),
+            "improvement_id": P(), "status": P(), "completed_at": sql_now(),
+        }, {"id": P()}),
         (variant_id, best.get("exec_time_ms"), improvement_pct,
          improvement_id, "completed", run_id),
     )
@@ -256,11 +258,15 @@ def cleanup_old_variants(conn, days=30):
     Returns:
         int: number of variants deleted
     """
+    # The cutoff is computed here and bound, in the same UTC text shape the
+    # SQLite clock writes, so the comparison runs unchanged on every backend.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).strftime(
+        "%Y-%m-%d %H:%M:%S")
     cursor = conn.execute(
         "DELETE FROM erpclaw_dgm_variant "
         "WHERE is_selected = 0 "
-        "AND created_at < datetime('now', ?)",
-        (f"-{days} days",),
+        "AND created_at < ?",
+        (cutoff,),
     )
     return cursor.rowcount
 

@@ -136,6 +136,7 @@ POS_TRANSACTION = Table(
            ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
     Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
     Column("updated_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("return_against_id", Text),
     CheckConstraint(
         "status IN ('draft','held','submitted','voided','returned')",
         name="ck_pos_transaction_status"),
@@ -144,6 +145,7 @@ POS_TRANSACTION = Table(
 Index("idx_pos_txn_session", POS_TRANSACTION.c.pos_session_id)
 Index("idx_pos_txn_status", POS_TRANSACTION.c.status)
 Index("idx_pos_txn_company", POS_TRANSACTION.c.company_id)
+Index("idx_pos_txn_return_against", POS_TRANSACTION.c.return_against_id)
 
 # ---------------------------------------------------------------------------
 # 4. pos_transaction_item
@@ -164,6 +166,7 @@ POS_TRANSACTION_ITEM = Table(
     Column("amount", Text, nullable=False, server_default=text("'0'")),
     Column("uom", Text, nullable=False, server_default=text("'Nos'")),
     Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    Column("return_against_item_id", Text),
 )
 
 Index("idx_pos_txn_item_txn", POS_TRANSACTION_ITEM.c.pos_transaction_id)

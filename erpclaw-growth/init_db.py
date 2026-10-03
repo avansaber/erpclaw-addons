@@ -984,7 +984,6 @@ Index("idx_rel_score_party",
 # archives any rows an existing install holds and then drops both tables.
 # Removed from this metadata at the phase-2 merge, where the conversion (which
 # still declared them) met the retirement (which had removed them from the DDL).
-# SIM: planning/simlogs/m63c_SIM_2026-08-12.md
 
 
 def create_crmadv_tables(db_path=None):

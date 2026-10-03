@@ -9,11 +9,16 @@ Covers all 29 actions across 4 domain modules:
   - reports (5): cash-reconciliation, daily-report, hourly-sales,
     top-items, cashier-performance
 """
+import os
+from decimal import Decimal
+
 import pytest
+from erpclaw_lib import cross_skill
+from erpclaw_lib.query import Q, P, Table, Field
 from pos_helpers import (
     call_action, ns, is_ok, is_error, load_db_query, _uuid,
     seed_company, seed_naming_series, seed_item, seed_pos_profile,
-    seed_open_session,
+    seed_open_session, seed_till_accounts, SRC_DIR,
 )
 
 
@@ -341,30 +346,129 @@ class TestAddPayment:
 
 
 class TestSubmitTransaction:
-    def _make_paid_txn(self, conn, env, mod):
+    def _make_paid_txn(self, conn, env, mod, qty="2", rate="10.00", amount="20.00",
+                       customer=True):
         txn = call_action(mod.ACTIONS["pos-add-transaction"], conn, ns(
             pos_session_id=env["session_id"],
-            customer_id=None, customer_name="Customer A",
+            customer_id=env["customer_id"] if customer else None,
+            customer_name="Customer A",
         ))
         call_action(mod.ACTIONS["pos-add-transaction-item"], conn, ns(
             pos_transaction_id=txn["id"], item_id=env["item_id"],
-            item_name=None, qty="2", rate="10.00", uom=None,
+            item_name=None, qty=qty, rate=rate, uom=None,
             barcode=None, discount_pct=None,
         ))
         call_action(mod.ACTIONS["pos-add-payment"], conn, ns(
             pos_transaction_id=txn["id"],
-            payment_method="cash", amount="20.00", reference=None,
+            payment_method="cash", amount=amount, reference=None,
         ))
         return txn["id"]
 
-    def test_submit_transaction_success(self, conn, env, mod):
+    def _invoice_rows(self, conn):
+        return conn.execute(
+            Q.from_(Table("sales_invoice")).select(Field("id")).get_sql()
+        ).fetchall()
+
+    def _gl_rows(self, conn):
+        return conn.execute(
+            Q.from_(Table("gl_entry")).select(Field("id")).get_sql()
+        ).fetchall()
+
+    def test_submit_transaction_success(self, conn, env, mod, selling_bridge):
         txn_id = self._make_paid_txn(conn, env, mod)
+        seed_till_accounts(conn, env["company_id"])
+        conn.commit()
         r = call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
             pos_transaction_id=txn_id,
         ))
         assert is_ok(r)
         assert r["transaction_status"] == "submitted"
         assert r["change_amount"] == "0.00"
+        assert r["sales_invoice_id"]
+        assert r["sales_invoice_status"] == "paid"
+
+    def test_submit_creates_linked_invoice_with_gl(self, conn, env, mod,
+                                                   selling_bridge):
+        txn_id = self._make_paid_txn(conn, env, mod, qty="1", rate="100.00",
+                                     amount="100.00")
+        seed_till_accounts(conn, env["company_id"])
+        conn.commit()
+        r = call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
+            pos_transaction_id=txn_id,
+        ))
+        assert is_ok(r)
+        invoice_id = r["sales_invoice_id"]
+        assert r["sales_invoice_outstanding_amount"] == "0"
+
+        txn_row = conn.execute(
+            Q.from_(Table("pos_transaction"))
+            .select(Field("status"), Field("sales_invoice_id"))
+            .where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
+        assert txn_row["status"] == "submitted"
+        assert txn_row["sales_invoice_id"] == invoice_id
+
+        inv = conn.execute(
+            Q.from_(Table("sales_invoice"))
+            .select(Field("status"), Field("posting_date"), Field("grand_total"),
+                    Field("customer_id"), Field("company_id"),
+                    Field("outstanding_amount"))
+            .where(Field("id") == P()).get_sql(), (invoice_id,)).fetchone()
+        assert inv["status"] == "paid"
+        assert inv["posting_date"]
+        assert inv["grand_total"] == "100.00"
+        assert inv["outstanding_amount"] == "0"
+        assert inv["customer_id"] == env["customer_id"]
+        assert inv["company_id"] == env["company_id"]
+
+        gl_rows = conn.execute(
+            Q.from_(Table("gl_entry"))
+            .select(Field("debit"), Field("credit"))
+            .where(Field("voucher_type") == P())
+            .where(Field("voucher_id") == P()).get_sql(),
+            ("sales_invoice", invoice_id)).fetchall()
+        assert len(gl_rows) >= 2
+        debits = sum((Decimal(str(g["debit"])) for g in gl_rows), Decimal("0"))
+        credits = sum((Decimal(str(g["credit"])) for g in gl_rows), Decimal("0"))
+        assert debits == credits == Decimal("100.00")
+
+        ple_rows = conn.execute(
+            Q.from_(Table("payment_ledger_entry")).select(Field("id"))
+            .where(Field("voucher_type") == P())
+            .where(Field("voucher_id") == P()).get_sql(),
+            ("sales_invoice", invoice_id)).fetchall()
+        assert len(ple_rows) == 1
+
+    def test_submit_without_customer_refuses(self, conn, env, mod):
+        txn_id = self._make_paid_txn(conn, env, mod, customer=False)
+        r = call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
+            pos_transaction_id=txn_id,
+        ))
+        assert is_error(r)
+        txn_row = conn.execute(
+            Q.from_(Table("pos_transaction")).select(Field("status"))
+            .where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
+        assert txn_row["status"] == "draft"
+        assert len(self._invoice_rows(conn)) == 0
+
+    def test_submit_refuses_when_selling_fails(self, conn, env, mod, monkeypatch,
+                                               selling_bridge):
+        txn_id = self._make_paid_txn(conn, env, mod)
+        seed_till_accounts(conn, env["company_id"])
+
+        def _boom(*args, **kwargs):
+            raise cross_skill.CrossSkillError("selling is down")
+
+        monkeypatch.setattr(cross_skill, "create_invoice", _boom)
+        r = call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
+            pos_transaction_id=txn_id,
+        ))
+        assert is_error(r)
+        txn_row = conn.execute(
+            Q.from_(Table("pos_transaction")).select(Field("status"))
+            .where(Field("id") == P()).get_sql(), (txn_id,)).fetchone()
+        assert txn_row["status"] == "draft"
+        assert len(self._invoice_rows(conn)) == 0
+        assert len(self._gl_rows(conn)) == 0
 
     def test_submit_insufficient_payment(self, conn, env, mod):
         txn = call_action(mod.ACTIONS["pos-add-transaction"], conn, ns(
@@ -413,13 +517,14 @@ class TestVoidTransaction:
 
 
 class TestReturnTransaction:
-    def _make_submitted_txn(self, conn, env, mod):
+    def _make_submitted_txn(self, conn, env, mod, selling_bridge):
         txn = call_action(mod.ACTIONS["pos-add-transaction"], conn, ns(
             pos_session_id=env["session_id"],
-            customer_id=None, customer_name="Return Test",
+            customer_id=env["customer_id"], customer_name="Return Test",
         ))
+        nonstock = seed_item(conn, "Return Widget", "RTW", is_stock_item=0)
         call_action(mod.ACTIONS["pos-add-transaction-item"], conn, ns(
-            pos_transaction_id=txn["id"], item_id=env["item_id"],
+            pos_transaction_id=txn["id"], item_id=nonstock,
             item_name=None, qty="1", rate="30.00", uom=None,
             barcode=None, discount_pct=None,
         ))
@@ -427,13 +532,16 @@ class TestReturnTransaction:
             pos_transaction_id=txn["id"],
             payment_method="cash", amount="30.00", reference=None,
         ))
-        call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
+        seed_till_accounts(conn, env["company_id"])
+        conn.commit()
+        r = call_action(mod.ACTIONS["pos-submit-transaction"], conn, ns(
             pos_transaction_id=txn["id"],
         ))
+        assert is_ok(r), f"setup submit failed: {r}"
         return txn["id"]
 
-    def test_return_transaction(self, conn, env, mod):
-        txn_id = self._make_submitted_txn(conn, env, mod)
+    def test_return_transaction(self, conn, env, mod, selling_bridge):
+        txn_id = self._make_submitted_txn(conn, env, mod, selling_bridge)
         r = call_action(mod.ACTIONS["pos-return-transaction"], conn, ns(
             pos_transaction_id=txn_id,
         ))

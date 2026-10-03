@@ -50,7 +50,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `treasury-update-bank-account` | `--account-id` | `--bank-name --account-name --account-number --routing-number --account-type --currency --gl-account-id --is-active --notes` |
 | `treasury-get-bank-account` | `--account-id` | |
 | `treasury-list-bank-accounts` | | `--company-id --account-type --is-active --search --limit --offset` |
-| `treasury-record-bank-balance` | `--account-id --current-balance` | |
+| `treasury-record-bank-balance` | `--account-id --current-balance` | `--reconciled-date` |
 | `treasury-add-cash-position` | `--company-id` | `--position-date --total-cash --total-receivables --total-payables --notes` |
 | `treasury-list-cash-positions` | | `--company-id --limit --offset` |
 | `treasury-get-cash-position` | `--position-id` | |

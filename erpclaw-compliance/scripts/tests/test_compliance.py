@@ -27,6 +27,11 @@ from compliance_helpers import (
 
 mod = load_db_query()
 
+from collections import Counter
+from datetime import date
+
+from erpclaw_lib.query import Field, P, Q, Table
+
 
 # =============================================================================
 # Audit Domain
@@ -736,10 +741,53 @@ class TestOverdueItemsReport:
         assert result["overdue_calendar_count"] >= 1
 
 
+# ---------------------------------------------------------------------------
+# compliance-dashboard depth helpers.
+# ---------------------------------------------------------------------------
+# NOTE (ledger): compliance-dashboard never reaches the ledger. It runs SELECTs
+# only -- no INSERT/UPDATE, no audit() call, no commit -- so no two-leg/balance
+# assertion can hold for it. The depth signal here is (a) exact agreement
+# between the response buckets and independently-read stored rows, and
+# (b) proof that the call wrote nothing.
+# NOTE (money): the compliance tables hold no monetary columns (only counts,
+# statuses and dates-as-TEXT), so no Decimal comparison applies anywhere below;
+# every assertion below compares exact ints/strings, never float.
+_DASHBOARD_TABLES = (
+    "audit_plan",
+    "audit_finding",
+    "risk_register",
+    "risk_assessment",
+    "control_test",
+    "compliance_calendar",
+    "policy",
+    "policy_acknowledgment",
+)
+
+
+def _seam_rows(conn, table_name, company_id):
+    """Company-scoped rows read back through the seam (PyPika-built query)."""
+    table = Table(table_name)
+    sql = Q.from_(table).select(table.star).where(
+        Field("company_id") == P()).get_sql()
+    return [dict(row) for row in conn.execute(sql, (company_id,)).fetchall()]
+
+
+def _seam_snapshot(conn):
+    """Whole-table snapshots (id-ordered) for before/after identity checks."""
+    snapshot = {}
+    for name in _DASHBOARD_TABLES + ("audit_log",):
+        table = Table(name)
+        sql = Q.from_(table).select(table.star).orderby(table.id).get_sql()
+        snapshot[name] = [tuple(row) for row in conn.execute(sql).fetchall()]
+    return snapshot
+
+
 class TestComplianceDashboard:
     def test_basic_dashboard(self, conn, env):
+        cid = env["company_id"]
+        before = _seam_snapshot(conn)
         result = call_action(mod.compliance_dashboard, conn, ns(
-            company_id=env["company_id"],
+            company_id=cid,
         ))
         assert is_ok(result), result
         assert "audit_plans" in result
@@ -749,6 +797,210 @@ class TestComplianceDashboard:
         assert "policies" in result
         assert "overdue_items" in result
         assert "open_findings" in result
+        # Behavioural depth: the fresh env seeds exactly one draft audit plan,
+        # one identified medium risk and one draft policy, and nothing else, so
+        # the buckets below pin exact stored-row state, not just key shape.
+        assert result["company_id"] == cid
+        assert result["report_date"] == date.today().isoformat()
+        assert result["audit_plans"] == {"draft": 1}
+        assert result["risks_by_level"] == {"medium": 1}
+        assert result["policies"] == {"draft": 1}
+        assert result["control_tests"] == {}
+        assert result["calendar_items"] == {}
+        assert result["overdue_items"] == 0
+        assert result["open_findings"] == 0
+        # Each bucket matches an independent seam read of the same rows.
+        plans = _seam_rows(conn, "audit_plan", cid)
+        assert result["audit_plans"] == dict(Counter(r["status"] for r in plans))
+        risks = [r for r in _seam_rows(conn, "risk_register", cid)
+                 if r["status"] != "closed"]
+        assert result["risks_by_level"] == dict(
+            Counter(r["risk_level"] for r in risks))
+        assert result["control_tests"] == {}
+        assert result["calendar_items"] == {}
+        # Read-only proof: the dashboard changed no stored row, not even audit_log.
+        assert _seam_snapshot(conn) == before
+
+    def test_dashboard_reflects_seeded_state(self, conn, env):
+        cid = env["company_id"]
+        # Build a known cross-domain state through the module's own actions.
+        second = call_action(mod.compliance_add_audit_plan, conn, ns(
+            company_id=cid,
+            name="SOX Walkthrough",
+            audit_type="external",
+        ))
+        assert is_ok(second), second
+        started = call_action(mod.compliance_start_audit, conn, ns(
+            audit_plan_id=second["id"],
+        ))
+        assert is_ok(started), started
+
+        high = call_action(mod.compliance_add_risk, conn, ns(
+            company_id=cid,
+            name="Vendor failure",
+            category="operational",
+            likelihood=4,
+            impact=3,
+        ))
+        assert is_ok(high), high
+        doomed = call_action(mod.compliance_add_risk, conn, ns(
+            company_id=cid,
+            name="Retired worry",
+            category="financial",
+            likelihood=5,
+            impact=5,
+        ))
+        assert is_ok(doomed), doomed
+        closed = call_action(mod.compliance_close_risk, conn, ns(
+            risk_id=doomed["id"],
+        ))
+        assert is_ok(closed), closed
+
+        ctrl_a = call_action(mod.compliance_add_control_test, conn, ns(
+            company_id=cid,
+            control_name="Access review",
+            control_type="detective",
+        ))
+        assert is_ok(ctrl_a), ctrl_a
+        ctrl_b = call_action(mod.compliance_add_control_test, conn, ns(
+            company_id=cid,
+            control_name="Backup check",
+            control_type="preventive",
+        ))
+        assert is_ok(ctrl_b), ctrl_b
+        executed = call_action(mod.compliance_execute_control_test, conn, ns(
+            control_test_id=ctrl_a["id"],
+            test_result="effective",
+        ))
+        assert is_ok(executed), executed
+
+        past = call_action(mod.compliance_add_calendar_item, conn, ns(
+            company_id=cid,
+            title="Overdue filing",
+            due_date="2020-01-01",
+        ))
+        assert is_ok(past), past
+        future = call_action(mod.compliance_add_calendar_item, conn, ns(
+            company_id=cid,
+            title="Next filing",
+            due_date="2030-01-01",
+        ))
+        assert is_ok(future), future
+        done_item = call_action(mod.compliance_add_calendar_item, conn, ns(
+            company_id=cid,
+            title="Filed already",
+            due_date="2020-02-01",
+        ))
+        assert is_ok(done_item), done_item
+        completed = call_action(mod.compliance_complete_calendar_item, conn, ns(
+            calendar_item_id=done_item["id"],
+        ))
+        assert is_ok(completed), completed
+
+        finding_open = call_action(mod.compliance_add_audit_finding, conn, ns(
+            audit_plan_id=env["audit_plan_id"],
+            company_id=cid,
+            title="Missing sign-off",
+            finding_type="major",
+            remediation_due="2030-06-01",
+        ))
+        assert is_ok(finding_open), finding_open
+        finding_late = call_action(mod.compliance_add_audit_finding, conn, ns(
+            audit_plan_id=env["audit_plan_id"],
+            company_id=cid,
+            title="Late remediation",
+            finding_type="minor",
+            remediation_due="2020-03-01",
+        ))
+        assert is_ok(finding_late), finding_late
+
+        extra_policy = call_action(mod.compliance_add_policy, conn, ns(
+            company_id=cid,
+            title="Travel Policy",
+        ))
+        assert is_ok(extra_policy), extra_policy
+        published = call_action(mod.compliance_publish_policy, conn, ns(
+            policy_id=extra_policy["id"],
+        ))
+        assert is_ok(published), published
+
+        # A second company whose rows must NOT leak into this dashboard.
+        other_cid = seed_company(conn)
+        seed_naming_series(conn, other_cid)
+        seed_audit_plan(conn, other_cid, name="Other Co Audit")
+        call_action(mod.compliance_add_calendar_item, conn, ns(
+            company_id=other_cid,
+            title="Other Co Item",
+            due_date="2020-01-01",
+        ))
+
+        before = _seam_snapshot(conn)
+        result = call_action(mod.compliance_dashboard, conn, ns(
+            company_id=cid,
+        ))
+        assert is_ok(result), result
+
+        # Exact pinned values for the seeded edges: the closed critical risk is
+        # excluded, and overdue_items counts calendar rows only, so the past-due
+        # finding leaves it at 1.
+        assert result["audit_plans"] == {"draft": 1, "in_progress": 1}
+        assert result["risks_by_level"] == {"medium": 1, "high": 1}
+        assert result["control_tests"] == {"not_tested": 1, "effective": 1}
+        assert result["calendar_items"] == {"upcoming": 2, "completed": 1}
+        assert result["policies"] == {"draft": 1, "published": 1}
+        assert result["overdue_items"] == 1
+        assert result["open_findings"] == 2
+
+        # Full agreement with independent seam reads of the same stored rows.
+        plans = _seam_rows(conn, "audit_plan", cid)
+        assert result["audit_plans"] == dict(Counter(r["status"] for r in plans))
+        risks = [r for r in _seam_rows(conn, "risk_register", cid)
+                 if r["status"] != "closed"]
+        assert result["risks_by_level"] == dict(
+            Counter(r["risk_level"] for r in risks))
+        ctrls = _seam_rows(conn, "control_test", cid)
+        assert result["control_tests"] == dict(
+            Counter(r["test_result"] for r in ctrls))
+        cal = _seam_rows(conn, "compliance_calendar", cid)
+        assert result["calendar_items"] == dict(Counter(r["status"] for r in cal))
+        today = date.today().isoformat()
+        assert result["overdue_items"] == sum(
+            1 for r in cal
+            if r["status"] not in ("completed", "waived")
+            and (r["due_date"] or "") < today)
+        findings = _seam_rows(conn, "audit_finding", cid)
+        assert result["open_findings"] == sum(
+            1 for r in findings
+            if r["remediation_status"] in ("open", "in_progress", "overdue"))
+        assert result["report_date"] == today
+        assert result["company_id"] == cid
+
+        # Read-only proof: the dashboard changed no stored row, not even audit_log.
+        assert _seam_snapshot(conn) == before
+
+    def test_dashboard_refusal_keeps_db_identical(self, conn, env):
+        cid = env["company_id"]
+        before = _seam_snapshot(conn)
+        refused = call_action(mod.compliance_dashboard, conn, ns(
+            company_id=None,
+        ))
+        assert is_error(refused), refused
+        assert "--company-id" in refused.get("message", "")
+        ghost = "00000000-0000-0000-0000-000000000000"
+        missing = call_action(mod.compliance_dashboard, conn, ns(
+            company_id=ghost,
+        ))
+        assert is_error(missing), missing
+        assert "not found" in missing.get("message", "")
+        assert ghost in missing.get("message", "")
+        # Neither refusal half-wrote: every table is byte-identical.
+        assert _seam_snapshot(conn) == before
+        # The database still answers afterwards.
+        result = call_action(mod.compliance_dashboard, conn, ns(
+            company_id=cid,
+        ))
+        assert is_ok(result), result
+        assert result["company_id"] == cid
 
 
 # =============================================================================

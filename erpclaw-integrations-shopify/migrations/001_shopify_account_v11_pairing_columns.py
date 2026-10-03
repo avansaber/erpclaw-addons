@@ -99,15 +99,18 @@ ADD_COLUMNS = (
 
 
 def _target(db_path):
-    """The database to act on, resolved once and by the seam's own env chain.
+    """The database to act on.
 
-    On PostgreSQL the runner hands `run_migration` the SQLite default path and
-    reads the real target from ``ERPCLAW_DB_URL`` itself, so using the argument
-    verbatim would point the seam at a filesystem path and call it a connection
-    URL. ``None`` makes the seam resolve it through the same chain the DML path
-    uses, which is the whole reason that chain lives in one place.
+    On PostgreSQL the runner passes ``ERPCLAW_DB_URL`` when set, else the
+    location it was given (from the module manager, the SQLite default file
+    path); ``connect.py`` passes ``None`` or the action's ``--db-path``; a URL
+    argument is used as given, anything else yields ``None``.
     """
     if get_dialect() == "postgresql":
+        if isinstance(db_path, str) and (
+                db_path.startswith("postgresql://")
+                or db_path.startswith("postgres://")):
+            return db_path
         return None
     return db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
 

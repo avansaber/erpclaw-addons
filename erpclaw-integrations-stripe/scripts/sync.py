@@ -21,7 +21,7 @@ try:
     from erpclaw_lib.audit import audit
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Order,
-        insert_row, update_row, dynamic_update,
+        insert_row, update_row, dynamic_update, now as sql_now,
     )
     # Shared sync-job lifecycle helpers (M31 H6 dedup).
     from erpclaw_lib.integration_actions import (
@@ -117,19 +117,35 @@ def _sync_balance_transactions(conn, stripe_client, acct_id, company_id, since=N
     for bt in stripe_client.BalanceTransaction.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_balance_transaction
+            f"""INSERT INTO stripe_balance_transaction
                 (id, stripe_id, stripe_account_id, type, reporting_category,
                  source_id, source_type, amount, fee, net, currency,
                  description, available_on, created_stripe, payout_id,
                  status, reconciled, company_id, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_balance_transaction WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, 0, ?, datetime('now'))""",
+                ?, 0, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                type = excluded.type,
+                reporting_category = excluded.reporting_category,
+                source_id = excluded.source_id,
+                source_type = excluded.source_type,
+                amount = excluded.amount,
+                fee = excluded.fee,
+                net = excluded.net,
+                currency = excluded.currency,
+                description = excluded.description,
+                available_on = excluded.available_on,
+                created_stripe = excluded.created_stripe,
+                payout_id = excluded.payout_id,
+                status = excluded.status,
+                company_id = excluded.company_id""",
             (
-                bt.id, row_id,
+                row_id,
                 bt.id, acct_id, bt.type, getattr(bt, "reporting_category", "") or "",
                 getattr(bt, "source", None), bt.type,
                 str(cents_to_decimal(bt.amount)),
@@ -150,8 +166,8 @@ def _sync_balance_transactions(conn, stripe_client, acct_id, company_id, since=N
         # omits the expansion (fee_details is None / not a list).
         fee_details = getattr(bt, "fee_details", None)
         if isinstance(fee_details, list) and fee_details:
-            # INSERT OR REPLACE above may have kept an existing row id via
-            # COALESCE — resolve the actual stored id before writing children.
+            # On a re-sync the upsert above keeps the existing row id, so
+            # resolve the stored id before writing children.
             bt_row = conn.execute(
                 "SELECT id FROM stripe_balance_transaction WHERE stripe_id = ?",
                 (bt.id,)
@@ -166,10 +182,10 @@ def _sync_balance_transactions(conn, stripe_client, acct_id, company_id, since=N
                 for fd in fee_details:
                     fd_amount = getattr(fd, "amount", None)
                     conn.execute(
-                        """INSERT INTO stripe_fee_detail
+                        f"""INSERT INTO stripe_fee_detail
                             (id, balance_transaction_id, fee_type, amount,
                              currency, description, application, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                        VALUES (?, ?, ?, ?, ?, ?, ?, {sql_now()})""",
                         (
                             str(uuid.uuid4()), bt_local_id,
                             getattr(fd, "type", None) or "unknown",
@@ -201,21 +217,37 @@ def _sync_charges(conn, stripe_client, acct_id, company_id, since=None):
             pmt_type = getattr(ch, "payment_method_type", None) or ""
 
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_charge
+            f"""INSERT INTO stripe_charge
                 (id, stripe_id, stripe_account_id, amount, currency,
                  customer_stripe_id, description, payment_method_type,
                  payment_intent_id, invoice_stripe_id, status,
                  amount_refunded, disputed, failure_code,
                  metadata, company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_charge WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, datetime('now'))""",
+                ?, ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                customer_stripe_id = excluded.customer_stripe_id,
+                description = excluded.description,
+                payment_method_type = excluded.payment_method_type,
+                payment_intent_id = excluded.payment_intent_id,
+                invoice_stripe_id = excluded.invoice_stripe_id,
+                status = excluded.status,
+                amount_refunded = excluded.amount_refunded,
+                disputed = excluded.disputed,
+                failure_code = excluded.failure_code,
+                metadata = excluded.metadata,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                ch.id, row_id,
+                row_id,
                 ch.id, acct_id,
                 str(cents_to_decimal(ch.amount)),
                 ch.currency,
@@ -247,17 +279,27 @@ def _sync_refunds(conn, stripe_client, acct_id, company_id, since=None):
     for rf in stripe_client.Refund.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_refund
+            f"""INSERT INTO stripe_refund
                 (id, stripe_id, stripe_account_id, charge_stripe_id,
                  amount, currency, reason, status,
                  metadata, company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_refund WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, datetime('now'))""",
+                ?, ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                charge_stripe_id = excluded.charge_stripe_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                reason = excluded.reason,
+                status = excluded.status,
+                metadata = excluded.metadata,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                rf.id, row_id,
+                row_id,
                 rf.id, acct_id,
                 getattr(rf, "charge", None) or "",
                 str(cents_to_decimal(rf.amount)),
@@ -283,19 +325,30 @@ def _sync_disputes(conn, stripe_client, acct_id, company_id, since=None):
     for dp in stripe_client.Dispute.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_dispute
+            f"""INSERT INTO stripe_dispute
                 (id, stripe_id, stripe_account_id, charge_stripe_id,
                  amount, currency, reason, status,
                  evidence_due_by, metadata, company_id,
                  created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_dispute WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, datetime('now'))""",
+                ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                charge_stripe_id = excluded.charge_stripe_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                reason = excluded.reason,
+                status = excluded.status,
+                evidence_due_by = excluded.evidence_due_by,
+                metadata = excluded.metadata,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                dp.id, row_id,
+                row_id,
                 dp.id, acct_id,
                 getattr(dp, "charge", None) or "",
                 str(cents_to_decimal(dp.amount)),
@@ -328,19 +381,31 @@ def _sync_payouts(conn, stripe_client, acct_id, company_id, since=None):
             last4 = dest.last4
 
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_payout
+            f"""INSERT INTO stripe_payout
                 (id, stripe_id, stripe_account_id, amount, currency,
                  arrival_date, method, description, status,
                  failure_code, destination_bank_last4,
                  reconciled, company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_payout WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?,
-                0, ?, ?, datetime('now'))""",
+                0, ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                arrival_date = excluded.arrival_date,
+                method = excluded.method,
+                description = excluded.description,
+                status = excluded.status,
+                failure_code = excluded.failure_code,
+                destination_bank_last4 = excluded.destination_bank_last4,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                po.id, row_id,
+                row_id,
                 po.id, acct_id,
                 str(cents_to_decimal(po.amount)),
                 po.currency,
@@ -395,21 +460,27 @@ def _sync_customers(conn, stripe_client, acct_id, company_id, since=None):
                 match_confidence = "0.8"
 
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_customer_map
+            f"""INSERT INTO stripe_customer_map
                 (id, stripe_account_id, stripe_customer_id,
                  erpclaw_customer_id, stripe_email, stripe_name,
                  match_method, match_confidence, company_id, created_at)
             VALUES (
-                COALESCE(
-                    (SELECT id FROM stripe_customer_map
-                     WHERE stripe_account_id=? AND stripe_customer_id=?),
-                    ?
-                ),
+                ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, datetime('now'))""",
+                ?, ?, ?, {sql_now()})
+            ON CONFLICT (stripe_account_id, stripe_customer_id) DO UPDATE SET
+                erpclaw_customer_id = COALESCE(stripe_customer_map.erpclaw_customer_id,
+                                               excluded.erpclaw_customer_id),
+                stripe_email = excluded.stripe_email,
+                stripe_name = excluded.stripe_name,
+                match_method = CASE WHEN stripe_customer_map.erpclaw_customer_id IS NULL
+                                   THEN excluded.match_method ELSE stripe_customer_map.match_method END,
+                match_confidence = CASE WHEN stripe_customer_map.erpclaw_customer_id IS NULL
+                                   THEN excluded.match_confidence ELSE stripe_customer_map.match_confidence END,
+                company_id = excluded.company_id""",
             (
-                acct_id, cu.id, row_id,
+                row_id,
                 acct_id, cu.id,
                 erpclaw_customer_id, stripe_email, stripe_name,
                 match_method, match_confidence, company_id,
@@ -429,21 +500,35 @@ def _sync_invoices(conn, stripe_client, acct_id, company_id, since=None):
     for inv in stripe_client.Invoice.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_invoice
+            f"""INSERT INTO stripe_invoice
                 (id, stripe_id, stripe_account_id, customer_stripe_id,
                  number, amount_due, amount_paid, amount_remaining,
                  currency, status, subscription_stripe_id,
                  period_start, period_end, company_id,
                  created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_invoice WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
-                ?, datetime('now'))""",
+                ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                customer_stripe_id = excluded.customer_stripe_id,
+                number = excluded.number,
+                amount_due = excluded.amount_due,
+                amount_paid = excluded.amount_paid,
+                amount_remaining = excluded.amount_remaining,
+                currency = excluded.currency,
+                status = excluded.status,
+                subscription_stripe_id = excluded.subscription_stripe_id,
+                period_start = excluded.period_start,
+                period_end = excluded.period_end,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                inv.id, row_id,
+                row_id,
                 inv.id, acct_id,
                 getattr(inv, "customer", None) or "",
                 getattr(inv, "number", None) or "",
@@ -484,21 +569,34 @@ def _sync_subscriptions(conn, stripe_client, acct_id, company_id, since=None):
                 plan_interval = getattr(price, "interval", "") or ""
 
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_subscription
+            f"""INSERT INTO stripe_subscription
                 (id, stripe_id, stripe_account_id, customer_stripe_id,
                  status, current_period_start, current_period_end,
                  cancel_at_period_end, canceled_at,
                  plan_interval, plan_amount, currency,
                  company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_subscription WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, datetime('now'))""",
+                ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                customer_stripe_id = excluded.customer_stripe_id,
+                status = excluded.status,
+                current_period_start = excluded.current_period_start,
+                current_period_end = excluded.current_period_end,
+                cancel_at_period_end = excluded.cancel_at_period_end,
+                canceled_at = excluded.canceled_at,
+                plan_interval = excluded.plan_interval,
+                plan_amount = excluded.plan_amount,
+                currency = excluded.currency,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                sub.id, row_id,
+                row_id,
                 sub.id, acct_id,
                 getattr(sub, "customer", None) or "",
                 sub.status,
@@ -527,17 +625,26 @@ def _sync_transfers(conn, stripe_client, acct_id, company_id, since=None):
     for tr in stripe_client.Transfer.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_transfer
+            f"""INSERT INTO stripe_transfer
                 (id, stripe_id, stripe_account_id, amount, currency,
                  destination_account, description, reversed,
                  company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_transfer WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, ?, datetime('now'))""",
+                ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                destination_account = excluded.destination_account,
+                description = excluded.description,
+                reversed = excluded.reversed,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                tr.id, row_id,
+                row_id,
                 tr.id, acct_id,
                 str(cents_to_decimal(tr.amount)),
                 tr.currency,
@@ -562,17 +669,27 @@ def _sync_credit_notes(conn, stripe_client, acct_id, company_id, since=None):
     for cn in stripe_client.CreditNote.list(**params).auto_paging_iter():
         row_id = str(uuid.uuid4())
         conn.execute(
-            """INSERT OR REPLACE INTO stripe_credit_note
+            f"""INSERT INTO stripe_credit_note
                 (id, stripe_id, stripe_account_id, invoice_stripe_id,
                  customer_stripe_id, amount, currency, reason, status,
                  company_id, created_stripe, created_at)
             VALUES (
-                COALESCE((SELECT id FROM stripe_credit_note WHERE stripe_id=?), ?),
+                ?,
                 ?, ?, ?,
                 ?, ?, ?, ?, ?,
-                ?, ?, datetime('now'))""",
+                ?, ?, {sql_now()})
+            ON CONFLICT (stripe_id) DO UPDATE SET
+                stripe_account_id = excluded.stripe_account_id,
+                invoice_stripe_id = excluded.invoice_stripe_id,
+                customer_stripe_id = excluded.customer_stripe_id,
+                amount = excluded.amount,
+                currency = excluded.currency,
+                reason = excluded.reason,
+                status = excluded.status,
+                company_id = excluded.company_id,
+                created_stripe = excluded.created_stripe""",
             (
-                cn.id, row_id,
+                row_id,
                 cn.id, acct_id,
                 getattr(cn, "invoice", None) or "",
                 getattr(cn, "customer", None) or "",

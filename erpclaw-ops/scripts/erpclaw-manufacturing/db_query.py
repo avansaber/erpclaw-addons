@@ -21,7 +21,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.validation import check_input_lengths
     from erpclaw_lib.naming import get_next_name
@@ -32,10 +32,11 @@ try:
         get_valuation_rate,
         create_perpetual_inventory_gl,
     )
-    from erpclaw_lib.gl_posting import insert_gl_entries, reverse_gl_entries
+    from erpclaw_lib.gl_posting import insert_gl_entries, reverse_gl_entries, take_chain_heads
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
+    from erpclaw_lib.query_helpers import get_default_cost_center
     from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs, now, line_order, rowid_col
     from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
@@ -43,6 +44,14 @@ except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company", "item"]
 
@@ -74,26 +83,21 @@ def _parse_json_arg(value, name):
         err(f"Invalid JSON for --{name}: {value}")
 
 
-def _get_fiscal_year(conn, posting_date: str) -> str | None:
-    """Return the fiscal year name for a posting date, or None."""
+def _company_fiscal_year(conn, posting_date: str, company_id: str) -> str | None:
+    """Return the posting company's own open fiscal year name for a posting date, or None."""
     t = Table("fiscal_year")
     q = (Q.from_(t).select(t.name)
+         .where(t.company_id == P())
          .where(t.start_date <= P())
          .where(t.end_date >= P())
          .where(t.is_closed == 0))
-    fy = conn.execute(q.get_sql(), (posting_date, posting_date)).fetchone()
+    fy = conn.execute(q.get_sql(), (company_id, posting_date, posting_date)).fetchone()
     return fy["name"] if fy else None
 
 
 def _get_cost_center(conn, company_id: str) -> str | None:
     """Return the first non-group cost center for a company, or None."""
-    t = Table("cost_center")
-    q = (Q.from_(t).select(t.id)
-         .where(t.company_id == P())
-         .where(t.is_group == 0)
-         .limit(1))
-    cc = conn.execute(q.get_sql(), (company_id,)).fetchone()
-    return cc["id"] if cc else None
+    return get_default_cost_center(conn, company_id)
 
 
 def _validate_item_exists(conn, item_id: str, label: str = "Item"):
@@ -226,6 +230,20 @@ def add_bom(conn, args):
     items = _parse_json_arg(args.items, "items")
     if not items or not isinstance(items, list):
         err("--items must be a non-empty JSON array")
+
+    if args.items is not None:
+        dup_items = _parse_json_arg(args.items, "items")
+        if not dup_items or not isinstance(dup_items, list):
+            err("--items must be a non-empty JSON array")
+        seen = {}
+        for i, item in enumerate(dup_items):
+            rm_item_id = item.get("item_id") if isinstance(item, dict) else None
+            if not rm_item_id:
+                continue
+            if rm_item_id in seen:
+                first = seen[rm_item_id]
+                err(f"Item {i}: item_id {rm_item_id} is already listed as item {first}; list each raw material once")
+            seen[rm_item_id] = i
 
     bom_qty = to_decimal(args.quantity or "1")
     if bom_qty <= 0:
@@ -527,6 +545,20 @@ def update_bom(conn, args):
     params = []
     updated_fields = []
     recalculate_costs = False
+
+    if args.items is not None:
+        dup_items = _parse_json_arg(args.items, "items")
+        if not dup_items or not isinstance(dup_items, list):
+            err("--items must be a non-empty JSON array")
+        seen = {}
+        for i, item in enumerate(dup_items):
+            rm_item_id = item.get("item_id") if isinstance(item, dict) else None
+            if not rm_item_id:
+                continue
+            if rm_item_id in seen:
+                first = seen[rm_item_id]
+                err(f"Item {i}: item_id {rm_item_id} is already listed as item {first}; list each raw material once")
+            seen[rm_item_id] = i
 
     # Update quantity
     if args.quantity is not None:
@@ -1537,6 +1569,205 @@ def start_work_order(conn, args):
     })
 
 
+def _existing_transfer_voucher_ids(conn, work_order_id):
+    """Distinct committed transfer voucher ids for a work order.
+
+    The first transfer posts under the bare work order id; the n-th transfer
+    (n >= 2) posts under ``<id>:transfer:<n>``. Both spellings are matched
+    with bound parameters only: the bare id by equality and the rest by exact
+    prefix comparison. Work order ids are UUIDs, so the prefix can
+    only match this work order's own vouchers.
+    """
+    prefix = f"{work_order_id}:transfer:"
+    sle_t = Table("stock_ledger_entry")
+    sle_q = (Q.from_(sle_t).select(sle_t.voucher_id).distinct()
+             .where(sle_t.voucher_type == ValueWrapper("work_order"))
+             .where((sle_t.voucher_id == P())
+                    | (fn.Substring(sle_t.voucher_id, 1, len(prefix)) == P())))
+    rows = conn.execute(
+        sle_q.get_sql(),
+        (work_order_id, prefix),
+    ).fetchall()
+    return sorted(r["voucher_id"] for r in rows
+                  if r["voucher_id"] == work_order_id
+                  or r["voucher_id"].startswith(prefix))
+
+
+def _existing_completion_voucher_ids(conn, work_order_id):
+    """Distinct committed completion voucher ids for a work order.
+
+    The first completion posts under ``<id>:completion``; the n-th completion
+    (n >= 2) posts under ``<id>:completion:<n>``. Both spellings are matched
+    with bound parameters only: the bare id by equality and the rest by exact
+    prefix comparison. Work order ids are UUIDs, so the prefix can
+    only match this work order's own vouchers.
+    """
+    base = f"{work_order_id}:completion"
+    prefix = f"{base}:"
+    sle_t = Table("stock_ledger_entry")
+    sle_q = (Q.from_(sle_t).select(sle_t.voucher_id).distinct()
+             .where(sle_t.voucher_type == ValueWrapper("work_order"))
+             .where((sle_t.voucher_id == P())
+                    | (fn.Substring(sle_t.voucher_id, 1, len(prefix)) == P())))
+    rows = conn.execute(
+        sle_q.get_sql(),
+        (base, prefix),
+    ).fetchall()
+    return sorted(r["voucher_id"] for r in rows
+                  if r["voucher_id"] == base
+                  or r["voucher_id"].startswith(f"{base}:"))
+
+
+def _completion_ledger_rows(conn, work_order_id):
+    """All uncancelled stock ledger rows of this work order's completions.
+
+    Matched with bound parameters only by exact prefix comparison (see
+    ``_existing_completion_voucher_ids``). Used to derive what earlier
+    completions already issued from WIP and what operating cost they already
+    absorbed, straight from the committed ledger.
+    """
+    base = f"{work_order_id}:completion"
+    prefix = f"{base}:"
+    sle_t = Table("stock_ledger_entry")
+    sle_q = (Q.from_(sle_t).select(sle_t.star)
+             .where(sle_t.voucher_type == ValueWrapper("work_order"))
+             .where(sle_t.is_cancelled == 0)
+             .where((sle_t.voucher_id == P())
+                    | (fn.Substring(sle_t.voucher_id, 1, len(prefix)) == P())))
+    rows = conn.execute(sle_q.get_sql(), (base, prefix)).fetchall()
+    kept = [row_to_dict(r) for r in rows
+            if r["voucher_id"] == base
+            or r["voucher_id"].startswith(prefix)]
+    return kept
+
+
+def _wo_family_voucher_ids(conn, work_order_id):
+    """Every distinct voucher id in the work order's family.
+
+    That is the bare work order id (first transfer) plus anything starting
+    with ``<id>:`` (later transfers and every completion, including the
+    legacy first-event ids). Matched with bound parameters only by exact
+    prefix comparison. Work order ids are UUIDs, so no other work order's
+    vouchers can match.
+    """
+    prefix = f"{work_order_id}:"
+    sle_t = Table("stock_ledger_entry")
+    sle_q = (Q.from_(sle_t).select(sle_t.voucher_id).distinct()
+             .where(sle_t.voucher_type == ValueWrapper("work_order"))
+             .where((sle_t.voucher_id == P())
+                    | (fn.Substring(sle_t.voucher_id, 1, len(prefix)) == P())))
+    rows = conn.execute(
+        sle_q.get_sql(),
+        (work_order_id, prefix),
+    ).fetchall()
+    return sorted(r["voucher_id"] for r in rows
+                  if r["voucher_id"] == work_order_id
+                  or r["voucher_id"].startswith(f"{work_order_id}:"))
+
+
+def _completion_gl_entries(conn, sle_rows, company_id, cost_center_id):
+    """General-ledger legs for one work-order completion or transfer voucher.
+
+    Each incoming row debits its own store's stock account; each outgoing
+    row credits its own store's stock account, one leg per row in the order
+    read. The legs so far balance except for value the outputs absorbed
+    above what left the shop floor (or below it): a net debit remainder is
+    credited to the unbilled-stock account, a net credit remainder is
+    debited to the sold-goods cost account, both carrying the cost center.
+    A zero remainder posts no extra leg and looks up neither account.
+    """
+    legs = []
+    for row in sle_rows:
+        value = to_decimal(row.get("stock_value_difference", "0"))
+        if value == 0:
+            continue
+        warehouse_id = row.get("warehouse_id")
+        wh_t = Table("warehouse")
+        wh_q = (Q.from_(wh_t).select(wh_t.account_id)
+                .where(wh_t.id == P()))
+        wh = conn.execute(wh_q.get_sql(), (warehouse_id,)).fetchone()
+        stock_account_id = wh["account_id"] if wh and wh["account_id"] else None
+        if not stock_account_id:
+            acct_t = Table("account")
+            acct_q = (Q.from_(acct_t).select(acct_t.id)
+                      .where(acct_t.account_type == P())
+                      .where(acct_t.company_id == P())
+                      .where(acct_t.is_group == 0)
+                      .limit(1))
+            found = conn.execute(acct_q.get_sql(), ("stock", company_id)).fetchone()
+            stock_account_id = found["id"] if found else None
+        if not stock_account_id:
+            raise ValueError(
+                f"No Stock-in-Hand account for company {company_id} "
+                f"(warehouse {warehouse_id} is not linked to an account and no "
+                f"account_type='stock' account exists). Run setup-company, link the "
+                f"warehouse to your Inventory account, or add-account "
+                f"--account-type stock --root-type asset."
+            )
+        if value > 0:
+            legs.append({
+                "account_id": stock_account_id,
+                "debit": str(round_currency(value)),
+                "credit": "0",
+            })
+        else:
+            legs.append({
+                "account_id": stock_account_id,
+                "debit": "0",
+                "credit": str(round_currency(-value)),
+            })
+    total_debits = sum((to_decimal(leg["debit"]) for leg in legs), Decimal("0"))
+    total_credits = sum((to_decimal(leg["credit"]) for leg in legs), Decimal("0"))
+    remainder = total_debits - total_credits
+    if remainder > 0:
+        acct_t = Table("account")
+        acct_q = (Q.from_(acct_t).select(acct_t.id)
+                  .where(acct_t.account_type == P())
+                  .where(acct_t.company_id == P())
+                  .where(acct_t.is_group == 0)
+                  .limit(1))
+        contra = conn.execute(
+            acct_q.get_sql(), ("stock_received_not_billed", company_id)).fetchone()
+        contra_account_id = contra["id"] if contra else None
+        if not contra_account_id:
+            raise ValueError(
+                f"No 'Stock Received Not Billed' account for company {company_id}. A stock "
+                f"receipt cannot post balanced GL without it. "
+                f"Run setup-company or add-account --account-type stock_received_not_billed "
+                f"--root-type liability."
+            )
+        legs.append({
+            "account_id": contra_account_id,
+            "debit": "0",
+            "credit": str(remainder),
+            "cost_center_id": cost_center_id,
+        })
+    elif remainder < 0:
+        acct_t = Table("account")
+        acct_q = (Q.from_(acct_t).select(acct_t.id)
+                  .where(acct_t.account_type == P())
+                  .where(acct_t.company_id == P())
+                  .where(acct_t.is_group == 0)
+                  .limit(1))
+        contra = conn.execute(
+            acct_q.get_sql(), ("cost_of_goods_sold", company_id)).fetchone()
+        contra_account_id = contra["id"] if contra else None
+        if not contra_account_id:
+            raise ValueError(
+                f"No 'Cost of Goods Sold' account for company {company_id}. A stock "
+                f"issue cannot post balanced GL without it. "
+                f"Run setup-company or add-account --account-type cost_of_goods_sold "
+                f"--root-type expense."
+            )
+        legs.append({
+            "account_id": contra_account_id,
+            "debit": str(-remainder),
+            "credit": "0",
+            "cost_center_id": cost_center_id,
+        })
+    return legs
+
+
 # ---------------------------------------------------------------------------
 # 13. transfer-materials
 # ---------------------------------------------------------------------------
@@ -1547,8 +1778,8 @@ def transfer_materials(conn, args):
     Required: --work-order-id, --items (JSON: [{item_id, qty, warehouse_id?}])
     Optional: --posting-date (defaults to today)
 
-    Creates SLE entries (OUT of source, IN to WIP) and perpetual GL entries
-    in a single transaction.
+    Creates SLE entries (OUT of source, IN to WIP) and posts each row to its own store's
+    stock account in a single transaction.
     """
     if not args.work_order_id:
         err("--work-order-id is required")
@@ -1573,235 +1804,274 @@ def transfer_materials(conn, args):
             f"'{wo_dict['status']}'. Must be 'not_started' or 'in_process'."
         )
 
-    source_wh = wo_dict.get("source_warehouse_id")
-    wip_wh = wo_dict.get("wip_warehouse_id")
-    if not wip_wh:
-        err("Work Order has no WIP warehouse set. Set --wip-warehouse-id when creating the work order.")
+    try:
+        take_chain_heads(conn, [wo_dict["company_id"]])
 
-    company_id = wo_dict["company_id"]
-    posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
+        wo = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+        if not wo:
+            conn.rollback()
+            err(f"Work Order {args.work_order_id} not found")
 
-    # Get fiscal year for SLE
-    fiscal_year = _get_fiscal_year(conn, posting_date)
-    cost_center_id = _get_cost_center(conn, company_id)
-
-    # Fetch work order items for validation
-    woi_t = Table("work_order_item")
-    woi_q = Q.from_(woi_t).select(woi_t.star).where(woi_t.work_order_id == P())
-    wo_items = conn.execute(woi_q.get_sql(), (args.work_order_id,)).fetchall()
-    wo_item_map = {}
-    for woi_row in wo_items:
-        woi = row_to_dict(woi_row)
-        wo_item_map[woi["item_id"]] = woi
-
-    # Build SLE entries
-    sle_entries = []
-    transfer_updates = []  # (item_id, transfer_qty) tuples
-
-    for i, item in enumerate(items):
-        item_id = item.get("item_id")
-        if not item_id:
-            err(f"Transfer item {i}: item_id is required")
-
-        transfer_qty = to_decimal(item.get("qty", "0"))
-        if transfer_qty <= 0:
-            err(f"Transfer item {i}: qty must be > 0")
-
-        # Validate item is in the work order
-        if item_id not in wo_item_map:
-            err(f"Transfer item {i}: item {item_id} is not in this work order")
-
-        woi = wo_item_map[item_id]
-        required = to_decimal(woi["required_qty"])
-        already_transferred = to_decimal(woi["transferred_qty"])
-        if already_transferred + transfer_qty > required:
+        wo_dict = row_to_dict(wo)
+        if wo_dict["status"] not in ("not_started", "in_process"):
+            conn.rollback()
             err(
-                f"Transfer item {i}: transferring {transfer_qty} would exceed "
-                f"required qty. Required: {required}, already transferred: "
-                f"{already_transferred}"
+                f"Cannot transfer materials for Work Order with status "
+                f"'{wo_dict['status']}'. Must be 'not_started' or 'in_process'."
             )
 
-        # Determine source warehouse for this item
-        item_source_wh = item.get("warehouse_id") or woi.get("source_warehouse_id") or source_wh
-        if not item_source_wh:
-            err(
-                f"Transfer item {i}: no source warehouse found. "
-                f"Set source_warehouse_id on the work order or provide warehouse_id in items."
-            )
+        source_wh = wo_dict.get("source_warehouse_id")
+        wip_wh = wo_dict.get("wip_warehouse_id")
+        if not wip_wh:
+            err("Work Order has no WIP warehouse set. Set --wip-warehouse-id when creating the work order.")
 
-        # --- Feature #7: Material Substitution ---
-        # Check if primary item has sufficient stock; if not, try substitutes
-        actual_item_id = item_id
-        actual_transfer_qty = transfer_qty
-        substitution_used = False
+        company_id = wo_dict["company_id"]
+        posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
 
+        # Get fiscal year for SLE
+        fiscal_year = _company_fiscal_year(conn, posting_date, wo_dict["company_id"])
+        cost_center_id = _get_cost_center(conn, company_id)
+
+        # Fetch work order items for validation
+        woi_t = Table("work_order_item")
+        woi_q = Q.from_(woi_t).select(woi_t.star).where(woi_t.work_order_id == P())
+        wo_items = conn.execute(woi_q.get_sql(), (args.work_order_id,)).fetchall()
+        wo_item_map = {}
+        for woi_row in wo_items:
+            woi = row_to_dict(woi_row)
+            wo_item_map[woi["item_id"]] = woi
+
+        # Build SLE entries
+        sle_entries = []
+        transfer_updates = []  # (item_id, transfer_qty) tuples
+
+        for i, item in enumerate(items):
+            item_id = item.get("item_id")
+            if not item_id:
+                err(f"Transfer item {i}: item_id is required")
+
+            transfer_qty = to_decimal(item.get("qty", "0"))
+            if transfer_qty <= 0:
+                err(f"Transfer item {i}: qty must be > 0")
+
+            # Validate item is in the work order
+            if item_id not in wo_item_map:
+                err(f"Transfer item {i}: item {item_id} is not in this work order")
+
+            woi = wo_item_map[item_id]
+            required = to_decimal(woi["required_qty"])
+            already_transferred = to_decimal(woi["transferred_qty"])
+            if already_transferred + transfer_qty > required:
+                err(
+                    f"Transfer item {i}: transferring {transfer_qty} would exceed "
+                    f"required qty. Required: {required}, already transferred: "
+                    f"{already_transferred}"
+                )
+
+            # Determine source warehouse for this item
+            item_source_wh = item.get("warehouse_id") or woi.get("source_warehouse_id") or source_wh
+            if not item_source_wh:
+                err(
+                    f"Transfer item {i}: no source warehouse found. "
+                    f"Set source_warehouse_id on the work order or provide warehouse_id in items."
+                )
+
+            # --- Feature #7: Material Substitution ---
+            # Check if primary item has sufficient stock; if not, try substitutes
+            actual_item_id = item_id
+            actual_transfer_qty = transfer_qty
+            substitution_used = False
+
+            try:
+                primary_bal = get_stock_balance(conn, item_id, item_source_wh)
+                primary_stock = to_decimal(primary_bal["qty"]) if primary_bal else Decimal("0")
+            except (ValueError, KeyError, NotImplementedError):
+                primary_stock = Decimal("0")
+
+            if primary_stock < transfer_qty:
+                # Primary item has insufficient stock — check substitutes
+                woi_id = woi.get("id")
+                if woi_id:
+                    # Look up BOM item ID from the work order item's item_id
+                    # The work_order_item.item_id maps to bom_item.item_id
+                    bi_sub_t = Table("bom_item")
+                    bi_sub_q = (Q.from_(bi_sub_t).select(bi_sub_t.id)
+                                .where(bi_sub_t.bom_id == P())
+                                .where(bi_sub_t.item_id == P()))
+                    bi_match = conn.execute(
+                        bi_sub_q.get_sql(),
+                        (wo_dict["bom_id"], item_id)
+                    ).fetchone()
+
+                    if bi_match:
+                        bom_item_id = bi_match["id"]
+                        # Fetch substitutes ordered by priority
+                        bis_t = Table("bom_item_substitute")
+                        bis_q = (Q.from_(bis_t).select(bis_t.star)
+                                 .where(bis_t.bom_item_id == P())
+                                 .orderby(bis_t.priority))
+                        subs = conn.execute(bis_q.get_sql(), (bom_item_id,)).fetchall()
+
+                        for sub_row in subs:
+                            sub = row_to_dict(sub_row)
+                            sub_item_id = sub["substitute_item_id"]
+                            conv_factor = to_decimal(sub["conversion_factor"])
+
+                            try:
+                                sub_bal = get_stock_balance(conn, sub_item_id, item_source_wh)
+                                sub_stock = to_decimal(sub_bal["qty"]) if sub_bal else Decimal("0")
+                            except (ValueError, KeyError, NotImplementedError):
+                                sub_stock = Decimal("0")
+
+                            # Adjust qty by conversion factor
+                            adjusted_qty = round_currency(transfer_qty * conv_factor)
+                            if sub_stock >= adjusted_qty:
+                                actual_item_id = sub_item_id
+                                actual_transfer_qty = adjusted_qty
+                                substitution_used = True
+                                break
+
+            # Get valuation rate for the actual item at source warehouse
+            try:
+                val_rate = get_valuation_rate(conn, actual_item_id, item_source_wh)
+            except Exception:
+                val_rate = Decimal("0")
+            val_rate = to_decimal(str(val_rate)) if val_rate else Decimal("0")
+
+            # SLE: OUT of source warehouse
+            sle_entries.append({
+                "item_id": actual_item_id,
+                "warehouse_id": item_source_wh,
+                "actual_qty": str(round_currency(-actual_transfer_qty)),
+                "incoming_rate": "0",
+                "fiscal_year": fiscal_year,
+            })
+
+            # SLE: IN to WIP warehouse
+            sle_entries.append({
+                "item_id": actual_item_id,
+                "warehouse_id": wip_wh,
+                "actual_qty": str(round_currency(actual_transfer_qty)),
+                "incoming_rate": str(round_currency(val_rate)),
+                "fiscal_year": fiscal_year,
+            })
+
+            transfer_updates.append((item_id, transfer_qty))
+
+        # Voucher identity: the first transfer keeps the bare work order id; the
+        # n-th transfer (n >= 2) posts under <id>:transfer:<n>, where n is one
+        # plus the number of distinct committed transfer vouchers so far.
+        existing_transfer_ids = _existing_transfer_voucher_ids(conn, args.work_order_id)
+        transfer_n = len(existing_transfer_ids) + 1
+        if transfer_n <= 1:
+            transfer_voucher_id = args.work_order_id
+        else:
+            transfer_voucher_id = f"{args.work_order_id}:transfer:{transfer_n}"
+
+        # Insert SLE entries
         try:
-            primary_bal = get_stock_balance(conn, item_id, item_source_wh)
-            primary_stock = to_decimal(primary_bal["qty"]) if primary_bal else Decimal("0")
-        except (ValueError, KeyError, NotImplementedError):
-            primary_stock = Decimal("0")
-
-        if primary_stock < transfer_qty:
-            # Primary item has insufficient stock — check substitutes
-            woi_id = woi.get("id")
-            if woi_id:
-                # Look up BOM item ID from the work order item's item_id
-                # The work_order_item.item_id maps to bom_item.item_id
-                bi_sub_t = Table("bom_item")
-                bi_sub_q = (Q.from_(bi_sub_t).select(bi_sub_t.id)
-                            .where(bi_sub_t.bom_id == P())
-                            .where(bi_sub_t.item_id == P()))
-                bi_match = conn.execute(
-                    bi_sub_q.get_sql(),
-                    (wo_dict["bom_id"], item_id)
-                ).fetchone()
-
-                if bi_match:
-                    bom_item_id = bi_match["id"]
-                    # Fetch substitutes ordered by priority
-                    bis_t = Table("bom_item_substitute")
-                    bis_q = (Q.from_(bis_t).select(bis_t.star)
-                             .where(bis_t.bom_item_id == P())
-                             .orderby(bis_t.priority))
-                    subs = conn.execute(bis_q.get_sql(), (bom_item_id,)).fetchall()
-
-                    for sub_row in subs:
-                        sub = row_to_dict(sub_row)
-                        sub_item_id = sub["substitute_item_id"]
-                        conv_factor = to_decimal(sub["conversion_factor"])
-
-                        try:
-                            sub_bal = get_stock_balance(conn, sub_item_id, item_source_wh)
-                            sub_stock = to_decimal(sub_bal["qty"]) if sub_bal else Decimal("0")
-                        except (ValueError, KeyError, NotImplementedError):
-                            sub_stock = Decimal("0")
-
-                        # Adjust qty by conversion factor
-                        adjusted_qty = round_currency(transfer_qty * conv_factor)
-                        if sub_stock >= adjusted_qty:
-                            actual_item_id = sub_item_id
-                            actual_transfer_qty = adjusted_qty
-                            substitution_used = True
-                            break
-
-        # Get valuation rate for the actual item at source warehouse
-        try:
-            val_rate = get_valuation_rate(conn, actual_item_id, item_source_wh)
-        except Exception:
-            val_rate = Decimal("0")
-        val_rate = to_decimal(str(val_rate)) if val_rate else Decimal("0")
-
-        # SLE: OUT of source warehouse
-        sle_entries.append({
-            "item_id": actual_item_id,
-            "warehouse_id": item_source_wh,
-            "actual_qty": str(round_currency(-actual_transfer_qty)),
-            "incoming_rate": "0",
-            "fiscal_year": fiscal_year,
-        })
-
-        # SLE: IN to WIP warehouse
-        sle_entries.append({
-            "item_id": actual_item_id,
-            "warehouse_id": wip_wh,
-            "actual_qty": str(round_currency(actual_transfer_qty)),
-            "incoming_rate": str(round_currency(val_rate)),
-            "fiscal_year": fiscal_year,
-        })
-
-        transfer_updates.append((item_id, transfer_qty))
-
-    # Insert SLE entries
-    try:
-        sle_ids = insert_sle_entries(
-            conn, sle_entries,
-            voucher_type="work_order",
-            voucher_id=args.work_order_id,
-            posting_date=posting_date,
-            company_id=company_id,
-        )
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
-        err(f"SLE posting failed: {e}")
-
-    # Fetch inserted SLE rows for GL generation
-    sle_t = Table("stock_ledger_entry")
-    sle_q = (Q.from_(sle_t).select(sle_t.star)
-             .where(sle_t.voucher_type == ValueWrapper("work_order"))
-             .where(sle_t.voucher_id == P())
-             .where(sle_t.is_cancelled == 0))
-    sle_rows = conn.execute(sle_q.get_sql(), (args.work_order_id,)).fetchall()
-    sle_dicts = [row_to_dict(r) for r in sle_rows]
-
-    # Create perpetual inventory GL entries
-    try:
-        gl_entries = create_perpetual_inventory_gl(
-            conn, sle_dicts,
-            voucher_type="work_order",
-            voucher_id=args.work_order_id,
-            posting_date=posting_date,
-            company_id=company_id,
-            cost_center_id=cost_center_id,
-        )
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
-        err(f"GL posting failed: {e}")
-
-    gl_ids = []
-    if gl_entries:
-        if fiscal_year:
-            for gle in gl_entries:
-                gle["fiscal_year"] = fiscal_year
-        try:
-            gl_ids = insert_gl_entries(
-                conn, gl_entries,
+            sle_ids = insert_sle_entries(
+                conn, sle_entries,
                 voucher_type="work_order",
-                voucher_id=args.work_order_id,
+                voucher_id=transfer_voucher_id,
                 posting_date=posting_date,
                 company_id=company_id,
-                remarks=f"Material Transfer for WO {wo_dict['naming_series']}",
+            )
+        except (ValueError, NotImplementedError) as e:
+            sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+            err(f"SLE posting failed: {e}")
+
+        # Fetch this transfer's SLE rows for GL generation
+        sle_t = Table("stock_ledger_entry")
+        sle_q = (Q.from_(sle_t).select(sle_t.star)
+                 .where(sle_t.voucher_type == ValueWrapper("work_order"))
+                 .where(sle_t.voucher_id == P())
+                 .where(sle_t.is_cancelled == 0))
+        sle_rows = conn.execute(sle_q.get_sql(), (transfer_voucher_id,)).fetchall()
+        sle_dicts = [row_to_dict(r) for r in sle_rows]
+
+        # Transfer posts each row to its own store's stock account
+        try:
+            gl_entries = _completion_gl_entries(
+                conn, sle_dicts,
+                company_id=company_id,
+                cost_center_id=cost_center_id,
             )
         except (ValueError, NotImplementedError) as e:
             sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
             err(f"GL posting failed: {e}")
 
-    # Update work_order_item transferred_qty
-    # raw SQL — CAST expression not well supported by PyPika
-    total_material_transferred = Decimal("0")
-    for item_id, transfer_qty in transfer_updates:
-        conn.execute(
-            """UPDATE work_order_item
-               SET transferred_qty = CAST(
-                   (CAST(transferred_qty AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)
-               WHERE work_order_id = ? AND item_id = ?""",
-            (str(round_currency(transfer_qty)), args.work_order_id, item_id),
-        )
-        total_material_transferred += transfer_qty
+        gl_ids = []
+        if gl_entries:
+            if fiscal_year:
+                for gle in gl_entries:
+                    gle["fiscal_year"] = fiscal_year
+            try:
+                gl_ids = insert_gl_entries(
+                    conn, gl_entries,
+                    voucher_type="work_order",
+                    voucher_id=transfer_voucher_id,
+                    posting_date=posting_date,
+                    company_id=company_id,
+                    remarks=f"Material Transfer for WO {wo_dict['naming_series']}",
+                )
+            except (ValueError, NotImplementedError) as e:
+                sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+                err(f"GL posting failed: {e}")
 
-    # Update work_order.material_transferred_for_manufacturing
-    current_transferred = to_decimal(wo_dict["material_transferred_for_manufacturing"])
-    new_transferred = round_currency(current_transferred + total_material_transferred)
-    wo_upd_q = (Q.update(wo_t)
-                .set(wo_t.material_transferred_for_manufacturing, P())
-                .set(wo_t.updated_at, now())
-                .where(wo_t.id == P()))
-    conn.execute(wo_upd_q.get_sql(), (str(new_transferred), args.work_order_id))
+        # Update work_order_item transferred_qty
+        # raw SQL — CAST expression not well supported by PyPika
+        total_material_transferred = Decimal("0")
+        for item_id, transfer_qty in transfer_updates:
+            conn.execute(
+                """UPDATE work_order_item
+                   SET transferred_qty = CAST(
+                       (CAST(transferred_qty AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)
+                   WHERE work_order_id = ? AND item_id = ?""",
+                (str(round_currency(transfer_qty)), args.work_order_id, item_id),
+            )
+            total_material_transferred += transfer_qty
 
-    # Transition to in_process if currently not_started
-    if wo_dict["status"] == "not_started":
-        wo_status_q = (Q.update(wo_t)
-                       .set(wo_t.status, ValueWrapper("in_process"))
-                       .set(wo_t.updated_at, now())
-                       .where(wo_t.id == P()))
-        conn.execute(wo_status_q.get_sql(), (args.work_order_id,))
+        # Update work_order.material_transferred_for_manufacturing
+        current_transferred = to_decimal(wo_dict["material_transferred_for_manufacturing"])
+        new_transferred = round_currency(current_transferred + total_material_transferred)
+        wo_upd_q = (Q.update(wo_t)
+                    .set(wo_t.material_transferred_for_manufacturing, P())
+                    .set(wo_t.updated_at, now())
+                    .where(wo_t.id == P())
+                    .where(wo_t.status.isin([ValueWrapper("not_started"), ValueWrapper("in_process")])))
+        wo_upd_cur = conn.execute(wo_upd_q.get_sql(), (str(new_transferred), args.work_order_id))
+        if wo_upd_cur.rowcount == 0:
+            conn.rollback()
+            wo_fresh = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+            if not wo_fresh:
+                err(f"Work Order {args.work_order_id} not found")
+            wo_fresh_dict = row_to_dict(wo_fresh)
+            err(
+                f"Cannot transfer materials for Work Order with status "
+                f"'{wo_fresh_dict['status']}'. Must be 'not_started' or 'in_process'."
+            )
 
-    audit(conn, "erpclaw-manufacturing", "transfer-materials", "work_order", args.work_order_id,
-           new_values={
-               "items_transferred": len(transfer_updates),
-               "sle_count": len(sle_ids) if sle_ids else 0,
-               "gl_count": len(gl_ids),
-           })
-    conn.commit()
+        # Transition to in_process if currently not_started
+        if wo_dict["status"] == "not_started":
+            wo_status_q = (Q.update(wo_t)
+                           .set(wo_t.status, ValueWrapper("in_process"))
+                           .set(wo_t.updated_at, now())
+                           .where(wo_t.id == P())
+                           .where(wo_t.status == ValueWrapper("not_started")))
+            conn.execute(wo_status_q.get_sql(), (args.work_order_id,))
+
+        audit(conn, "erpclaw-manufacturing", "transfer-materials", "work_order", args.work_order_id,
+               new_values={
+                   "items_transferred": len(transfer_updates),
+                   "sle_count": len(sle_ids) if sle_ids else 0,
+                   "gl_count": len(gl_ids),
+               })
+        conn.commit()
+    except SystemExit:
+        conn.rollback()
+        raise
+
 
     ok({
         "work_order_id": args.work_order_id,
@@ -1980,7 +2250,12 @@ def complete_work_order(conn, args):
     Optional: --produced-qty (defaults to WO qty), --posting-date
 
     Calculates production cost (RM + operating), creates SLE for FG receipt
-    into target warehouse, and posts perpetual GL entries.
+    into target warehouse, and posts finished-goods stock against WIP stock:
+    each row debits or credits its own store's stock account, and any debit
+    remainder is credited to the unbilled-stock account while any credit
+    remainder is debited to the sold-goods cost account. Refused before any
+    write when the materials transferred to WIP do not cover the cumulative
+    quantity being completed.
     """
     if not args.work_order_id:
         err("--work-order-id is required")
@@ -1998,278 +2273,405 @@ def complete_work_order(conn, args):
             f"Must be 'in_process'."
         )
 
-    produced_qty = to_decimal(args.produced_qty or wo_dict["qty"])
-    if produced_qty <= 0:
-        err("--produced-qty must be greater than 0")
+    try:
+        take_chain_heads(conn, [wo_dict["company_id"]])
 
-    target_wh = wo_dict.get("target_warehouse_id")
-    if not target_wh:
-        err("Work Order has no target warehouse. Set --target-warehouse-id when creating.")
+        wo = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+        if not wo:
+            conn.rollback()
+            err(f"Work Order {args.work_order_id} not found")
 
-    wip_wh = wo_dict.get("wip_warehouse_id")
-    company_id = wo_dict["company_id"]
-    fg_item_id = wo_dict["item_id"]
-    posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
-
-    fiscal_year = _get_fiscal_year(conn, posting_date)
-    cost_center_id = _get_cost_center(conn, company_id)
-
-    # --- Calculate production cost ---
-
-    # 1. Raw Material cost: sum of (transferred_qty * valuation_rate) per WO item
-    woi_t = Table("work_order_item")
-    woi_q = Q.from_(woi_t).select(woi_t.star).where(woi_t.work_order_id == P())
-    wo_items = conn.execute(woi_q.get_sql(), (args.work_order_id,)).fetchall()
-
-    rm_cost = Decimal("0")
-    for woi_row in wo_items:
-        woi = row_to_dict(woi_row)
-        transferred = to_decimal(woi["transferred_qty"])
-        if transferred <= 0:
-            continue
-        # Get valuation rate from SLE for the item at WIP warehouse
-        try:
-            val_rate = get_valuation_rate(conn, woi["item_id"], wip_wh)
-            val_rate = to_decimal(str(val_rate)) if val_rate else Decimal("0")
-        except Exception:
-            val_rate = Decimal("0")
-        rm_cost += round_currency(transferred * val_rate)
-    rm_cost = round_currency(rm_cost)
-
-    # 2. Operating cost: sum from completed job cards
-    jc_t = Table("job_card").as_("jc")
-    jc_cost_q = (Q.from_(jc_t)
-                 .select(jc_t.total_time_in_minutes, jc_t.workstation_id)
-                 .where(jc_t.work_order_id == P())
-                 .where(jc_t.status == ValueWrapper("completed")))
-    job_cards = conn.execute(jc_cost_q.get_sql(), (args.work_order_id,)).fetchall()
-
-    ws_t2 = Table("workstation")
-    ws_cost_q = Q.from_(ws_t2).select(ws_t2.operating_cost_per_hour).where(ws_t2.id == P())
-    ws_cost_sql = ws_cost_q.get_sql()
-    operating_cost = Decimal("0")
-    for jc_row in job_cards:
-        jc = row_to_dict(jc_row)
-        time_mins = to_decimal(jc.get("total_time_in_minutes", "0"))
-        ws_id = jc.get("workstation_id")
-        if ws_id and time_mins > 0:
-            ws = conn.execute(ws_cost_sql, (ws_id,)).fetchone()
-            if ws:
-                hour_rate = to_decimal(ws["operating_cost_per_hour"])
-                operating_cost += round_currency(
-                    (time_mins / Decimal("60")) * hour_rate
-                )
-    operating_cost = round_currency(operating_cost)
-
-    # 3. FG production rate
-    total_production_cost = round_currency(rm_cost + operating_cost)
-    fg_rate = round_currency(total_production_cost / produced_qty) if produced_qty > 0 else Decimal("0")
-
-    # --- Co-Products / By-Products (Feature #8) ---
-    # Check if the BOM has output items defined
-    bom_id = wo_dict["bom_id"]
-    boi_t = Table("bom_output_item")
-    boi_q = Q.from_(boi_t).select(boi_t.star).where(boi_t.bom_id == P())
-    bom_outputs = conn.execute(boi_q.get_sql(), (bom_id,)).fetchall()
-
-    sle_entries = []
-    by_product_count = 0
-
-    if bom_outputs:
-        # BOM has explicit output items defined — use cost allocation
-        bom_output_list = [row_to_dict(r) for r in bom_outputs]
-
-        # Get BOM base qty for scaling
-        bom_hdr_t = Table("bom")
-        bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
-        bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
-        bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
-        if bom_base_qty <= 0:
-            bom_base_qty = Decimal("1")
-
-        for bo in bom_output_list:
-            bo_item_id = bo["item_id"]
-            bo_qty_per_bom = to_decimal(bo["qty"])
-            bo_is_primary = int(bo["is_primary"])
-            bo_cost_pct = to_decimal(bo["cost_allocation_pct"])
-
-            # Scale output qty proportionally to produced_qty vs BOM base qty
-            scaled_output_qty = round_currency(
-                (bo_qty_per_bom / bom_base_qty) * produced_qty
+        wo_dict = row_to_dict(wo)
+        if wo_dict["status"] != "in_process":
+            conn.rollback()
+            err(
+                f"Cannot complete Work Order with status '{wo_dict['status']}'. "
+                f"Must be 'in_process'."
             )
 
-            # Allocate cost proportionally
-            allocated_cost = round_currency(
-                total_production_cost * bo_cost_pct / Decimal("100")
-            ) if bo_cost_pct > 0 else Decimal("0")
+        produced_qty = to_decimal(args.produced_qty or wo_dict["qty"])
+        if produced_qty <= 0:
+            err("--produced-qty must be greater than 0")
 
-            output_rate = round_currency(
-                allocated_cost / scaled_output_qty
-            ) if scaled_output_qty > 0 else Decimal("0")
+        target_wh = wo_dict.get("target_warehouse_id")
+        if not target_wh:
+            err("Work Order has no target warehouse. Set --target-warehouse-id when creating.")
 
-            if bo_is_primary:
-                # Primary product goes to target warehouse
-                sle_entries.append({
-                    "item_id": bo_item_id,
-                    "warehouse_id": target_wh,
-                    "actual_qty": str(round_currency(scaled_output_qty)),
-                    "incoming_rate": str(output_rate),
-                    "fiscal_year": fiscal_year,
-                })
+        wip_wh = wo_dict.get("wip_warehouse_id")
+        company_id = wo_dict["company_id"]
+        fg_item_id = wo_dict["item_id"]
+        posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
+
+        fiscal_year = _company_fiscal_year(conn, posting_date, wo_dict["company_id"])
+        cost_center_id = _get_cost_center(conn, company_id)
+
+        # --- Calculate this completion's production cost ---
+
+        woi_t = Table("work_order_item")
+        woi_q = Q.from_(woi_t).select(woi_t.star).where(woi_t.work_order_id == P())
+        wo_items = conn.execute(woi_q.get_sql(), (args.work_order_id,)).fetchall()
+
+        wo_qty = to_decimal(wo_dict["qty"])
+        prev_produced = to_decimal(wo_dict.get("produced_qty") or "0")
+        total_produced = prev_produced + produced_qty
+        is_final = (wo_qty <= 0) or (total_produced >= wo_qty)
+
+        # Co-products / by-products: a partial completion is refused before any
+        # write. The single full completion keeps the allocation below unchanged.
+        boi_chk_t = Table("bom_output_item")
+        boi_chk_q = (Q.from_(boi_chk_t).select(boi_chk_t.id)
+                     .where(boi_chk_t.bom_id == P()).limit(1))
+        has_bom_outputs = conn.execute(boi_chk_q.get_sql(), (wo_dict["bom_id"],)).fetchone() is not None
+        if has_bom_outputs and not is_final:
+            err("Partial completion is not supported for a BOM with co-products or by-products; complete the remaining quantity in one step.")
+
+        # Materials transferred to WIP must cover the cumulative quantity being completed.
+        short_lines = []
+        for woi_row in wo_items:
+            woi = row_to_dict(woi_row)
+            required = to_decimal(woi["required_qty"])
+            if required <= 0:
+                continue
+            if is_final:
+                need = round_currency(required)
             else:
-                # By-product also goes to target warehouse
-                sle_entries.append({
-                    "item_id": bo_item_id,
-                    "warehouse_id": target_wh,
-                    "actual_qty": str(round_currency(scaled_output_qty)),
-                    "incoming_rate": str(output_rate),
-                    "fiscal_year": fiscal_year,
-                })
-                by_product_count += 1
-    else:
-        # No BOM outputs defined — original behavior: single FG item
-        sle_entries.append({
-            "item_id": fg_item_id,
-            "warehouse_id": target_wh,
-            "actual_qty": str(round_currency(produced_qty)),
-            "incoming_rate": str(fg_rate),
-            "fiscal_year": fiscal_year,
-        })
+                need = min(required, round_currency(required * total_produced / wo_qty))
+            transferred = round_currency(to_decimal(woi["transferred_qty"]))
+            if transferred < need:
+                short_lines.append((woi["item_id"], str(need), str(transferred)))
+        if short_lines:
+            short_lines.sort(key=lambda entry: entry[0])
+            short = "; ".join(f"{item_id} needs {need}, transferred {transferred}" for item_id, need, transferred in short_lines)
+            err(f"Cannot complete Work Order: materials transferred to WIP do not cover the quantity being completed ({round_currency(total_produced)} of {round_currency(wo_qty)}). Short: {short}. Transfer the missing materials with transfer-materials first.")
 
-    # Consume raw materials from WIP warehouse (negative SLE entries)
-    if wip_wh:
+        # Voucher identity: the first completion keeps <id>:completion; the n-th
+        # completion (n >= 2) posts under <id>:completion:<n>, where n is one
+        # plus the number of distinct committed completion vouchers so far.
+        earlier_completion_rows = _completion_ledger_rows(conn, args.work_order_id)
+        completion_n = len(_existing_completion_voucher_ids(conn, args.work_order_id)) + 1
+        if completion_n <= 1:
+            completion_voucher_id = f"{args.work_order_id}:completion"
+        else:
+            completion_voucher_id = f"{args.work_order_id}:completion:{completion_n}"
+
+        # What earlier completions already issued from WIP, per item, read from
+        # the committed ledger — not from stored consumed_qty, which predates
+        # this change on partly completed work orders.
+        already_issued = {}
+        for sle_row in earlier_completion_rows:
+            if sle_row["warehouse_id"] == wip_wh and to_decimal(sle_row["actual_qty"]) < 0:
+                already_issued[sle_row["item_id"]] = (
+                    already_issued.get(sle_row["item_id"], Decimal("0"))
+                    + (-to_decimal(sle_row["actual_qty"]))
+                )
+
+        # Operating cost earlier completions already absorbed: per voucher, the
+        # incoming legs' value minus the WIP issue legs' value, floored at zero.
+        earlier_operating_cost = Decimal("0")
+        earlier_by_voucher = {}
+        for sle_row in earlier_completion_rows:
+            earlier_by_voucher.setdefault(sle_row["voucher_id"], []).append(sle_row)
+        for voucher_rows in earlier_by_voucher.values():
+            incoming_value = Decimal("0")
+            wip_issue_value = Decimal("0")
+            for sle_row in voucher_rows:
+                row_value = to_decimal(sle_row["stock_value_difference"])
+                if to_decimal(sle_row["actual_qty"]) > 0:
+                    incoming_value += row_value
+                elif sle_row["warehouse_id"] == wip_wh:
+                    wip_issue_value += row_value
+            earlier_operating_cost += max(Decimal("0"), incoming_value + wip_issue_value)
+
+        # Cumulative consumption target after this completion, per item: on the
+        # final completion everything transferred so far, otherwise the BOM
+        # requirement scaled by total produced over order quantity. This
+        # completion issues target minus what earlier completions already issued.
+        issue_qty = {}
+        consumed_qty = {}
         for woi_row in wo_items:
             woi = row_to_dict(woi_row)
             transferred = to_decimal(woi["transferred_qty"])
-            if transferred <= 0:
-                continue
+            if is_final:
+                target = transferred
+            else:
+                required = to_decimal(woi["required_qty"])
+                target = min(transferred, round_currency(required * total_produced / wo_qty))
+            already = already_issued.get(woi["item_id"], Decimal("0"))
+            if target - already > 0:
+                issue_qty[woi["item_id"]] = target - already
+            consumed_qty[woi["item_id"]] = max(target, already)
+
+        # 1. Raw Material cost: value of what this completion issues, at the WIP
+        # valuation rate used for the issue.
+        rm_cost = Decimal("0")
+        for item_id, qty in issue_qty.items():
+            # Get valuation rate from SLE for the item at WIP warehouse
+            try:
+                val_rate = get_valuation_rate(conn, item_id, wip_wh)
+                val_rate = to_decimal(str(val_rate)) if val_rate else Decimal("0")
+            except Exception:
+                val_rate = Decimal("0")
+            rm_cost += round_currency(qty * val_rate)
+        rm_cost = round_currency(rm_cost)
+
+        # 2. Operating cost: completed job cards now, minus what earlier
+        # completions already absorbed, floored at zero.
+        jc_t = Table("job_card").as_("jc")
+        jc_cost_q = (Q.from_(jc_t)
+                     .select(jc_t.total_time_in_minutes, jc_t.workstation_id)
+                     .where(jc_t.work_order_id == P())
+                     .where(jc_t.status == ValueWrapper("completed")))
+        job_cards = conn.execute(jc_cost_q.get_sql(), (args.work_order_id,)).fetchall()
+
+        ws_t2 = Table("workstation")
+        ws_cost_q = Q.from_(ws_t2).select(ws_t2.operating_cost_per_hour).where(ws_t2.id == P())
+        ws_cost_sql = ws_cost_q.get_sql()
+        operating_cost = Decimal("0")
+        for jc_row in job_cards:
+            jc = row_to_dict(jc_row)
+            time_mins = to_decimal(jc.get("total_time_in_minutes", "0"))
+            ws_id = jc.get("workstation_id")
+            if ws_id and time_mins > 0:
+                ws = conn.execute(ws_cost_sql, (ws_id,)).fetchone()
+                if ws:
+                    hour_rate = to_decimal(ws["operating_cost_per_hour"])
+                    operating_cost += round_currency(
+                        (time_mins / Decimal("60")) * hour_rate
+                    )
+        operating_cost = round_currency(operating_cost)
+        operating_cost = round_currency(max(Decimal("0"), operating_cost - earlier_operating_cost))
+
+        # 3. FG production rate. The FG leg is posted at the unrounded rate
+        # total/produced so the stock ledger books exactly the production cost;
+        # the reported fg_rate stays rounded.
+        total_production_cost = round_currency(rm_cost + operating_cost)
+        fg_rate = round_currency(total_production_cost / produced_qty) if produced_qty > 0 else Decimal("0")
+        fg_incoming_rate = (total_production_cost / produced_qty) if produced_qty > 0 else Decimal("0")
+        # A completion output is valued at what the completion cost; when that total is zero,
+        # the output is received at rate 0 and the standard rate is never substituted.
+        zero_cost = total_production_cost == 0
+
+        # --- Co-Products / By-Products (Feature #8) ---
+        # Check if the BOM has output items defined
+        bom_id = wo_dict["bom_id"]
+        boi_t = Table("bom_output_item")
+        boi_q = Q.from_(boi_t).select(boi_t.star).where(boi_t.bom_id == P())
+        bom_outputs = conn.execute(boi_q.get_sql(), (bom_id,)).fetchall()
+
+        sle_entries = []
+        by_product_count = 0
+
+        if bom_outputs:
+            # BOM has explicit output items defined — use cost allocation
+            bom_output_list = [row_to_dict(r) for r in bom_outputs]
+
+            # Get BOM base qty for scaling
+            bom_hdr_t = Table("bom")
+            bom_hdr_q = Q.from_(bom_hdr_t).select(bom_hdr_t.quantity).where(bom_hdr_t.id == P())
+            bom_hdr = conn.execute(bom_hdr_q.get_sql(), (bom_id,)).fetchone()
+            bom_base_qty = to_decimal(bom_hdr["quantity"]) if bom_hdr else Decimal("1")
+            if bom_base_qty <= 0:
+                bom_base_qty = Decimal("1")
+
+            for bo in bom_output_list:
+                bo_item_id = bo["item_id"]
+                bo_qty_per_bom = to_decimal(bo["qty"])
+                bo_is_primary = int(bo["is_primary"])
+                bo_cost_pct = to_decimal(bo["cost_allocation_pct"])
+
+                # Scale output qty proportionally to produced_qty vs BOM base qty
+                scaled_output_qty = round_currency(
+                    (bo_qty_per_bom / bom_base_qty) * produced_qty
+                )
+
+                # Allocate cost proportionally
+                allocated_cost = round_currency(
+                    total_production_cost * bo_cost_pct / Decimal("100")
+                ) if bo_cost_pct > 0 else Decimal("0")
+
+                output_rate = round_currency(
+                    allocated_cost / scaled_output_qty
+                ) if scaled_output_qty > 0 else Decimal("0")
+
+                if bo_is_primary:
+                    # Primary product goes to target warehouse
+                    sle_entries.append({
+                        "item_id": bo_item_id,
+                        "warehouse_id": target_wh,
+                        "actual_qty": str(round_currency(scaled_output_qty)),
+                        "incoming_rate": str(output_rate),
+                        "fiscal_year": fiscal_year,
+                        **({"exact_incoming_rate": True} if zero_cost else {}),
+                    })
+                else:
+                    # By-product also goes to target warehouse
+                    sle_entries.append({
+                        "item_id": bo_item_id,
+                        "warehouse_id": target_wh,
+                        "actual_qty": str(round_currency(scaled_output_qty)),
+                        "incoming_rate": str(output_rate),
+                        "fiscal_year": fiscal_year,
+                        **({"exact_incoming_rate": True} if zero_cost else {}),
+                    })
+                    by_product_count += 1
+        else:
+            # No BOM outputs defined — original behavior: single FG item
             sle_entries.append({
-                "item_id": woi["item_id"],
-                "warehouse_id": wip_wh,
-                "actual_qty": str(round_currency(-transferred)),
-                "incoming_rate": "0",
+                "item_id": fg_item_id,
+                "warehouse_id": target_wh,
+                "actual_qty": str(round_currency(produced_qty)),
+                "incoming_rate": str(fg_incoming_rate),
                 "fiscal_year": fiscal_year,
+                **({"exact_incoming_rate": True} if zero_cost else {}),
             })
 
-    # We use a unique voucher_id suffix to separate material transfer SLEs
-    # from completion SLEs for the same work order.
-    completion_voucher_id = f"{args.work_order_id}:completion"
+        # Issue from WIP only what this completion consumed (negative SLE
+        # entries). Items with nothing left to issue are skipped: the stock
+        # ledger refuses a zero-quantity leg.
+        if wip_wh:
+            for woi_row in wo_items:
+                woi = row_to_dict(woi_row)
+                qty = issue_qty.get(woi["item_id"], Decimal("0"))
+                if qty <= 0:
+                    continue
+                sle_entries.append({
+                    "item_id": woi["item_id"],
+                    "warehouse_id": wip_wh,
+                    "actual_qty": str(round_currency(-qty)),
+                    "incoming_rate": "0",
+                    "fiscal_year": fiscal_year,
+                })
 
-    try:
-        sle_ids = insert_sle_entries(
-            conn, sle_entries,
-            voucher_type="work_order",
-            voucher_id=completion_voucher_id,
-            posting_date=posting_date,
-            company_id=company_id,
-        )
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
-        err(f"SLE posting failed: {e}")
+        # The completion voucher id was derived above from the committed ledger:
+        # the first completion keeps <work order id>:completion, later ones post
+        # under <work order id>:completion:<n>.
 
-    # Fetch SLE rows for GL generation
-    sle_t = Table("stock_ledger_entry")
-    sle_q = (Q.from_(sle_t).select(sle_t.star)
-             .where(sle_t.voucher_type == ValueWrapper("work_order"))
-             .where(sle_t.voucher_id == P())
-             .where(sle_t.is_cancelled == 0))
-    sle_rows = conn.execute(sle_q.get_sql(), (completion_voucher_id,)).fetchall()
-    sle_dicts = [row_to_dict(r) for r in sle_rows]
-
-    # Create perpetual inventory GL entries
-    try:
-        gl_entries = create_perpetual_inventory_gl(
-            conn, sle_dicts,
-            voucher_type="work_order",
-            voucher_id=completion_voucher_id,
-            posting_date=posting_date,
-            company_id=company_id,
-            cost_center_id=cost_center_id,
-        )
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
-        err(f"GL posting failed: {e}")
-
-    gl_ids = []
-    if gl_entries:
-        if fiscal_year:
-            for gle in gl_entries:
-                gle["fiscal_year"] = fiscal_year
         try:
-            gl_ids = insert_gl_entries(
-                conn, gl_entries,
+            sle_ids = insert_sle_entries(
+                conn, sle_entries,
                 voucher_type="work_order",
                 voucher_id=completion_voucher_id,
                 posting_date=posting_date,
                 company_id=company_id,
-                remarks=f"Production Completion for WO {wo_dict['naming_series']}",
+            )
+        except (ValueError, NotImplementedError) as e:
+            sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+            err(f"SLE posting failed: {e}")
+
+        # Fetch SLE rows for GL generation
+        sle_t = Table("stock_ledger_entry")
+        sle_q = (Q.from_(sle_t).select(sle_t.star)
+                 .where(sle_t.voucher_type == ValueWrapper("work_order"))
+                 .where(sle_t.voucher_id == P())
+                 .where(sle_t.is_cancelled == 0))
+        sle_rows = conn.execute(sle_q.get_sql(), (completion_voucher_id,)).fetchall()
+        sle_dicts = [row_to_dict(r) for r in sle_rows]
+
+        # Completion posts finished-goods stock against WIP stock
+        try:
+            gl_entries = _completion_gl_entries(
+                conn, sle_dicts,
+                company_id=company_id,
+                cost_center_id=cost_center_id,
             )
         except (ValueError, NotImplementedError) as e:
             sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
             err(f"GL posting failed: {e}")
 
-    # Update work order — support partial completion
-    wo_qty = to_decimal(wo_dict["qty"])
-    prev_produced = to_decimal(wo_dict.get("produced_qty") or "0")
-    total_produced = prev_produced + produced_qty
-    new_status = "completed" if total_produced >= wo_qty else "in_process"
+        gl_ids = []
+        if gl_entries:
+            if fiscal_year:
+                for gle in gl_entries:
+                    gle["fiscal_year"] = fiscal_year
+            try:
+                gl_ids = insert_gl_entries(
+                    conn, gl_entries,
+                    voucher_type="work_order",
+                    voucher_id=completion_voucher_id,
+                    posting_date=posting_date,
+                    company_id=company_id,
+                    remarks=f"Production Completion for WO {wo_dict['naming_series']}",
+                )
+            except (ValueError, NotImplementedError) as e:
+                sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
+                err(f"GL posting failed: {e}")
 
-    if new_status == "completed":
-        wo_complete_q = (Q.update(wo_t)
-                         .set(wo_t.produced_qty, P())
-                         .set(wo_t.status, ValueWrapper("completed"))
-                         .set(wo_t.actual_end_date, P())
-                         .set(wo_t.updated_at, now())
-                         .where(wo_t.id == P()))
-        conn.execute(
-            wo_complete_q.get_sql(),
-            (str(round_currency(total_produced)),
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             args.work_order_id),
-        )
-    else:
-        wo_partial_q = (Q.update(wo_t)
-                        .set(wo_t.produced_qty, P())
-                        .set(wo_t.updated_at, now())
-                        .where(wo_t.id == P()))
-        conn.execute(
-            wo_partial_q.get_sql(),
-            (str(round_currency(total_produced)), args.work_order_id),
-        )
+        # Update work order — support partial completion
+        new_status = "completed" if is_final else "in_process"
 
-    # Consume raw materials — scale proportionally for partial completion
-    if total_produced >= wo_qty or wo_qty <= 0:
-        # Full completion: consume all transferred material
-        conn.execute(
-            """UPDATE work_order_item
-               SET consumed_qty = transferred_qty
-               WHERE work_order_id = ?""",
-            (args.work_order_id,),
-        )
-    else:
-        # Partial completion: consume proportionally (Decimal precision)
-        ratio = total_produced / wo_qty
-        items = conn.execute(
-            "SELECT id, transferred_qty FROM work_order_item WHERE work_order_id = ?",
-            (args.work_order_id,),
-        ).fetchall()
-        for item in items:
-            consumed = round_currency(to_decimal(item["transferred_qty"]) * ratio)
+        if new_status == "completed":
+            wo_complete_q = (Q.update(wo_t)
+                             .set(wo_t.produced_qty, P())
+                             .set(wo_t.status, ValueWrapper("completed"))
+                             .set(wo_t.actual_end_date, P())
+                             .set(wo_t.updated_at, now())
+                             .where(wo_t.id == P())
+                             .where(wo_t.status == ValueWrapper("in_process")))
+            wo_complete_cur = conn.execute(
+                wo_complete_q.get_sql(),
+                (str(round_currency(total_produced)),
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 args.work_order_id),
+            )
+            if wo_complete_cur.rowcount == 0:
+                conn.rollback()
+                wo_fresh = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+                if not wo_fresh:
+                    err(f"Work Order {args.work_order_id} not found")
+                wo_fresh_dict = row_to_dict(wo_fresh)
+                err(
+                    f"Cannot complete Work Order with status '{wo_fresh_dict['status']}'. "
+                    f"Must be 'in_process'."
+                )
+        else:
+            wo_partial_q = (Q.update(wo_t)
+                            .set(wo_t.produced_qty, P())
+                            .set(wo_t.updated_at, now())
+                            .where(wo_t.id == P())
+                            .where(wo_t.status == ValueWrapper("in_process")))
+            wo_partial_cur = conn.execute(
+                wo_partial_q.get_sql(),
+                (str(round_currency(total_produced)), args.work_order_id),
+            )
+            if wo_partial_cur.rowcount == 0:
+                conn.rollback()
+                wo_fresh = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+                if not wo_fresh:
+                    err(f"Work Order {args.work_order_id} not found")
+                wo_fresh_dict = row_to_dict(wo_fresh)
+                err(
+                    f"Cannot complete Work Order with status '{wo_fresh_dict['status']}'. "
+                    f"Must be 'in_process'."
+                )
+
+        # The document states the same consumed quantity the ledger issued: the
+        # cumulative target, or what earlier completions already issued where the
+        # ledger ran ahead of the document (work orders partly completed before
+        # this change).
+        for woi_row in wo_items:
+            woi = row_to_dict(woi_row)
+            consumed_upd_q = (Q.update(woi_t)
+                              .set(woi_t.consumed_qty, P())
+                              .where(woi_t.work_order_id == P())
+                              .where(woi_t.item_id == P()))
             conn.execute(
-                "UPDATE work_order_item SET consumed_qty = ? WHERE id = ?",
-                (str(consumed), item["id"]),
+                consumed_upd_q.get_sql(),
+                (str(consumed_qty[woi["item_id"]]), args.work_order_id, woi["item_id"]),
             )
 
-    audit(conn, "erpclaw-manufacturing", "complete-work-order", "work_order", args.work_order_id,
-           new_values={
-               "status": new_status,
-               "produced_qty": str(round_currency(produced_qty)),
-               "rm_cost": str(rm_cost),
-               "operating_cost": str(operating_cost),
-               "total_production_cost": str(total_production_cost),
-               "fg_rate": str(fg_rate),
-           })
-    conn.commit()
+        audit(conn, "erpclaw-manufacturing", "complete-work-order", "work_order", args.work_order_id,
+               new_values={
+                   "status": new_status,
+                   "produced_qty": str(round_currency(produced_qty)),
+                   "rm_cost": str(rm_cost),
+                   "operating_cost": str(operating_cost),
+                   "total_production_cost": str(total_production_cost),
+                   "fg_rate": str(fg_rate),
+               })
+        conn.commit()
+    except SystemExit:
+        conn.rollback()
+        raise
 
     ok({
         "work_order_id": args.work_order_id,
@@ -2312,49 +2714,29 @@ def cancel_work_order(conn, args):
 
     posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
 
-    # Reverse material transfer SLE entries
-    try:
-        reverse_sle_entries(
-            conn,
-            voucher_type="work_order",
-            voucher_id=args.work_order_id,
-            posting_date=posting_date,
-        )
-    except (ValueError, NotImplementedError):
-        pass  # No SLE entries to reverse is acceptable
+    # Reverse every voucher in the work order's family: every transfer and
+    # every completion, including the legacy first-event ids. Nothing to
+    # reverse is acceptable per voucher.
+    for voucher_id in _wo_family_voucher_ids(conn, args.work_order_id):
+        try:
+            reverse_sle_entries(
+                conn,
+                voucher_type="work_order",
+                voucher_id=voucher_id,
+                posting_date=posting_date,
+            )
+        except (ValueError, NotImplementedError):
+            pass  # No SLE entries to reverse is acceptable
 
-    # Reverse material transfer GL entries
-    try:
-        reverse_gl_entries(
-            conn,
-            voucher_type="work_order",
-            voucher_id=args.work_order_id,
-            posting_date=posting_date,
-        )
-    except ValueError:
-        pass  # No GL entries to reverse is acceptable
-
-    # Also reverse completion entries if any exist
-    completion_voucher_id = f"{args.work_order_id}:completion"
-    try:
-        reverse_sle_entries(
-            conn,
-            voucher_type="work_order",
-            voucher_id=completion_voucher_id,
-            posting_date=posting_date,
-        )
-    except (ValueError, NotImplementedError):
-        pass
-
-    try:
-        reverse_gl_entries(
-            conn,
-            voucher_type="work_order",
-            voucher_id=completion_voucher_id,
-            posting_date=posting_date,
-        )
-    except ValueError:
-        pass
+        try:
+            reverse_gl_entries(
+                conn,
+                voucher_type="work_order",
+                voucher_id=voucher_id,
+                posting_date=posting_date,
+            )
+        except ValueError:
+            pass  # No GL entries to reverse is acceptable
 
     # Set WO status to cancelled
     wo_cancel_q = (Q.update(wo_t)
@@ -3314,7 +3696,7 @@ def transfer_materials_to_subcontractor(conn, args):
             "quantities; the service line is not transferred).")
 
     posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
-    db_path = args.db_path or DEFAULT_DB_PATH
+    db_path = getattr(args, "db_path", None)   # forwarded only when the caller gave --db-path
 
     # --- Emit the send_to_subcontractor stock entry via S6's inventory path. ---
     # Cross-skill subprocess (manufacturing must NOT write inventory-owned tables
@@ -3337,9 +3719,10 @@ def transfer_materials_to_subcontractor(conn, args):
         if not stock_entry_id:
             err(f"Stock entry creation returned no id: {add_resp}")
         # submit-stock-entry is a high-impact action gated by the foundation
-        # router (--user-confirmed). The user already confirmed the parent
-        # transfer-materials-to-subcontractor action, which is the trust boundary;
-        # the internal SLE/GL post is pre-authorized, so pass the flag through.
+        # router (--user-confirmed). The parent
+        # transfer-materials-to-subcontractor action is itself gated by the
+        # foundation router, so the confirmation passed on here is the one the
+        # user gave for the parent.
         call_skill_action(
             "erpclaw", "submit-stock-entry",
             args={"--stock-entry-id": stock_entry_id, "--user-confirmed": None},
@@ -3372,7 +3755,7 @@ def transfer_materials_to_subcontractor(conn, args):
         "stock_entry_id": stock_entry_id,
         "transferred_units": str(round_currency(transfer_units)),
         "materials_transferred": str(new_transferred),
-        "status": sco["status"],
+        "document_status": sco["status"],
     })
 
 
@@ -3426,7 +3809,7 @@ def receive_subcontracted_items(conn, args):
     company_id = sco["company_id"]
     finished_item_id = sco["finished_item_id"]
     posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
-    fiscal_year = _get_fiscal_year(conn, posting_date)
+    fiscal_year = _company_fiscal_year(conn, posting_date, sco["company_id"])
     cost_center_id = _get_cost_center(conn, company_id)
 
     # --- Resolve the per-unit subcontract charge rate ---
@@ -3573,7 +3956,7 @@ def receive_subcontracted_items(conn, args):
     purchase_invoice_id = None
     if subcontract_charge > 0:
         from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
-        db_path = args.db_path or DEFAULT_DB_PATH
+        db_path = getattr(args, "db_path", None)   # forwarded only when the caller gave --db-path
         pi_items = [{
             "item_id": sco["service_item_id"],
             "qty": str(round_currency(received_qty)),
@@ -3724,12 +4107,12 @@ def cancel_subcontract_transfer(conn, args):
             break
 
     posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
-    db_path = args.db_path or DEFAULT_DB_PATH
+    db_path = getattr(args, "db_path", None)   # forwarded only when the caller gave --db-path
 
     # Delegate the SLE+GL reversal to inventory (owning module; cancel = reverse).
-    # cancel-stock-entry is foundation-router-gated (--user-confirmed); the user
-    # confirmed the parent cancel-subcontract-transfer (the trust boundary), so
-    # pass the flag through to the pre-authorized reversal.
+    # cancel-stock-entry is foundation-router-gated (--user-confirmed); the parent
+    # cancel-subcontract-transfer is itself gated by the foundation router, so the
+    # confirmation passed on here is the one the user gave for the parent.
     from erpclaw_lib.cross_skill import call_skill_action, CrossSkillError
     try:
         call_skill_action(
@@ -4369,8 +4752,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check
@@ -4386,7 +4768,7 @@ def main():
     except Exception as e:
         conn.rollback()
         sys.stderr.write(f"[erpclaw-manufacturing] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 

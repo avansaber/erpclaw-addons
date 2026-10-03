@@ -12,7 +12,7 @@ if importlib.util.find_spec("erpclaw_lib") is None:
     sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err
-from erpclaw_lib.gl_posting import insert_gl_entries
+from erpclaw_lib.gl_posting import insert_gl_entries, take_chain_heads
 from erpclaw_lib.query_helpers import get_default_cost_center
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
 
@@ -49,155 +49,189 @@ def handle_record_repayment(conn, args):
 
     loan_dict = dict(loan) if hasattr(loan, "keys") else None
     if loan_dict:
-        loan_status = loan_dict["status"]
-        company_id = loan_dict["company_id"]
-        current_repaid = _dec(loan_dict["total_repaid"])
-        current_outstanding = _dec(loan_dict["outstanding_amount"])
-        loan_account_id = loan_dict.get("loan_account_id")
-        interest_account_id = loan_dict.get("interest_income_account_id")
-        disbursement_account_id = loan_dict.get("disbursement_account_id")
+        head_company_id = loan_dict["company_id"]
     else:
         return err("Database row_factory not configured")
 
-    if loan_status not in ("disbursed", "partially_repaid"):
-        return err(f"Cannot record repayment for loan in status '{loan_status}'")
-
-    repayment_id = str(uuid.uuid4())
-    naming = get_next_name(conn, "loan_repayment", company_id=company_id)
-
-    conn.execute(
-        """INSERT INTO loan_repayment
-           (id, naming_series, loan_id, repayment_date, principal_amount,
-            interest_amount, penalty_amount, total_amount, payment_method,
-            reference_number, remarks, status, company_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
-        (repayment_id, naming, loan_id, repayment_date,
-         str(principal), str(interest), str(penalty), str(total),
-         payment_method, reference, remarks, company_id),
-    )
-
-    new_repaid = current_repaid + total
-    new_outstanding = current_outstanding - principal
-
-    new_status = "partially_repaid"
-    if new_outstanding <= 0:
-        new_status = "repaid"
-        new_outstanding = Decimal("0")
-
-    sql, params_u = dynamic_update("loan",
-        {"total_repaid": str(new_repaid), "outstanding_amount": str(new_outstanding),
-         "status": new_status, "updated_at": now()},
-        where={"id": loan_id})
-    conn.execute(sql, params_u)
-
-    # Update repayment schedule — mark earliest pending installments as paid
-    if principal > 0:
-        schedule_rows = conn.execute(
-            """SELECT id, outstanding FROM loan_repayment_schedule
-               WHERE loan_id = ? AND status IN ('pending', 'overdue', 'partially_paid')
-               ORDER BY installment_no""",
-            (loan_id,),
-        ).fetchall()
-
-        remaining = principal
-        for srow in schedule_rows:
-            if remaining <= 0:
-                break
-            sid = dict(srow)["id"] if hasattr(srow, "keys") else srow[0]
-            s_outstanding = _dec(dict(srow)["outstanding"] if hasattr(srow, "keys") else srow[1])
-            pay = min(remaining, s_outstanding)
-            new_s_outstanding = s_outstanding - pay
-            s_status = "paid" if new_s_outstanding <= 0 else "partially_paid"
-            conn.execute(
-                """UPDATE loan_repayment_schedule
-                   SET paid_amount = CAST(
-                       CAST(REPLACE(paid_amount, ',', '') AS NUMERIC) + ? AS TEXT),
-                       outstanding = ?, status = ?, payment_date = ?
-                   WHERE id = ?""",
-                (str(pay), str(new_s_outstanding), s_status, repayment_date, sid),
-            )
-            remaining -= pay
-
-    # Post GL entries: DR Bank (cash received) / CR Loan Receivable (principal)
-    # + CR Interest Income (interest). One balanced call, posted last, never
-    # swallowed.
-    #
-    # (M62 sweep: this block used to call `post_gl_entry` — a symbol that has
-    # never existed in erpclaw_lib.gl_posting — inside `except Exception: pass`,
-    # so every repayment since the module shipped recorded the document and
-    # posted nothing at all. Same wrong-symbol-plus-swallow the write-off path
-    # below was already fixed for.)
-    #
-    # 'journal_entry' is the registered catch-all voucher_type; loan vouchers
-    # are not first-class types in foundation's voucher_type_registry, so the
-    # semantic identity rides on voucher_id (the repayment) + remarks. The
-    # receivable leg carries the party (GL validation step 5) and the interest
-    # leg carries a cost center (step 6, income account).
-    #
-    # penalty_amount is deliberately absent: there is no penalty-income account
-    # on `loan` to post it to, and inventing one is a schema decision, not a
-    # bug fix. A penalty-only repayment therefore posts nothing — every leg is
-    # zero and GL validation step 11 filters them all out, which is a no-op,
-    # not a failure.
-    if not loan_account_id or not disbursement_account_id:
-        conn.rollback()
-        return err(
-            f"Loan {loan_id} has no loan / disbursement account configured; "
-            f"the repayment cannot reach the ledger"
-        )
-    if interest > 0 and not interest_account_id:
-        conn.rollback()
-        return err(
-            f"Loan {loan_id} has no interest income account configured; "
-            f"an interest repayment cannot reach the ledger"
-        )
-
-    cost_center_id = get_default_cost_center(conn, company_id)
-    gl_entries = [
-        {
-            "account_id": disbursement_account_id,
-            "debit": str(principal + interest),
-            "credit": "0",
-        },
-        {
-            "account_id": loan_account_id,
-            "debit": "0",
-            "credit": str(principal),
-            "party_type": loan_dict["applicant_type"],
-            "party_id": loan_dict["applicant_id"],
-        },
-    ]
-    if interest > 0:
-        gl_entries.append({
-            "account_id": interest_account_id,
-            "debit": "0",
-            "credit": str(interest),
-            "cost_center_id": cost_center_id,
-        })
-
     try:
-        insert_gl_entries(
-            conn,
-            gl_entries,
-            voucher_type="journal_entry",
-            voucher_id=repayment_id,
-            posting_date=repayment_date,
-            company_id=company_id,
-            remarks=f"Loan repayment {naming}",
-        )
-    except Exception as e:
-        # Single-transaction rule: any failure = full rollback. err() raises
-        # SystemExit, which the router's `except Exception` does not catch, so
-        # the rollback happens here rather than relying on process exit.
-        conn.rollback()
-        return err(f"GL posting failed, repayment rolled back: {e}")
+        take_chain_heads(conn, [head_company_id])
+        loan = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+        if not loan:
+            conn.rollback()
+            return err(f"Loan {loan_id} not found")
+        loan_dict = dict(loan) if hasattr(loan, "keys") else None
+        if loan_dict:
+            loan_status = loan_dict["status"]
+            company_id = loan_dict["company_id"]
+            current_repaid = _dec(loan_dict["total_repaid"])
+            current_outstanding = _dec(loan_dict["outstanding_amount"])
+            loan_account_id = loan_dict.get("loan_account_id")
+            interest_account_id = loan_dict.get("interest_income_account_id")
+            disbursement_account_id = loan_dict.get("disbursement_account_id")
+            where_status = loan_dict["status"]
+            where_outstanding = loan_dict["outstanding_amount"]
+            where_repaid = loan_dict["total_repaid"]
+        else:
+            conn.rollback()
+            return err("Database row_factory not configured")
 
-    conn.commit()
-    return ok({
-        "id": repayment_id, "naming_series": naming, "loan_id": loan_id,
-        "total_amount": str(total), "loan_outstanding": str(new_outstanding),
-        "loan_status": new_status,
-    })
+        if loan_status not in ("disbursed", "partially_repaid"):
+            conn.rollback()
+            return err(f"Cannot record repayment for loan in status '{loan_status}'")
+
+        repayment_id = str(uuid.uuid4())
+        naming = get_next_name(conn, "loan_repayment", company_id=company_id)
+
+        conn.execute(
+            """INSERT INTO loan_repayment
+               (id, naming_series, loan_id, repayment_date, principal_amount,
+                interest_amount, penalty_amount, total_amount, payment_method,
+                reference_number, remarks, status, company_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
+            (repayment_id, naming, loan_id, repayment_date,
+             str(principal), str(interest), str(penalty), str(total),
+             payment_method, reference, remarks, company_id),
+        )
+
+        new_repaid = current_repaid + total
+        new_outstanding = current_outstanding - principal
+
+        new_status = "partially_repaid"
+        if new_outstanding <= 0:
+            new_status = "repaid"
+            new_outstanding = Decimal("0")
+
+        sql, params_u = dynamic_update("loan",
+            {"total_repaid": str(new_repaid), "outstanding_amount": str(new_outstanding),
+             "status": new_status, "updated_at": now()},
+            where={"id": loan_id, "status": where_status,
+                   "outstanding_amount": where_outstanding,
+                   "total_repaid": where_repaid})
+        cur = conn.execute(sql, params_u)
+        if cur.rowcount == 0:
+            conn.rollback()
+            fresh = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+            if fresh is None:
+                return err(f"Loan {loan_id} not found")
+            fresh_status = dict(fresh)["status"]
+            if fresh_status != where_status:
+                return err(f"Cannot record repayment for loan in status '{fresh_status}'")
+            return err(f"Loan {loan_id} changed while this repayment was being recorded; nothing was written. Retry the action.")
+
+        # Update repayment schedule — settle the earliest open installments.
+        # An installment's outstanding is its principal plus its interest, so both
+        # parts of the repayment are applied to it (penalty is not scheduled). The
+        # paid amount is added as a Decimal, not in SQL, so it stays exact money.
+        allocatable = principal + interest
+        if allocatable > 0:
+            schedule_rows = conn.execute(
+                """SELECT id, paid_amount, outstanding FROM loan_repayment_schedule
+                   WHERE loan_id = ? AND status IN ('pending', 'overdue', 'partially_paid')
+                   ORDER BY installment_no""",
+                (loan_id,),
+            ).fetchall()
+
+            remaining = allocatable
+            for srow in schedule_rows:
+                if remaining <= 0:
+                    break
+                srow = dict(srow)
+                s_outstanding = _dec(srow["outstanding"])
+                pay = min(remaining, s_outstanding)
+                new_s_outstanding = s_outstanding - pay
+                s_status = "paid" if new_s_outstanding <= 0 else "partially_paid"
+                conn.execute(
+                    """UPDATE loan_repayment_schedule
+                       SET paid_amount = ?, outstanding = ?, status = ?, payment_date = ?
+                       WHERE id = ?""",
+                    (str(_dec(srow["paid_amount"]) + pay), str(new_s_outstanding),
+                     s_status, repayment_date, srow["id"]),
+                )
+                remaining -= pay
+
+        # Post GL entries: DR Bank (cash received) / CR Loan Receivable (principal)
+        # + CR Interest Income (interest). One balanced call, posted last, never
+        # swallowed.
+        #
+        # (M62 sweep: this block used to call `post_gl_entry` — a symbol that has
+        # never existed in erpclaw_lib.gl_posting — inside `except Exception: pass`,
+        # so every repayment since the module shipped recorded the document and
+        # posted nothing at all. Same wrong-symbol-plus-swallow the write-off path
+        # below was already fixed for.)
+        #
+        # 'journal_entry' is the registered catch-all voucher_type; loan vouchers
+        # are not first-class types in foundation's voucher_type_registry, so the
+        # semantic identity rides on voucher_id (the repayment) + remarks. The
+        # receivable leg carries the party (GL validation step 5) and the interest
+        # leg carries a cost center (step 6, income account).
+        #
+        # penalty_amount is deliberately absent: there is no penalty-income account
+        # on `loan` to post it to, and inventing one is a schema decision, not a
+        # bug fix. A penalty-only repayment therefore posts nothing — every leg is
+        # zero and GL validation step 11 filters them all out, which is a no-op,
+        # not a failure.
+        if not loan_account_id or not disbursement_account_id:
+            conn.rollback()
+            return err(
+                f"Loan {loan_id} has no loan / disbursement account configured; "
+                f"the repayment cannot reach the ledger"
+            )
+        if interest > 0 and not interest_account_id:
+            conn.rollback()
+            return err(
+                f"Loan {loan_id} has no interest income account configured; "
+                f"an interest repayment cannot reach the ledger"
+            )
+
+        cost_center_id = get_default_cost_center(conn, company_id)
+        gl_entries = [
+            {
+                "account_id": disbursement_account_id,
+                "debit": str(principal + interest),
+                "credit": "0",
+            },
+            {
+                "account_id": loan_account_id,
+                "debit": "0",
+                "credit": str(principal),
+                "party_type": loan_dict["applicant_type"],
+                "party_id": loan_dict["applicant_id"],
+            },
+        ]
+        if interest > 0:
+            gl_entries.append({
+                "account_id": interest_account_id,
+                "debit": "0",
+                "credit": str(interest),
+                "cost_center_id": cost_center_id,
+            })
+
+        try:
+            insert_gl_entries(
+                conn,
+                gl_entries,
+                voucher_type="journal_entry",
+                voucher_id=repayment_id,
+                posting_date=repayment_date,
+                company_id=company_id,
+                remarks=f"Loan repayment {naming}",
+            )
+        except Exception as e:
+            # Single-transaction rule: any failure = full rollback. err() raises
+            # SystemExit, which the router's `except Exception` does not catch, so
+            # the rollback happens here rather than relying on process exit.
+            conn.rollback()
+            return err(f"GL posting failed, repayment rolled back: {e}")
+
+        conn.commit()
+        return ok({
+            "id": repayment_id, "naming_series": naming, "loan_id": loan_id,
+            "total_amount": str(total), "loan_outstanding": str(new_outstanding),
+            "loan_status": new_status,
+        })
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 def handle_list_repayments(conn, args):
@@ -283,77 +317,103 @@ def handle_write_off_loan(conn, args):
     if not loan:
         return err(f"Loan {loan_id} not found")
 
-    ld = dict(loan)
-    if ld["status"] not in ("disbursed", "partially_repaid"):
-        return err(f"Cannot write off loan in status '{ld['status']}'")
+    ld_first = dict(loan)
+    head_company_id = ld_first["company_id"]
 
-    outstanding = _dec(ld["outstanding_amount"])
-    if outstanding <= 0:
-        return err("No outstanding amount to write off")
+    try:
+        take_chain_heads(conn, [head_company_id])
+        loan = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+        if not loan:
+            conn.rollback()
+            return err(f"Loan {loan_id} not found")
+        ld = dict(loan)
+        if ld["status"] not in ("disbursed", "partially_repaid"):
+            conn.rollback()
+            return err(f"Cannot write off loan in status '{ld['status']}'")
 
-    company_id = ld["company_id"]
-    loan_account_id = ld.get("loan_account_id")
+        outstanding = _dec(ld["outstanding_amount"])
+        if outstanding <= 0:
+            conn.rollback()
+            return err("No outstanding amount to write off")
 
-    wo_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO loan_write_off
-           (id, loan_id, write_off_date, write_off_amount, outstanding_at_write_off,
-            reason, bad_debt_account_id, status, company_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
-        (wo_id, loan_id, write_off_date, str(outstanding), str(outstanding),
-         reason, bad_debt_account_id, company_id),
-    )
+        company_id = ld["company_id"]
+        loan_account_id = ld.get("loan_account_id")
+        where_status = ld["status"]
+        where_outstanding = ld["outstanding_amount"]
 
-    sql, params_u = dynamic_update("loan",
-        {"outstanding_amount": "0", "status": "written_off", "updated_at": now()},
-        where={"id": loan_id})
-    conn.execute(sql, params_u)
-
-    # GL posting must propagate failures. A swallowed exception here would
-    # leave the loan marked 'written_off' with no offsetting GL entries —
-    # books out of balance, violating the 12-step GL validation rule.
-    # (The prior version imported the wrong symbol post_gl_entry — which
-    # never existed in erpclaw_lib.gl_posting — and swallowed the
-    # resulting ImportError, so loan write-offs were silently producing
-    # zero GL entries the entire time. Fixed to use insert_gl_entries
-    # with cost_center_id (validation step 6) + party_type/party_id on
-    # the receivable side (validation step 5).)
-    if loan_account_id:
-        cost_center_id = get_default_cost_center(conn, company_id)
-        insert_gl_entries(
-            conn,
-            [
-                {
-                    "account_id": bad_debt_account_id,
-                    "debit": str(outstanding),
-                    "credit": "0",
-                    "cost_center_id": cost_center_id,
-                },
-                {
-                    "account_id": loan_account_id,
-                    "debit": "0",
-                    "credit": str(outstanding),
-                    "cost_center_id": cost_center_id,
-                    # loan_account is a 'receivable' type; step 5 requires party.
-                    # loan.applicant_type is one of customer/employee/supplier;
-                    # the GL validator accepts all three for receivable/payable.
-                    "party_type": ld["applicant_type"],
-                    "party_id": ld["applicant_id"],
-                },
-            ],
-            # 'journal_entry' is the catch-all voucher_type per the gl_entry
-            # CHECK constraint — loan write-offs aren't a first-class voucher
-            # type in foundation. Semantic identity is preserved via voucher_id
-            # (points to loan_write_off record) + remarks ("Loan write-off: ...").
-            voucher_type="journal_entry",
-            voucher_id=wo_id,
-            posting_date=write_off_date,
-            company_id=company_id,
-            remarks=f"Loan write-off: {reason}",
+        wo_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO loan_write_off
+               (id, loan_id, write_off_date, write_off_amount, outstanding_at_write_off,
+                reason, bad_debt_account_id, status, company_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
+            (wo_id, loan_id, write_off_date, str(outstanding), str(outstanding),
+             reason, bad_debt_account_id, company_id),
         )
 
-    conn.commit()
-    return ok({"id": wo_id, "loan_id": loan_id, "write_off_amount": str(outstanding)})
+        sql, params_u = dynamic_update("loan",
+            {"outstanding_amount": "0", "status": "written_off", "updated_at": now()},
+            where={"id": loan_id, "status": where_status,
+                   "outstanding_amount": where_outstanding})
+        cur = conn.execute(sql, params_u)
+        if cur.rowcount == 0:
+            conn.rollback()
+            fresh = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+            if fresh is None:
+                return err(f"Loan {loan_id} not found")
+            fresh_ld = dict(fresh)
+            if fresh_ld["status"] not in ("disbursed", "partially_repaid"):
+                return err(f"Cannot write off loan in status '{fresh_ld['status']}'")
+            return err(f"Loan {loan_id} changed while this write-off was being recorded; nothing was written. Retry the action.")
+
+        # GL posting must propagate failures. A swallowed exception here would
+        # leave the loan marked 'written_off' with no offsetting GL entries —
+        # books out of balance, violating the 12-step GL validation rule.
+        # (The prior version imported the wrong symbol post_gl_entry — which
+        # never existed in erpclaw_lib.gl_posting — and swallowed the
+        # resulting ImportError, so loan write-offs were silently producing
+        # zero GL entries the entire time. Fixed to use insert_gl_entries
+        # with cost_center_id (validation step 6) + party_type/party_id on
+        # the receivable side (validation step 5).)
+        if loan_account_id:
+            cost_center_id = get_default_cost_center(conn, company_id)
+            insert_gl_entries(
+                conn,
+                [
+                    {
+                        "account_id": bad_debt_account_id,
+                        "debit": str(outstanding),
+                        "credit": "0",
+                        "cost_center_id": cost_center_id,
+                    },
+                    {
+                        "account_id": loan_account_id,
+                        "debit": "0",
+                        "credit": str(outstanding),
+                        "cost_center_id": cost_center_id,
+                        # loan_account is a 'receivable' type; step 5 requires party.
+                        # loan.applicant_type is one of customer/employee/supplier;
+                        # the GL validator accepts all three for receivable/payable.
+                        "party_type": ld["applicant_type"],
+                        "party_id": ld["applicant_id"],
+                    },
+                ],
+                # 'journal_entry' is the catch-all voucher_type per the gl_entry
+                # CHECK constraint — loan write-offs aren't a first-class voucher
+                # type in foundation. Semantic identity is preserved via voucher_id
+                # (points to loan_write_off record) + remarks ("Loan write-off: ...").
+                voucher_type="journal_entry",
+                voucher_id=wo_id,
+                posting_date=write_off_date,
+                company_id=company_id,
+                remarks=f"Loan write-off: {reason}",
+            )
+
+        conn.commit()
+        return ok({"id": wo_id, "loan_id": loan_id, "write_off_amount": str(outstanding)})
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 def register_args(parser):

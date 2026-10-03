@@ -1,7 +1,7 @@
 ---
 name: erpclaw-pos
 version: 1.0.0
-description: Point of Sale -- 28 actions across 4 domains. POS profiles, register sessions, cart-based transactions, split payments, receipts, hold/resume, returns, discounts, and end-of-day reporting with cash reconciliation.
+description: Point of Sale -- 29 actions across 4 domains. POS profiles, register sessions, cart-based transactions, split payments, receipts, hold/resume, returns, discounts, and end-of-day reporting with cash reconciliation.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -20,8 +20,8 @@ metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db
 
 Point of Sale module for in-store and counter sales. Manages register sessions,
 cart-based transactions, split payments, hold/resume, returns, discounts,
-and end-of-day reconciliation. submit-transaction auto-creates sales invoice,
-payment entry, and stock ledger updates via cross-skill integration.
+and end-of-day reconciliation. submit-transaction posts a sales invoice (the transaction discount
+as a negative line) and one receipt per tender method, allocated to it; a failed step is finished by retrying.
 
 ### Skill Activation Triggers
 
@@ -45,7 +45,7 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 --action pos-close-session --id {id} --closing-amount 250
 ```
 
-## All 28 Actions
+## All 29 Actions
 
 ### POS Profiles (4 actions)
 | Action | Description |
@@ -62,9 +62,9 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 | `pos-close-session` | Close session with reconciliation |
 | `pos-get-session` | Get session details |
 | `pos-list-sessions` | List sessions |
-| `pos-session-summary` | Session summary with totals |
+| `pos-session-summary` | Session summary with totals; a sale cancelled outside POS is listed under voids to finish |
 
-### Transactions (11 actions)
+### Transactions (12 actions)
 | Action | Description |
 |--------|-------------|
 | `pos-add-transaction` | Start new transaction |
@@ -75,21 +75,22 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 | `pos-add-payment` | Add payment to transaction |
 | `pos-apply-discount` | Apply discount |
 | `pos-submit-transaction` | Submit (creates invoice + payment + stock) |
-| `pos-void-transaction` | Void transaction |
+| `pos-abandon-posting` | Abandon a posting that cannot finish (deletes drafts only) |
+| `pos-void-transaction` | Void transaction (a submitted sale: cancels its receipts and invoice by reversal; needs --user-confirmed) |
 | `pos-hold-transaction` | Hold transaction for later |
 | `pos-resume-transaction` | Resume held transaction |
 
 ### Returns & Reports (8 actions)
 | Action | Description |
 |--------|-------------|
-| `pos-return-transaction` | Process return (creates credit note) |
+| `pos-return-transaction` | Process return (credit note plus refund; --items, --refund-method, --pos-session-id; needs --user-confirmed) |
 | `pos-lookup-item` | Lookup item by barcode/name |
 | `pos-generate-receipt` | Generate receipt |
 | `pos-daily-report` | Daily sales report |
 | `pos-hourly-sales` | Hourly sales breakdown |
 | `pos-top-items` | Top selling items |
 | `pos-cashier-performance` | Cashier performance metrics |
-| `pos-cash-reconciliation` | Cash reconciliation with variance |
+| `pos-cash-reconciliation` | Cash reconciliation with variance; a sale cancelled outside POS is listed under voids to finish |
 
 ## Cross-Skill Integration
 - **erpclaw-selling:** submit-transaction creates sales_invoice

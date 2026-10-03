@@ -173,7 +173,7 @@ def update_signature_request(conn, args):
     if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
     params.append(req_id)
     conn.execute(
         f"UPDATE esign_signature_request SET {', '.join(updates)} WHERE id = ?", params

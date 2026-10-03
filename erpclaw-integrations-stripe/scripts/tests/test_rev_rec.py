@@ -379,13 +379,25 @@ class TestRecognizeSubscriptionRevenue:
         ))
         assert is_ok(rec_result)
 
-        # Find the journal entries created during recognition
-        jes = conn.execute(
-            "SELECT id FROM journal_entry WHERE remark LIKE '%ASC 606%sub_bal_001%'"
+        # The recognized entry's revenue_recognition voucher holds the legs
+        recognized = conn.execute(
+            "SELECT id FROM advacct_revenue_schedule WHERE obligation_id = ? AND recognized = 1",
+            (sched_result["obligation_id"],)
         ).fetchall()
-        assert len(jes) > 0
-        for je in jes:
-            _assert_gl_balanced(conn, je["id"])
+        assert len(recognized) == 1
+        entries = conn.execute(
+            "SELECT * FROM gl_entry WHERE voucher_type = 'revenue_recognition' "
+            "AND voucher_id = ? AND is_cancelled = 0",
+            (recognized[0]["id"],)
+        ).fetchall()
+        assert len(entries) == 2
+        by_account = {e["account_id"]: dict(e) for e in entries}
+        assert by_account[env["unearned_id"]]["debit"] == "75.00"
+        assert by_account[env["unearned_id"]]["credit"] == "0.00"
+        assert by_account[env["revenue_account_id"]]["credit"] == "75.00"
+        assert by_account[env["revenue_account_id"]]["debit"] == "0.00"
+        assert by_account[env["revenue_account_id"]]["cost_center_id"] == env["cost_center_id"]
+        _assert_gl_balanced(conn, recognized[0]["id"])
 
 
 # ===========================================================================
@@ -553,7 +565,18 @@ class TestHandleSubscriptionChange:
         assert upgrade_result["change_type"] == "upgrade"
         assert upgrade_result["contract_status"] == "modified"
         assert upgrade_result["new_monthly_amount"] == "75.00"
+        assert upgrade_result["new_total_value"] == "875.00"
         assert upgrade_result["modification_count"] == 1
+        obligation = conn.execute(
+            "SELECT allocated_price FROM advacct_performance_obligation WHERE id = ?",
+            (sched_result["obligation_id"],)
+        ).fetchone()
+        assert obligation["allocated_price"] == "875.00"
+        contract = conn.execute(
+            "SELECT total_value FROM advacct_revenue_contract WHERE id = ?",
+            (sched_result["contract_id"],)
+        ).fetchone()
+        assert contract["total_value"] == "875.00"
 
         # Verify unrecognized entries now have new amount
         unrecognized = conn.execute(
@@ -636,11 +659,24 @@ class TestFullCycle:
         assert rec_result["subscriptions_processed"] == 1
 
         # 3. Verify GL balanced for recognition
-        jes = conn.execute(
-            "SELECT id FROM journal_entry WHERE remark LIKE '%ASC 606%sub_full_001%'"
+        recognized = conn.execute(
+            "SELECT id FROM advacct_revenue_schedule WHERE obligation_id = ? AND recognized = 1",
+            (sched_result["obligation_id"],)
         ).fetchall()
-        for je in jes:
-            _assert_gl_balanced(conn, je["id"])
+        assert len(recognized) == 1
+        entries = conn.execute(
+            "SELECT * FROM gl_entry WHERE voucher_type = 'revenue_recognition' "
+            "AND voucher_id = ? AND is_cancelled = 0",
+            (recognized[0]["id"],)
+        ).fetchall()
+        assert len(entries) == 2
+        by_account = {e["account_id"]: dict(e) for e in entries}
+        assert by_account[env["unearned_id"]]["debit"] == "200.00"
+        assert by_account[env["unearned_id"]]["credit"] == "0.00"
+        assert by_account[env["revenue_account_id"]]["credit"] == "200.00"
+        assert by_account[env["revenue_account_id"]]["debit"] == "0.00"
+        assert by_account[env["revenue_account_id"]]["cost_center_id"] == env["cost_center_id"]
+        _assert_gl_balanced(conn, recognized[0]["id"])
 
         # 4. Check status
         status = call_action(REV_REC_ACTIONS["stripe-rev-rec-status"], conn, ns(

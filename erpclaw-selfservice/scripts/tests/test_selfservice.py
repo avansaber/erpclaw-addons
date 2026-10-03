@@ -14,11 +14,39 @@ from selfservice_helpers import (
     call_action, ns, is_ok, is_error, load_db_query, _uuid,
     seed_company, seed_naming_series, seed_profile,
 )
+from erpclaw_lib.query import Q, P, Table, fn
+from erpclaw_lib import seam
 
 
 @pytest.fixture
 def mod():
     return load_db_query()
+
+
+SNAPSHOT_TABLES = (
+    "selfservice_permission_profile",
+    "selfservice_profile_assignment",
+    "selfservice_portal_config",
+    "selfservice_session",
+    "selfservice_activity_log",
+    "audit_log",
+)
+
+
+def _snapshot_tables(conn):
+    """Ordered dump of every table a selfservice action could touch.
+
+    Built with PyPika through ``erpclaw_lib.query`` so the tests never carry
+    dialect-specific SQL. Two snapshots are byte-identical exactly when the
+    action under test wrote nothing.
+    """
+    snap = {}
+    for name in SNAPSHOT_TABLES:
+        t = Table(name)
+        q = Q.from_(t).select(t.star).orderby(t.id)
+        rows = conn.execute(q.get_sql()).fetchall()
+        snap[name] = [dict(r) for r in rows]
+    return snap
 
 
 # ============================================================================
@@ -540,12 +568,128 @@ class TestUsageReport:
 
 
 class TestPortalAnalyticsReport:
-    def test_portal_analytics(self, conn, env, mod):
+    def test_portal_analytics_counts_match_stored_rows(self, conn, env, mod):
+        # NOTE on depth: this report is read-only. It reaches no ledger, so
+        # there are no debit/credit legs to assert and no balance to check;
+        # the selfservice tables carry no amount columns, so no monetary
+        # (Decimal-as-text) assertion can hold here either. What the test
+        # proves instead is that every number in the response equals an
+        # independent re-read of the stored session rows, and that the call
+        # itself stored nothing.
+        assert seam.table_exists("selfservice_portal_config")
+        assert seam.table_exists("selfservice_session")
+
+        alpha = call_action(mod.ACTIONS["selfservice-add-portal-config"], conn, ns(
+            company_id=env["company_id"], name="Alpha Portal",
+            branding_json=None, welcome_message="Alpha welcome",
+            enabled_modules=None, enabled_actions=None,
+            require_mfa=None, session_timeout_minutes=30,
+        ))
+        assert is_ok(alpha)
+        beta = call_action(mod.ACTIONS["selfservice-add-portal-config"], conn, ns(
+            company_id=env["company_id"], name="Beta Portal",
+            branding_json=None, welcome_message="Beta welcome",
+            enabled_modules=None, enabled_actions=None,
+            require_mfa=None, session_timeout_minutes=45,
+        ))
+        assert is_ok(beta)
+
+        def _session(user_id, portal_id, token):
+            r = call_action(mod.ACTIONS["selfservice-create-session"], conn, ns(
+                company_id=env["company_id"], user_id=user_id,
+                profile_id=env["profile_id"], portal_id=portal_id,
+                token=token, expires_at="2026-12-31T23:59:59Z",
+                ip_address=None, user_agent=None,
+            ))
+            assert is_ok(r)
+            return r["id"]
+
+        user_a, user_b = _uuid(), _uuid()
+        _session(user_a, alpha["id"], "tok-alpha-1")
+        _session(user_b, alpha["id"], "tok-alpha-2")
+        expiring = _session(_uuid(), alpha["id"], "tok-alpha-3")
+        _session(_uuid(), beta["id"], "tok-beta-1")
+        # Unscoped session: stored, but attached to no portal, so no
+        # portal row may count it.
+        _session(_uuid(), None, "tok-unscoped-1")
+        call_action(mod.ACTIONS["selfservice-expire-session"], conn, ns(
+            session_id=expiring,
+        ))
+
+        # Other-company control: must not leak into this company's report.
+        other_company = seed_company(conn)
+        seed_naming_series(conn, other_company)
+        other_portal = call_action(mod.ACTIONS["selfservice-add-portal-config"], conn, ns(
+            company_id=other_company, name="Foreign Portal",
+            branding_json=None, welcome_message=None,
+            enabled_modules=None, enabled_actions=None,
+            require_mfa=None, session_timeout_minutes=60,
+        ))
+        assert is_ok(other_portal)
+        foreign = call_action(mod.ACTIONS["selfservice-create-session"], conn, ns(
+            company_id=other_company, user_id=_uuid(),
+            profile_id=env["profile_id"], portal_id=other_portal["id"],
+            token="tok-foreign-1", expires_at="2026-12-31T23:59:59Z",
+            ip_address=None, user_agent=None,
+        ))
+        assert is_ok(foreign)
+
+        before = _snapshot_tables(conn)
         r = call_action(mod.ACTIONS["selfservice-portal-analytics-report"], conn, ns(
             company_id=env["company_id"], limit=50, offset=0,
         ))
         assert is_ok(r)
-        assert "total_portals" in r
+        assert r["company_id"] == env["company_id"]
+        assert r["total_portals"] == 2
+        by_name = {portal["name"]: portal for portal in r["portals"]}
+        assert set(by_name) == {"Alpha Portal", "Beta Portal"}
+        assert by_name["Alpha Portal"]["total_sessions"] == 3
+        assert by_name["Alpha Portal"]["active_sessions"] == 2
+        assert by_name["Beta Portal"]["total_sessions"] == 1
+        assert by_name["Beta Portal"]["active_sessions"] == 1
+        # Stored portal attributes are echoed exactly, not just counted.
+        assert by_name["Alpha Portal"]["id"] == alpha["id"]
+        assert by_name["Alpha Portal"]["is_active"] == 1
+        assert by_name["Alpha Portal"]["session_timeout_minutes"] == 30
+        assert by_name["Beta Portal"]["id"] == beta["id"]
+        assert by_name["Beta Portal"]["is_active"] == 1
+        assert by_name["Beta Portal"]["session_timeout_minutes"] == 45
+        # The unscoped and foreign sessions are stored rows that must NOT
+        # be counted anywhere in this report.
+        assert sum(portal["total_sessions"] for portal in r["portals"]) == 4
+
+        # Independent re-read of the stored rows through erpclaw_lib.query;
+        # every reported number must equal the database, not the envelope.
+        t_ss = Table("selfservice_session")
+        for portal_id, want_total, want_active in (
+            (alpha["id"], 3, 2),
+            (beta["id"], 1, 1),
+        ):
+            q_total = (Q.from_(t_ss).select(fn.Count("*"))
+                       .where(t_ss.portal_id == P())
+                       .where(t_ss.company_id == P()))
+            have_total = conn.execute(
+                q_total.get_sql(), (portal_id, env["company_id"])).fetchone()[0]
+            q_active = (Q.from_(t_ss).select(fn.Count("*"))
+                        .where(t_ss.portal_id == P())
+                        .where(t_ss.session_status == P())
+                        .where(t_ss.company_id == P()))
+            have_active = conn.execute(
+                q_active.get_sql(), (portal_id, "active", env["company_id"])).fetchone()[0]
+            assert have_total == want_total
+            assert have_active == want_active
+
+        # Read-only proof: the report call stored nothing.
+        assert _snapshot_tables(conn) == before
+
+    def test_portal_analytics_refuses_without_company_without_writes(self, conn, env, mod):
+        before = _snapshot_tables(conn)
+        r = call_action(mod.ACTIONS["selfservice-portal-analytics-report"], conn, ns(
+            company_id=None, limit=50, offset=0,
+        ))
+        assert is_error(r)
+        assert r["message"] == "--company-id is required"
+        assert _snapshot_tables(conn) == before
 
 
 class TestPermissionAuditReport:
@@ -565,13 +709,107 @@ class TestPermissionAuditReport:
 
 
 class TestActiveSessionsReport:
-    def test_active_sessions_report(self, conn, env, mod):
+    def test_active_sessions_report_counts_and_breakdown(self, conn, env, mod):
+        # NOTE on depth: this report is read-only. It reaches no ledger, so
+        # there are no debit/credit legs to assert and no balance to check;
+        # the selfservice tables carry no amount columns, so no monetary
+        # (Decimal-as-text) assertion can hold here either. What the test
+        # proves instead is that every number in the response equals an
+        # independent re-read of the stored session rows, and that the call
+        # itself stored nothing.
+        assert seam.table_exists("selfservice_session")
+        assert seam.table_exists("selfservice_permission_profile")
+
+        prof = call_action(mod.ACTIONS["selfservice-get-profile"], conn, ns(
+            profile_id=env["profile_id"],
+        ))
+        assert is_ok(prof)
+        profile_a_name = prof["name"]
+        profile_b = call_action(mod.ACTIONS["selfservice-add-profile"], conn, ns(
+            company_id=env["company_id"], name="Vendor Portal",
+            target_role="vendor", description=None,
+            allowed_actions=None, denied_actions=None,
+            record_scope=None, field_visibility=None,
+        ))
+        assert is_ok(profile_b)
+
+        def _session(user_id, profile_id, token):
+            r = call_action(mod.ACTIONS["selfservice-create-session"], conn, ns(
+                company_id=env["company_id"], user_id=user_id,
+                profile_id=profile_id, portal_id=None,
+                token=token, expires_at="2026-12-31T23:59:59Z",
+                ip_address=None, user_agent=None,
+            ))
+            assert is_ok(r)
+            return r["id"]
+
+        keep_a1 = _session(_uuid(), env["profile_id"], "tok-rep-a1")
+        _session(_uuid(), env["profile_id"], "tok-rep-a2")
+        _session(_uuid(), profile_b["id"], "tok-rep-b1")
+        expiring = _session(_uuid(), env["profile_id"], "tok-rep-a3")
+        call_action(mod.ACTIONS["selfservice-expire-session"], conn, ns(
+            session_id=expiring,
+        ))
+
+        # Other-company control: must not leak into this company's report.
+        other_company = seed_company(conn)
+        seed_naming_series(conn, other_company)
+        foreign = call_action(mod.ACTIONS["selfservice-create-session"], conn, ns(
+            company_id=other_company, user_id=_uuid(),
+            profile_id=env["profile_id"], portal_id=None,
+            token="tok-rep-foreign-1", expires_at="2026-12-31T23:59:59Z",
+            ip_address=None, user_agent=None,
+        ))
+        assert is_ok(foreign)
+
+        before = _snapshot_tables(conn)
         r = call_action(mod.ACTIONS["selfservice-active-sessions-report"], conn, ns(
             company_id=env["company_id"], limit=50, offset=0,
         ))
         assert is_ok(r)
-        assert "active" in r
-        assert "expired" in r
+        assert r["company_id"] == env["company_id"]
+        assert r["active"] == 3
+        assert r["expired"] == 1
+        # No owner action in this tree ever writes session_status "ended"
+        # (create writes "active", expire writes "expired"), so the exact
+        # zero below documents real behaviour rather than a guess.
+        assert r["ended"] == 0
+        assert r["by_profile"] == [
+            {"profile_name": profile_a_name, "active_count": 2},
+            {"profile_name": "Vendor Portal", "active_count": 1},
+        ]
+
+        # Independent re-read of the stored rows through erpclaw_lib.query.
+        t_ss = Table("selfservice_session")
+        for status, want in (("active", 3), ("expired", 1), ("ended", 0)):
+            q = (Q.from_(t_ss).select(fn.Count("*"))
+                 .where(t_ss.company_id == P())
+                 .where(t_ss.session_status == P()))
+            have = conn.execute(
+                q.get_sql(), (env["company_id"], status)).fetchone()[0]
+            assert have == want
+
+        # What did NOT change: a sampled active row still reads back with
+        # the exact values it was stored with.
+        t_one = Table("selfservice_session")
+        q_one = (Q.from_(t_one).select(t_one.star)
+                 .where(t_one.id == P()))
+        row = dict(conn.execute(q_one.get_sql(), (keep_a1,)).fetchone())
+        assert row["token"] == "tok-rep-a1"
+        assert row["session_status"] == "active"
+        assert row["company_id"] == env["company_id"]
+
+        # Read-only proof: the report call stored nothing.
+        assert _snapshot_tables(conn) == before
+
+    def test_active_sessions_report_refuses_unknown_company_without_writes(self, conn, env, mod):
+        before = _snapshot_tables(conn)
+        r = call_action(mod.ACTIONS["selfservice-active-sessions-report"], conn, ns(
+            company_id="no-such-company", limit=50, offset=0,
+        ))
+        assert is_error(r)
+        assert r["message"] == "Company no-such-company not found"
+        assert _snapshot_tables(conn) == before
 
 
 class TestSelfServiceStatus:

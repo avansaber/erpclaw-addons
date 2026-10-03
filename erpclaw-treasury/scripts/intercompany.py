@@ -302,7 +302,8 @@ def inter_company_balance_report(conn, args):
             "company_id": cid,
             "company_name": c[0] if c else None,
             "net_balance": str(net),
-            "direction": "receivable" if net > 0 else "payable" if net < 0 else "settled",
+            # net > 0: more received from the counterparty than sent, so owed back.
+            "direction": "payable" if net > 0 else "receivable" if net < 0 else "settled",
         })
 
     ok({

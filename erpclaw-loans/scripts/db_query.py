@@ -16,7 +16,8 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
+    from erpclaw_lib.dependencies import table_exists
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
@@ -46,6 +47,21 @@ ACTIONS.update(REPAYMENTS_ACTIONS)
 ACTIONS.update(REPORTS_ACTIONS)
 
 
+def _resolve_company_flag(conn, args):
+    from erpclaw_lib.query import Q as _Q, Table as _T, P as _P
+    from erpclaw_lib.query_helpers import resolve_company_id
+    company_name = getattr(args, "company_name", None)
+    company_id = getattr(args, "company_id", None)
+    if company_name and not company_id:
+        c = _T("company")
+        q = _Q.from_(c).select(c.id).where(c.id == _P())
+        rows = conn.execute(q.get_sql(), [company_name]).fetchall()
+        if rows:
+            args.company_id = company_name
+            return
+        args.company_id = resolve_company_id(conn, None, company_name)
+
+
 def main():
     parser = SafeArgumentParser(description="erpclaw-loans")
     parser.add_argument("--action", required=True, choices=sorted(ACTIONS.keys()))
@@ -54,6 +70,7 @@ def main():
     # -- Shared IDs --
     parser.add_argument("--id")
     parser.add_argument("--company-id")
+    parser.add_argument("--company", dest="company_name", default=None)
     parser.add_argument("--loan-id")
     parser.add_argument("--loan-application-id")
 
@@ -111,16 +128,12 @@ def main():
     args, unknown = parser.parse_known_args()
     check_unknown_args(parser, unknown)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Verify required tables exist
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
     for t in REQUIRED_TABLES:
-        if t not in tables:
+        if not table_exists(conn, t):
             print(json.dumps({
                 "status": "error",
                 "error": f"Required table '{t}' not found. Run erpclaw-loans init_db.py first.",
@@ -128,6 +141,8 @@ def main():
             }))
             conn.close()
             sys.exit(1)
+
+    _resolve_company_flag(conn, args)
 
     try:
         ACTIONS[args.action](conn, args)

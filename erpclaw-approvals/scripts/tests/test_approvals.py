@@ -79,6 +79,23 @@ class TestUpdateApprovalRule:
         assert is_ok(result), result
         return result["id"]
 
+    def test_update_stamps_updated_at_through_the_dialect_helper(self, conn, env, monkeypatch):
+        rule_id = self._create_rule(conn, env)
+        sentinel = "2001-02-03T04:05:06Z"
+        monkeypatch.setitem(mod.approval_update_approval_rule.__globals__,
+                            "sql_now", lambda: f"'{sentinel}'")
+        result = call_action(mod.approval_update_approval_rule, conn, ns(
+            id=rule_id,
+            name="Stamped Rule",
+            entity_type=None,
+            conditions=None,
+            is_active=None,
+        ))
+        assert is_ok(result), result
+        row = conn.execute("SELECT updated_at FROM approval_rule WHERE id = ?",
+                           (rule_id,)).fetchone()
+        assert row["updated_at"] == sentinel
+
     def test_update_name(self, conn, env):
         rule_id = self._create_rule(conn, env)
         result = call_action(mod.approval_update_approval_rule, conn, ns(

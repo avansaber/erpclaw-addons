@@ -33,6 +33,7 @@ LIB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.op
 if LIB_PATH not in sys.path:
     sys.path.insert(0, LIB_PATH)
 
+from erpclaw_lib.query import now as sql_now
 from erpclaw_lib.response import err, ok
 
 # Local module imports (scripts/ is on sys.path when invoked by db_query.py).
@@ -233,7 +234,8 @@ def shopify_connect(conn, args):
             "UPDATE shopify_account SET "
             "access_token_enc = ?, hmac_secret_enc = ?, "
             "pairing_method = 'oauth', status = 'active', "
-            "status_mode = ?, updated_at = datetime('now') "
+            "status_mode = ?, "
+            f"updated_at = {sql_now()} "
             "WHERE id = ?",
             (
                 encrypt_token(access_token),

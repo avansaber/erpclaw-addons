@@ -17,7 +17,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.validation import check_input_lengths
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.dependencies import check_required_tables
@@ -102,6 +102,11 @@ def main():
     parser.add_argument("--amount")
     parser.add_argument("--reference")
 
+    # -- Returns --
+    parser.add_argument("--items")
+    parser.add_argument("--refund-method",
+                        choices=["cash", "card", "mobile", "check", "gift_card", "other"])
+
     # -- Reports --
     parser.add_argument("--from-date")
     parser.add_argument("--to-date")
@@ -117,8 +122,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     _dep = check_required_tables(conn, REQUIRED_TABLES)

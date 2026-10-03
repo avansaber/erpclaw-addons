@@ -26,6 +26,8 @@ except ImportError:
     DEFAULT_DB_PATH = "~/.openclaw/erpclaw/data.sqlite"
     pass
 
+SKILL = "erpclaw-alerts"
+
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ def add_alert_rule(conn, args):
         cooldown_minutes, is_active, 0,
         company_id, now, now,
     ))
-    audit(conn, "alert_rule", rule_id, "alert-add-alert-rule", company_id)
+    audit(conn, SKILL, "alert-add-alert-rule", "alert_rule", rule_id)
     conn.commit()
 
     ok({
@@ -207,7 +209,7 @@ def update_alert_rule(conn, args):
         params,
     )
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
-    audit(conn, "alert_rule", rule_id, "alert-update-alert-rule", company_id)
+    audit(conn, SKILL, "alert-update-alert-rule", "alert_rule", rule_id)
     conn.commit()
 
     ok({"id": rule_id, "updated_fields": changed})
@@ -297,7 +299,7 @@ def activate_alert_rule(conn, args):
                      where={"id": P()})
     conn.execute(sql, (1, now, rule_id))
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
-    audit(conn, "alert_rule", rule_id, "alert-activate-alert-rule", company_id)
+    audit(conn, SKILL, "alert-activate-alert-rule", "alert_rule", rule_id)
     conn.commit()
 
     ok({"id": rule_id, "is_active": 1})
@@ -316,7 +318,7 @@ def deactivate_alert_rule(conn, args):
                      where={"id": P()})
     conn.execute(sql, (0, now, rule_id))
     company_id = row["company_id"] if hasattr(row, "keys") else row[12]
-    audit(conn, "alert_rule", rule_id, "alert-deactivate-alert-rule", company_id)
+    audit(conn, SKILL, "alert-deactivate-alert-rule", "alert_rule", rule_id)
     conn.commit()
 
     ok({"id": rule_id, "is_active": 0})
@@ -357,7 +359,7 @@ def add_notification_channel(conn, args):
         ch_id, naming, name, channel_type, config_json,
         is_active, company_id, now, now,
     ))
-    audit(conn, "notification_channel", ch_id, "alert-add-notification-channel", company_id)
+    audit(conn, SKILL, "alert-add-notification-channel", "notification_channel", ch_id)
     conn.commit()
 
     ok({
@@ -430,7 +432,7 @@ def delete_notification_channel(conn, args):
 
     q_del = Q.from_(t).delete().where(t.id == P())
     conn.execute(q_del.get_sql(), (channel_id,))
-    audit(conn, "notification_channel", channel_id, "alert-delete-notification-channel", company_id)
+    audit(conn, SKILL, "alert-delete-notification-channel", "notification_channel", channel_id)
     conn.commit()
 
     ok({"id": channel_id, "deleted": True})
@@ -488,7 +490,7 @@ def trigger_alert(conn, args):
              .where(t_rule.id == P()))
     conn.execute(q_upd.get_sql(), (now, now, rule_id))
 
-    audit(conn, "alert_log", log_id, "alert-trigger-alert", company_id)
+    audit(conn, SKILL, "alert-trigger-alert", "alert_log", log_id)
     conn.commit()
 
     ok({
@@ -583,7 +585,7 @@ def acknowledge_alert(conn, args):
                      where={"id": P()})
     conn.execute(sql, ("acknowledged", acknowledged_by, now, alert_log_id))
 
-    audit(conn, "alert_log", alert_log_id, "alert-acknowledge-alert", company_id)
+    audit(conn, SKILL, "alert-acknowledge-alert", "alert_log", alert_log_id)
     conn.commit()
 
     ok({

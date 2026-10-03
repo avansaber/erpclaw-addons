@@ -6,7 +6,7 @@ Process recipes with versioned ingredient lists, cloning, cost calculation.
 import os
 import sys
 import uuid
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import importlib.util
 if importlib.util.find_spec("erpclaw_lib") is None:
@@ -16,6 +16,7 @@ from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
 from erpclaw_lib.db import DEFAULT_DB_PATH
 from erpclaw_lib.query import Field, LiteralValue, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
+from erpclaw_lib.stock_posting import get_valuation_rate
 
 SKILL = "erpclaw-advmfg"
 
@@ -195,6 +196,18 @@ def list_recipes(conn, args):
 # ---------------------------------------------------------------------------
 # add-recipe-ingredient
 # ---------------------------------------------------------------------------
+# add-recipe-ingredient
+# ---------------------------------------------------------------------------
+def _validate_ingredient_quantity(raw):
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError, AttributeError, TypeError):
+        err("--quantity must be a non-negative number")
+    if not value.is_finite() or value < 0:
+        err("--quantity must be a non-negative number")
+    return value
+
+
 def add_recipe_ingredient(conn, args):
     if not getattr(args, "company_id", None):
         err("--company-id is required")
@@ -209,6 +222,9 @@ def add_recipe_ingredient(conn, args):
     if not conn.execute(Q.from_(Table("process_recipe")).select(Field('id')).where(Field("id") == P()).get_sql(), (args.recipe_id,)).fetchone():
         err(f"Recipe {args.recipe_id} not found")
 
+    raw_quantity = getattr(args, "quantity", None) or "0"
+    _validate_ingredient_quantity(raw_quantity)
+
     ingredient_id = str(uuid.uuid4())
 
     sql, _ = insert_row("recipe_ingredient", {"id": P(), "recipe_id": P(), "ingredient_name": P(), "item_id": P(), "quantity": P(), "unit": P(), "sequence": P(), "is_optional": P(), "notes": P(), "company_id": P()})
@@ -216,7 +232,7 @@ def add_recipe_ingredient(conn, args):
         (
             ingredient_id, args.recipe_id, args.ingredient_name,
             getattr(args, "item_id", None),
-            getattr(args, "quantity", None) or "0",
+            raw_quantity,
             getattr(args, "unit", None) or "unit",
             int(getattr(args, "sequence", None) or 0),
             int(getattr(args, "is_optional", None) or 0),
@@ -265,6 +281,9 @@ def update_recipe_ingredient(conn, args):
     if opt is not None:
         data["is_optional"] = int(opt)
         changed.append("is_optional")
+
+    if "quantity" in data:
+        _validate_ingredient_quantity(data["quantity"])
 
     if not changed:
         err("No fields to update")
@@ -411,20 +430,29 @@ def calculate_recipe_cost(conn, args):
 
     for ing in ingredients:
         ing_data = row_to_dict(ing)
-        qty = Decimal(ing_data.get("quantity") or "0")
+        raw_quantity = ing_data.get("quantity") or "0"
+        try:
+            qty = Decimal(str(raw_quantity))
+        except (InvalidOperation, ValueError, AttributeError, TypeError):
+            err(f"Ingredient {ing_data['ingredient_name']} has an invalid quantity: {raw_quantity}")
+        if not qty.is_finite():
+            err(f"Ingredient {ing_data['ingredient_name']} has an invalid quantity: {raw_quantity}")
 
-        # Try to find item cost if item_id is provided
+        # Price item-linked ingredients from the item's real valuation rate.
         unit_cost = Decimal("0")
         if ing_data.get("item_id"):
-            # Try to look up item valuation rate from item table
-            item_t = Table("item")
+            item_id = ing_data["item_id"]
+            ingredient_name = ing_data["ingredient_name"]
             item_row = conn.execute(
-                Q.from_(item_t).select(item_t.valuation_rate).where(item_t.id == P()).get_sql(),
-                (ing_data["item_id"],),
+                Q.from_(Table("item")).select(Field("id")).where(Field("id") == P()).get_sql(),
+                (item_id,),
             ).fetchone()
-            if item_row and item_row["valuation_rate"]:
-                unit_cost = Decimal(str(item_row["valuation_rate"]))
-                has_pricing = True
+            if not item_row:
+                err(f"Item {item_id} not found for ingredient {ingredient_name}")
+            unit_cost = get_valuation_rate(conn, item_id)
+            if unit_cost <= 0:
+                err(f"Ingredient {ingredient_name} is linked to item {item_id}, which has no valuation rate or standard rate")
+            has_pricing = True
 
         line_cost = (qty * unit_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         total_cost += line_cost

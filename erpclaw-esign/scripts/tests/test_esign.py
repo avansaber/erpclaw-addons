@@ -147,6 +147,25 @@ def _create_draft(conn, env, signers=None):
 
 
 class TestUpdateSignatureRequest:
+    def test_update_stamps_updated_at_through_the_dialect_helper(self, conn, env, monkeypatch):
+        req_id = _create_draft(conn, env)
+        sentinel = "2001-02-03T04:05:06Z"
+        monkeypatch.setitem(mod.esign_update_signature_request.__globals__,
+                            "sql_now", lambda: f"'{sentinel}'")
+        result = call_action(mod.esign_update_signature_request, conn, ns(
+            request_id=req_id,
+            document_name="Stamped Doc",
+            document_type=None,
+            document_id=None,
+            message=None,
+            expires_at=None,
+            signers=None,
+        ))
+        assert is_ok(result), result
+        row = conn.execute("SELECT updated_at FROM esign_signature_request WHERE id = ?",
+                           (req_id,)).fetchone()
+        assert row["updated_at"] == sentinel
+
     def test_update_document_name(self, conn, env):
         req_id = _create_draft(conn, env)
         result = call_action(mod.esign_update_signature_request, conn, ns(

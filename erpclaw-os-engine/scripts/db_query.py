@@ -179,9 +179,46 @@ from web_dashboard import handle_setup_web_dashboard
 
 def handle_generate_module(args):
     """Wrap generate_module() function for action dispatch."""
-    result = generate_module(args)
+    entities = getattr(args, "entities", None)
+    if isinstance(entities, str):
+        try:
+            entities = json.loads(entities)
+        except json.JSONDecodeError as exc:
+            err("--entities must be a JSON list of entity definitions: %s" % (exc,))
+    result = generate_module(
+        module_name=getattr(args, "module_name", None),
+        prefix=getattr(args, "prefix", None),
+        business_description=(
+            getattr(args, "description", None)
+            or getattr(args, "industry", None)
+            or ""
+        ),
+        entities=entities,
+        output_dir=getattr(args, "output_dir", None),
+        src_root=getattr(args, "src_root", None),
+    )
     if isinstance(result, dict) and "error" in result:
         err(result["error"])
+    if isinstance(result, dict) and result.get("result") == "fail":
+        validation = result.get("validation") or {}
+        errors = validation.get("errors") or validation.get("violations") or []
+        if not errors and validation.get("message"):
+            errors = [validation.get("message")]
+        if not errors:
+            errors = ["unknown validation failure"]
+        err("module generation failed: %s"
+            % ("; ".join(str(item) for item in errors),))
+    ok(result if isinstance(result, dict) else {"result": result})
+
+
+def handle_deploy_action(args):
+    """Dispatch wrapper for os-deploy-module: emit the result as JSON."""
+    result = handle_deploy_module(args)
+    if isinstance(result, dict) and "error" in result:
+        err(result["error"])
+    if isinstance(result, dict) and result.get("pipeline_result") == "failed":
+        err("module deployment failed: %s"
+            % (result.get("reasoning") or "unknown failure",))
     ok(result if isinstance(result, dict) else {"result": result})
 
 
@@ -225,7 +262,7 @@ ACTIONS = {
     "os-list-industries": handle_list_industries,
     "os-classify-operation": handle_classify_operation,
     # Deploy pipeline
-    "os-deploy-module": handle_deploy_module,
+    "os-deploy-module": handle_deploy_action,
     "os-deploy-audit-log": handle_deploy_audit_log,
     "os-install-suite": handle_install_suite,
     # Audit
@@ -285,6 +322,14 @@ def main():
     parser.add_argument("--topic", help="Topic (for research-business-rule)")
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--prefix", default=None,
+                        help="Table/action namespace for os-generate-module")
+    parser.add_argument("--description", default=None,
+                        help="Business description for os-generate-module")
+    parser.add_argument("--entities", default=None,
+                        help="JSON list of entity definitions for os-generate-module")
+    parser.add_argument("--output-dir", default=None,
+                        help="Output directory for os-generate-module")
 
     args, unknown = parser.parse_known_args()
     check_unknown_args(parser, unknown)

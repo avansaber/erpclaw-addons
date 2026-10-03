@@ -2,7 +2,7 @@
 
 All notable changes to the erpclaw-integrations-stripe addon.
 
-## [2.2.0] — 2026-07-05 — M33 / B8 (integrations deep-sync completion)
+## [2.2.0] — 2026-07-05 — integrations deep-sync completion
 
 ### Added
 - **Connect transfer sync (`transfer` object type).** `stripe-start-sync
@@ -25,7 +25,7 @@ All notable changes to the erpclaw-integrations-stripe addon.
   `gl_posting.py`). Per B8 this resolves to verify-only — no `_sync_application_fees`
   handler was added.
 
-### Schema (DEVIATION from the M33 "zero migrations" plan — see PR notes)
+### Schema (one migration in a release planned as migration-free)
 - **`stripe_sync_job.object_type` CHECK widened** to include `transfer` and
   `credit_note`. The plan's design routes the two new types through the shared
   sync-job machinery, which writes a `stripe_sync_job` row whose `object_type` was
@@ -36,7 +36,7 @@ All notable changes to the erpclaw-integrations-stripe addon.
   row-preserving, idempotent, dialect-aware). This is the stripe addon's first
   migration. Purely permissive (superset enum) — no existing row can be invalidated.
 
-## [2.1.0] — 2026-07-05 — M31 H6 (foundation-hygiene mini-wave)
+## [2.1.0] — 2026-07-05 — foundation-hygiene release
 
 ### Changed
 - **`stripe-delete-gl-rule` response shape converged (user-visible).** The

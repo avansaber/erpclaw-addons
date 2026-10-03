@@ -21,7 +21,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
     from erpclaw_lib.validation import check_input_lengths
@@ -29,9 +29,10 @@ try:
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.cross_skill import create_invoice, submit_invoice, CrossSkillError
+    from erpclaw_lib.query_helpers import resolve_company_id, resolve_scope_company
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Case, Order,
-        DecimalSum, insert_row, update_row,
+        DecimalSum, insert_row, update_row, date_add_days, now as sql_now,
     )
     from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
@@ -39,6 +40,14 @@ except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company"]
 
@@ -322,7 +331,7 @@ def update_project(conn, args):
 
     # Recalculate profit_margin if actual_cost or total_billed changed
     # We always recalculate from the resulting values
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
 
     sql = f"UPDATE project SET {', '.join(updates)} WHERE id = ?"
     params.append(args.project_id)
@@ -381,27 +390,40 @@ def get_project(conn, args):
     milestones = conn.execute(ms_q.get_sql(), (args.project_id,)).fetchall()
     project_dict["milestones"] = [row_to_dict(m) for m in milestones]
 
-    # Timesheet summary: aggregate from timesheet_detail for this project
+    # Timesheet summary: aggregate from timesheet_detail for this project.
+    # Lines are read as TEXT and summed in Python with Decimal: doing
+    # arithmetic in SQL on hours/billing_rate (`+ 0`) coerces to binary
+    # float on SQLite and is refused on PostgreSQL.
     td = Table("timesheet_detail")
     ts = Table("timesheet")
-    billable_hours_case = Case().when(td.billable == 1, td.hours + 0).else_(0)
-    billable_amt_case = Case().when(td.billable == 1, (td.hours + 0) * (td.billing_rate + 0)).else_(0)
-    ts_sum_q = (Q.from_(td)
-                .join(ts).on(td.timesheet_id == ts.id)
-                .select(
-                    fn.Coalesce(DecimalSum(td.hours), ValueWrapper("0")).as_("total_hours"),
-                    fn.Coalesce(fn.Sum(billable_hours_case), 0).as_("billable_hours"),
-                    fn.Coalesce(fn.Sum(billable_amt_case), 0).as_("billable_amount"),
-                    fn.Count(td.timesheet_id, alias="timesheet_count").distinct(),
-                )
-                .where(td.project_id == P())
-                .where(ts.status.isin(["submitted", "billed"])))
-    ts_summary = conn.execute(ts_sum_q.get_sql(), (args.project_id,)).fetchone()
+    ts_lines_q = (Q.from_(td)
+                  .join(ts).on(td.timesheet_id == ts.id)
+                  .select(
+                      td.timesheet_id,
+                      td.hours,
+                      td.billing_rate,
+                      td.billable,
+                  )
+                  .where(td.project_id == P())
+                  .where(ts.status.isin(["submitted", "billed"])))
+    ts_lines = conn.execute(ts_lines_q.get_sql(), (args.project_id,)).fetchall()
+    total_hours_sum = Decimal("0")
+    billable_hours_sum = Decimal("0")
+    billable_amount_sum = Decimal("0")
+    timesheet_ids = set()
+    for line in ts_lines:
+        hours = to_decimal(line["hours"])
+        rate = to_decimal(line["billing_rate"])
+        total_hours_sum += hours
+        timesheet_ids.add(line["timesheet_id"])
+        if int(line["billable"]) == 1:
+            billable_hours_sum += hours
+            billable_amount_sum += hours * rate
     project_dict["timesheet_summary"] = {
-        "total_hours": str(round_currency(to_decimal(str(ts_summary["total_hours"])))),
-        "billable_hours": str(round_currency(to_decimal(str(ts_summary["billable_hours"])))),
-        "billable_amount": str(round_currency(to_decimal(str(ts_summary["billable_amount"])))),
-        "timesheet_count": ts_summary["timesheet_count"],
+        "total_hours": str(round_currency(total_hours_sum)),
+        "billable_hours": str(round_currency(billable_hours_sum)),
+        "billable_amount": str(round_currency(billable_amount_sum)),
+        "timesheet_count": len(timesheet_ids),
     }
 
     ok({"project": project_dict})
@@ -638,7 +660,7 @@ def update_task(conn, args):
     if not updates:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
 
     sql = f"UPDATE task SET {', '.join(updates)} WHERE id = ?"
     params.append(args.task_id)
@@ -791,7 +813,7 @@ def update_milestone(conn, args):
     if not updates:
         err("No fields to update")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
 
     sql = f"UPDATE milestone SET {', '.join(updates)} WHERE id = ?"
     params.append(args.milestone_id)
@@ -1121,10 +1143,12 @@ def submit_timesheet(conn, args):
         if hours <= 0:
             err(f"Detail row {d_dict['id']}: hours must be > 0, got {hours}")
 
-    # Update status -- uses datetime('now') SQLite function, keep as raw SQL
+    # Update status; the timestamp is rendered per dialect at call time.
     conn.execute(
-        "UPDATE timesheet SET status = 'submitted', updated_at = datetime('now') WHERE id = ?",
-        (args.timesheet_id,),
+        update_row("timesheet",
+                   data={"status": P(), "updated_at": sql_now()},
+                   where={"id": P()}),
+        ("submitted", args.timesheet_id),
     )
 
     # Update task actual_hours for each detail row that references a task
@@ -1138,7 +1162,9 @@ def submit_timesheet(conn, args):
             if task:
                 new_hours = round_currency(to_decimal(task["actual_hours"]) + hours)
                 conn.execute(
-                    "UPDATE task SET actual_hours = ?, updated_at = datetime('now') WHERE id = ?",
+                    update_row("task",
+                               data={"actual_hours": P(), "updated_at": sql_now()},
+                               where={"id": P()}),
                     (str(new_hours), task_id),
                 )
 
@@ -1174,11 +1200,12 @@ def bill_timesheet(conn, args):
     total_billable_amount = to_decimal(ts["total_billable_amount"])
     total_cost = to_decimal(ts["total_cost"])
 
-    # Mark as billed, set total_billed_hours -- uses datetime('now'), keep as raw SQL
+    # Mark as billed, set total_billed_hours.
     conn.execute(
-        "UPDATE timesheet SET status = 'billed', total_billed_hours = ?, "
-        "updated_at = datetime('now') WHERE id = ?",
-        (str(total_billable_hours), args.timesheet_id),
+        update_row("timesheet",
+                   data={"status": P(), "total_billed_hours": P(), "updated_at": sql_now()},
+                   where={"id": P()}),
+        ("billed", str(total_billable_hours), args.timesheet_id),
     )
 
     # Aggregate amounts per project from detail rows and update each project
@@ -1221,10 +1248,11 @@ def bill_timesheet(conn, args):
             else:
                 profit_margin = Decimal("0")
 
-            # Uses datetime('now'), keep as raw SQL
             conn.execute(
-                "UPDATE project SET actual_cost = ?, total_billed = ?, profit_margin = ?, "
-                "updated_at = datetime('now') WHERE id = ?",
+                update_row("project",
+                           data={"actual_cost": P(), "total_billed": P(),
+                                 "profit_margin": P(), "updated_at": sql_now()},
+                           where={"id": P()}),
                 (str(new_actual), str(new_billed), str(profit_margin), proj_id),
             )
 
@@ -1384,15 +1412,8 @@ def create_billing_from_timesheets(conn, args):
 
     # Create the Sales Invoice via cross_skill
     posting_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    remarks = (
-        f"T&M billing for project {p['project_name']} "
-        f"({p['naming_series'] or args.project_id})"
-    )
-    if args.from_date or args.to_date:
-        period = f"{args.from_date or 'start'} to {args.to_date or 'now'}"
-        remarks += f" — Period: {period}"
 
-    db_path = args.db_path or DEFAULT_DB_PATH
+    db_path = getattr(args, "db_path", None)   # forwarded only when the caller gave --db-path
 
     try:
         inv_result = create_invoice(
@@ -1400,27 +1421,26 @@ def create_billing_from_timesheets(conn, args):
             items=invoice_items,
             company_id=args.company_id,
             posting_date=posting_date,
-            project_id=args.project_id,
-            remarks=remarks,
             db_path=db_path,
         )
     except CrossSkillError as e:
         err(f"Failed to create invoice: {e}",
             suggestion="Ensure erpclaw-selling is installed and the customer exists.")
 
-    invoice_id = inv_result.get("sales_invoice", {}).get("id")
-    invoice_name = inv_result.get("sales_invoice", {}).get("naming_series", "")
+    invoice_id = inv_result.get("sales_invoice_id")
+    invoice_name = inv_result.get("naming_series", "")
     if not invoice_id:
         err("Invoice was created but no ID returned — unexpected response from erpclaw-selling")
 
     # Mark all affected timesheets as billed with invoice reference
     for ts_id in all_timesheet_ids:
         conn.execute(
-            "UPDATE timesheet SET status = 'billed', "
-            "total_billed_hours = total_billable_hours, "
-            "sales_invoice_id = ?, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (invoice_id, ts_id),
+            update_row("timesheet",
+                       data={"status": P(),
+                             "total_billed_hours": Field("total_billable_hours"),
+                             "sales_invoice_id": P(), "updated_at": sql_now()},
+                       where={"id": P()}),
+            ("billed", invoice_id, ts_id),
         )
 
     # Update project actual_cost and total_billed
@@ -1437,8 +1457,10 @@ def create_billing_from_timesheets(conn, args):
                 ((new_billed - new_actual) / new_billed) * Decimal("100")
             )
         conn.execute(
-            "UPDATE project SET actual_cost = ?, total_billed = ?, profit_margin = ?, "
-            "updated_at = datetime('now') WHERE id = ?",
+            update_row("project",
+                       data={"actual_cost": P(), "total_billed": P(),
+                             "profit_margin": P(), "updated_at": sql_now()},
+                       where={"id": P()}),
             (str(new_actual), str(new_billed), str(profit_margin), args.project_id),
         )
 
@@ -1504,40 +1526,57 @@ def project_profitability(conn, args):
     if total_billed > 0:
         margin = round_currency((profit / total_billed) * Decimal("100"))
 
-    # Employee breakdown from submitted/billed timesheets
+    # Employee breakdown from submitted/billed timesheets. Lines are read
+    # as TEXT and aggregated in Python with Decimal (see get-project): SQL
+    # arithmetic on hours/billing_rate is inexact on SQLite and refused on
+    # PostgreSQL, and grouping only by employee id while selecting the name
+    # is refused on PostgreSQL too.
     td = Table("timesheet_detail")
     ts = Table("timesheet")
     e = Table("employee")
-    billable_hrs = Case().when(td.billable == 1, td.hours + 0).else_(0)
-    total_cost_expr = (td.hours + 0) * (td.billing_rate + 0)
-    billable_amt = Case().when(td.billable == 1, (td.hours + 0) * (td.billing_rate + 0)).else_(0)
     emp_q = (Q.from_(td)
              .join(ts).on(td.timesheet_id == ts.id)
              .left_join(e).on(ts.employee_id == e.id)
              .select(
                  ts.employee_id,
                  e.full_name.as_("employee_name"),
-                 DecimalSum(td.hours).as_("total_hours"),
-                 fn.Sum(billable_hrs).as_("billable_hours"),
-                 fn.Sum(total_cost_expr).as_("total_cost"),
-                 fn.Sum(billable_amt).as_("billable_amount"),
+                 td.hours,
+                 td.billing_rate,
+                 td.billable,
              )
              .where(td.project_id == P())
-             .where(ts.status.isin(["submitted", "billed"]))
-             .groupby(ts.employee_id)
-             .orderby(Field("total_hours"), order=Order.desc))
-    employee_rows = conn.execute(emp_q.get_sql(), (args.project_id,)).fetchall()
+             .where(ts.status.isin(["submitted", "billed"])))
+    detail_rows = conn.execute(emp_q.get_sql(), (args.project_id,)).fetchall()
+
+    by_employee = {}
+    for line in detail_rows:
+        eid = line["employee_id"]
+        entry = by_employee.setdefault(eid, {
+            "employee_id": eid,
+            "employee_name": line["employee_name"],
+            "total_hours": Decimal("0"),
+            "billable_hours": Decimal("0"),
+            "total_cost": Decimal("0"),
+            "billable_amount": Decimal("0"),
+        })
+        hours = to_decimal(line["hours"])
+        rate = to_decimal(line["billing_rate"])
+        entry["total_hours"] += hours
+        entry["total_cost"] += hours * rate
+        if int(line["billable"]) == 1:
+            entry["billable_hours"] += hours
+            entry["billable_amount"] += hours * rate
 
     employees = []
-    for row in employee_rows:
-        r = row_to_dict(row)
+    for entry in sorted(by_employee.values(),
+                        key=lambda d: (-d["total_hours"], d["employee_id"])):
         employees.append({
-            "employee_id": r["employee_id"],
-            "employee_name": r["employee_name"],
-            "total_hours": str(round_currency(to_decimal(str(r["total_hours"])))),
-            "billable_hours": str(round_currency(to_decimal(str(r["billable_hours"])))),
-            "total_cost": str(round_currency(to_decimal(str(r["total_cost"])))),
-            "billable_amount": str(round_currency(to_decimal(str(r["billable_amount"])))),
+            "employee_id": entry["employee_id"],
+            "employee_name": entry["employee_name"],
+            "total_hours": str(round_currency(entry["total_hours"])),
+            "billable_hours": str(round_currency(entry["billable_hours"])),
+            "total_cost": str(round_currency(entry["total_cost"])),
+            "billable_amount": str(round_currency(entry["billable_amount"])),
         })
 
     # Cost variance
@@ -1656,56 +1695,75 @@ def resource_utilization(conn, args):
     e = Table("employee")
     params = [args.company_id]
 
-    billable_hrs = Case().when(td.billable == 1, td.hours + 0).else_(0)
-    non_billable_hrs = Case().when(td.billable == 0, td.hours + 0).else_(0)
-    billable_amt = Case().when(td.billable == 1, (td.hours + 0) * (td.billing_rate + 0)).else_(0)
-
-    base_q = (Q.from_(td)
-              .join(ts).on(td.timesheet_id == ts.id)
-              .left_join(e).on(ts.employee_id == e.id)
-              .where(ts.company_id == P())
-              .where(ts.status.isin(["submitted", "billed"])))
+    # Lines are read as TEXT and aggregated in Python with Decimal (see
+    # get-project): SQL arithmetic on hours/billing_rate is inexact on
+    # SQLite and refused on PostgreSQL, text ordering misranks employees,
+    # and grouping only by employee id while selecting the name is refused
+    # on PostgreSQL too.
+    lines_q = (Q.from_(td)
+               .join(ts).on(td.timesheet_id == ts.id)
+               .left_join(e).on(ts.employee_id == e.id)
+               .select(
+                   ts.employee_id,
+                   e.full_name.as_("employee_name"),
+                   td.project_id,
+                   td.hours,
+                   td.billing_rate,
+                   td.billable,
+               )
+               .where(ts.company_id == P())
+               .where(ts.status.isin(["submitted", "billed"])))
 
     if args.from_date:
-        base_q = base_q.where(td.date >= P())
+        lines_q = lines_q.where(td.date >= P())
         params.append(args.from_date)
 
     if args.to_date:
-        base_q = base_q.where(td.date <= P())
+        lines_q = lines_q.where(td.date <= P())
         params.append(args.to_date)
 
-    util_q = (base_q
-              .select(
-                  ts.employee_id,
-                  e.full_name.as_("employee_name"),
-                  DecimalSum(td.hours).as_("total_hours"),
-                  fn.Sum(billable_hrs).as_("billable_hours"),
-                  fn.Sum(non_billable_hrs).as_("non_billable_hours"),
-                  fn.Count(td.project_id, alias="project_count").distinct(),
-                  fn.Sum(billable_amt).as_("billable_amount"),
-              )
-              .groupby(ts.employee_id)
-              .orderby(Field("total_hours"), order=Order.desc))
-    rows = conn.execute(util_q.get_sql(), params).fetchall()
+    detail_rows = conn.execute(lines_q.get_sql(), params).fetchall()
+
+    by_employee = {}
+    for line in detail_rows:
+        eid = line["employee_id"]
+        entry = by_employee.setdefault(eid, {
+            "employee_id": eid,
+            "employee_name": line["employee_name"],
+            "total_hours": Decimal("0"),
+            "billable_hours": Decimal("0"),
+            "non_billable_hours": Decimal("0"),
+            "project_ids": set(),
+            "billable_amount": Decimal("0"),
+        })
+        hours = to_decimal(line["hours"])
+        rate = to_decimal(line["billing_rate"])
+        entry["total_hours"] += hours
+        entry["project_ids"].add(line["project_id"])
+        if int(line["billable"]) == 1:
+            entry["billable_hours"] += hours
+            entry["billable_amount"] += hours * rate
+        else:
+            entry["non_billable_hours"] += hours
 
     employees = []
-    for row in rows:
-        r = row_to_dict(row)
-        total_h = to_decimal(str(r["total_hours"]))
-        billable_h = to_decimal(str(r["billable_hours"]))
+    for entry in sorted(by_employee.values(),
+                        key=lambda d: (-d["total_hours"], d["employee_id"])):
+        total_h = entry["total_hours"]
+        billable_h = entry["billable_hours"]
         utilization = Decimal("0")
         if total_h > 0:
             utilization = round_currency((billable_h / total_h) * Decimal("100"))
 
         employees.append({
-            "employee_id": r["employee_id"],
-            "employee_name": r["employee_name"],
+            "employee_id": entry["employee_id"],
+            "employee_name": entry["employee_name"],
             "total_hours": str(round_currency(total_h)),
             "billable_hours": str(round_currency(billable_h)),
-            "non_billable_hours": str(round_currency(to_decimal(str(r["non_billable_hours"])))),
+            "non_billable_hours": str(round_currency(entry["non_billable_hours"])),
             "utilization_percent": str(utilization),
-            "project_count": r["project_count"],
-            "billable_amount": str(round_currency(to_decimal(str(r["billable_amount"])))),
+            "project_count": len(entry["project_ids"]),
+            "billable_amount": str(round_currency(entry["billable_amount"])),
         })
 
     # Summary totals
@@ -1742,16 +1800,7 @@ def status_action(conn, args):
     Returns active projects count, overdue tasks, upcoming milestones,
     recent timesheets.
     """
-    company_id = args.company_id
-    if not company_id:
-        first_q = Q.from_(_t_company).select(_t_company.id).limit(1)
-        row = conn.execute(first_q.get_sql()).fetchone()
-        if not row:
-            err("No company found. Create one with erpclaw first.",
-                 suggestion="Run 'tutorial' to create a demo company, or 'setup company' to create your own.")
-        company_id = row["id"]
-
-    _validate_company_exists(conn, company_id)
+    company_id = resolve_scope_company(conn, args.company_id, getattr(args, "company_name", None))
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -1783,17 +1832,18 @@ def status_action(conn, args):
                  .limit(20))
     overdue_tasks = conn.execute(overdue_q.get_sql(), (company_id, today)).fetchall()
 
-    # Upcoming milestones: pending milestones within next 30 days
-    # Uses date(?, '+30 days') SQLite function -- keep as raw SQL
+    # Upcoming milestones: pending milestones within next 30 days. The window
+    # end is rendered per dialect at call time.
+    window_end = str(date_add_days("?", "30", "+"))
     upcoming_milestones = conn.execute(
-        """SELECT m.id, m.milestone_name, m.target_date, m.status,
+        f"""SELECT m.id, m.milestone_name, m.target_date, m.status,
                   m.project_id, p.project_name
            FROM milestone m
            JOIN project p ON m.project_id = p.id
            WHERE p.company_id = ?
              AND m.status = 'pending'
              AND m.target_date >= ?
-             AND m.target_date <= date(?, '+30 days')
+             AND m.target_date <= {window_end}
            ORDER BY m.target_date
            LIMIT 20""",
         (company_id, today, today),
@@ -1826,20 +1876,26 @@ def status_action(conn, args):
                 .limit(10))
     recent_timesheets = conn.execute(recent_q.get_sql(), (company_id,)).fetchall()
 
-    # Hours summary this month
+    # Hours summary this month, aggregated in Python with Decimal (see
+    # get-project): SQL arithmetic on hours is inexact on SQLite and
+    # refused on PostgreSQL.
     month_start = datetime.now(timezone.utc).strftime("%Y-%m-01")
     td = _t_ts_detail
-    billable_hrs = Case().when(td.billable == 1, td.hours + 0).else_(0)
     hrs_q = (Q.from_(td)
              .join(ts_t).on(td.timesheet_id == ts_t.id)
-             .select(
-                 fn.Coalesce(DecimalSum(td.hours), ValueWrapper("0")).as_("total_hours"),
-                 fn.Coalesce(fn.Sum(billable_hrs), 0).as_("billable_hours"),
-             )
+             .select(td.hours, td.billable)
              .where(ts_t.company_id == P())
              .where(ts_t.status.isin(["submitted", "billed"]))
              .where(td.date >= P()))
-    hours_this_month = conn.execute(hrs_q.get_sql(), (company_id, month_start)).fetchone()
+    month_lines = conn.execute(hrs_q.get_sql(), (company_id, month_start)).fetchall()
+    month_total = Decimal("0")
+    month_billable = Decimal("0")
+    for line in month_lines:
+        hours = to_decimal(line["hours"])
+        month_total += hours
+        if int(line["billable"]) == 1:
+            month_billable += hours
+    hours_this_month = {"total_hours": month_total, "billable_hours": month_billable}
 
     ok({
         "company_id": company_id,
@@ -1852,10 +1908,26 @@ def status_action(conn, args):
         "missed_milestones": [row_to_dict(r) for r in missed_milestones],
         "recent_timesheets": [row_to_dict(r) for r in recent_timesheets],
         "hours_this_month": {
-            "total": str(round_currency(to_decimal(str(hours_this_month["total_hours"])))),
-            "billable": str(round_currency(to_decimal(str(hours_this_month["billable_hours"])))),
+            "total": str(round_currency(to_decimal(hours_this_month["total_hours"]))),
+            "billable": str(round_currency(to_decimal(hours_this_month["billable_hours"]))),
         },
     })
+
+
+def _resolve_company_flag(conn, args):
+    """Resolve --company (name or id) into args.company_id.
+
+    main() calls this once before dispatch. An id passed through --company
+    keeps working: a bound read checks whether the value is exactly an
+    existing company.id first, and only otherwise resolves it as an exact
+    company name (a miss refuses).
+    """
+    if getattr(args, "company_name", None) and not getattr(args, "company_id", None):
+        probe = (Q.from_(_t_company).select(_t_company.id).where(_t_company.id == P()))
+        if conn.execute(probe.get_sql(), (args.company_name,)).fetchone():
+            args.company_id = args.company_name
+            return
+        args.company_id = resolve_company_id(conn, None, args.company_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1896,6 +1968,7 @@ def main():
 
     # Entity IDs
     parser.add_argument("--company-id")
+    parser.add_argument("--company", dest="company_name", default=None)
     parser.add_argument("--project-id")
     parser.add_argument("--task-id")
     parser.add_argument("--milestone-id")
@@ -1947,8 +2020,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check
@@ -1959,12 +2031,14 @@ def main():
         conn.close()
         sys.exit(1)
 
+    _resolve_company_flag(conn, args)
+
     try:
         ACTIONS[args.action](conn, args)
     except Exception as e:
         conn.rollback()
         sys.stderr.write(f"[erpclaw-projects] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 

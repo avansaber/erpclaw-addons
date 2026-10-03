@@ -17,7 +17,8 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
+    from erpclaw_lib.dependencies import table_exists
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
@@ -101,15 +102,11 @@ def main():
     check_unknown_args(parser, unknown)
 
     # DB setup
-    db_path = args.db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)
     conn = get_connection(db_path)
 
     # Check required tables exist
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-    missing = [t for t in REQUIRED_TABLES if t not in tables]
+    missing = [t for t in REQUIRED_TABLES if not table_exists(conn, t)]
     if missing:
         conn.close()
         err(f"Missing tables: {', '.join(missing)}. Run init_db.py first.",

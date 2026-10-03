@@ -74,7 +74,6 @@ assertion into a recorded measurement. Read it back with
 The other eight `table-drop` migrations do NOT do this — none of them counts
 anything before dropping — which is pending row M109, not a claim this file
 makes on their behalf. Convention + gate:
-`planning/simlogs/m102_SIM_2026-08-12.md`,
 `testing/unit/L0/test_migration_audit_trail.py`.
 
 Authored through the seam (ADR-0034): `erpclaw_lib.db.get_connection` for the
@@ -88,8 +87,6 @@ ratchet matches. It scans string literals as well as code, deliberately, because
 that is where real SQL lives — so a docstring that spelled them out would count
 itself as the bypass it is denying.)
 
-SIM: planning/simlogs/m63c_SIM_2026-08-12.md
-Plan home: planning/pending_items.md row M63.
 
 Usage:
     python3 007_retire_legacy_elimination_tables.py [--db-path PATH] [--report-only]
@@ -103,6 +100,7 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 # Deployed-lib bootstrap, guarded: production has nothing pre-imported so this
 # resolves the installed lib, while a caller that already bound a tree (tests,
@@ -157,6 +155,32 @@ _UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9_-]+")
 _URL_CREDENTIALS = re.compile(r"//[^/@]*@")
 
 
+def _display_database(db_path):
+    """Display text for a database location, with credentials removed.
+
+    A PostgreSQL URL keeps its scheme, host and database path so the
+    diagnostic still identifies the target, but loses user-info, the whole
+    query string and any fragment, any of which may carry secrets. A plain
+    SQLite file path is not a URL and is returned exactly as given. This
+    changes display text only: it never changes the connection target. For a
+    database URL, `_db_discriminator` applies the same user-info, query and
+    fragment removal before computing the archive filename stem and digest,
+    so the filename and the displayed text agree on what they omit; a plain
+    file path keeps the discriminator's earlier expression.
+    """
+    text = str(db_path or "")
+    if "://" not in text:
+        return text
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return _URL_CREDENTIALS.sub("//", text).split("?", 1)[0].split("#", 1)[0]
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def _now_stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -169,12 +193,21 @@ def _db_discriminator(db_path):
     `/srv/a/data.sqlite` and `/srv/b/data.sqlite` differ even though both stems
     read `data`.
 
-    Credentials are stripped BEFORE either half is computed, so a PostgreSQL URL
-    contributes its database name and nothing else — an archive filename sitting
+    Credentials are stripped BEFORE either half is computed, so for a
+    PostgreSQL URL the stem is the database name while the digest covers the
+    whole sanitized location (scheme, host, port and database path) with
+    user-info, query and fragment removed — an archive filename sitting
     in a support bundle is not a place for a password, and the digest must not
-    be a digest of one either.
+    be a digest of one either. For a URL the sanitized location drops
+    user-info, the entire query string and any fragment (shared with
+    `_display_database`, which is reused here); a plain SQLite file path is
+    not a URL and keeps its existing behaviour exactly.
     """
-    ident = _URL_CREDENTIALS.sub("//", str(db_path or "")).split("?", 1)[0]
+    raw = str(db_path or "")
+    if "://" in raw:
+        ident = _display_database(raw)
+    else:
+        ident = _URL_CREDENTIALS.sub("//", raw).split("?", 1)[0]
     stem = os.path.splitext(os.path.basename(ident.rstrip("/")))[0]
     stem = _UNSAFE_IN_FILENAME.sub("-", stem).strip("-")[:24] or "db"
     digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()[:8]
@@ -252,7 +285,7 @@ def _write_archive(db_path, rows):
     payload = {
         "migration": "erpclaw-growth:007_retire_legacy_elimination_tables",
         "archived_at": datetime.now(timezone.utc).isoformat(),
-        "database": db_path,
+        "database": _display_database(db_path),
         "note": ("Retired by M63-C. The gl_entry rows these entries point at "
                  "were NOT touched: reverse them with a journal entry if the "
                  "group elimination should come out of the operating books."),
@@ -309,7 +342,7 @@ def _require_audit_log(path, report_only):
     if seam.table_exists("audit_log", path):
         return
     if not report_only:
-        raise RuntimeError(_NO_AUDIT_LOG % path)
+        raise RuntimeError(_NO_AUDIT_LOG % _display_database(path))
     print("  report-only: audit_log is ABSENT — the real run would REFUSE to "
           "drop anything here (M102). Run the foundation install/upgrade first.")
 

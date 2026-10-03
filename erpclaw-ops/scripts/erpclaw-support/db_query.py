@@ -21,7 +21,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
     from erpclaw_lib.validation import check_input_lengths
@@ -867,9 +867,13 @@ def update_warranty_claim(conn, args):
 
     if args.cost is not None:
         try:
-            to_decimal(args.cost)
+            cost = to_decimal(args.cost)
         except Exception:
             err(f"--cost must be a valid decimal value, got: {args.cost}")
+        if not cost.is_finite():
+            err(f"--cost must be a valid decimal value, got: {args.cost}")
+        if cost < 0:
+            err("--cost cannot be negative")
         data["cost"] = P()
         values.append(args.cost)
 
@@ -1508,8 +1512,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check

@@ -199,11 +199,11 @@ File-import path (OFX / CAMT.053 / MT940 / BAI2) + matching engine. Owns
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
 | `integration-import-bank-statement` | `--file` and (`--bank-account-name` or `--bank-account-id`) | `--company --company-id --format` (auto\|ofx\|camt053\|mt940\|bai2) |
-| `integration-list-bank-statements` | | `--company-id --bank-account-id --limit --offset` |
+| `integration-list-bank-statements` | | `--company-id (required when more than one company exists) --bank-account-id --limit --offset` |
 | `integration-get-bank-statement` | `--statement-id` | |
 | `integration-archive-bank-statement` | `--statement-id` | |
 | `integration-add-bank-match-rule` | `--name --match-field --match-operator --match-value --target-action` | `--company --company-id --target-id --priority` |
-| `integration-list-bank-match-rules` | | `--company-id --is-active` |
+| `integration-list-bank-match-rules` | | `--company-id (required when more than one company exists) --is-active` |
 | `integration-auto-match-bank-statement` | `--statement-id` | |
 | `integration-manual-match-bank-line` | `--line-id --target-action` | `--target-id` |
 | `integration-clear-bank-line-match` | `--line-id` | |
@@ -216,7 +216,7 @@ File-import path (OFX / CAMT.053 / MT940 / BAI2) + matching engine. Owns
 `map_to_customer` \| `ignore`. The bank account is resolved by name within the
 company (ADR-0015); a named-but-missing account hard-errors and never falls
 through to another account. Re-importing a file is idempotent (duplicate lines
-skipped via the `external_id` UNIQUE).
+skipped via the `external_id` UNIQUE). The `integration-bank-reconciliation-summary` reports `difference` as the statement balance minus the ledger balance, returning null `statement_balance`/`difference` with `statement_balance_missing: true` when the statement carries no closing balance.
 
 ### Quick Command Reference
 | User Says | Action |

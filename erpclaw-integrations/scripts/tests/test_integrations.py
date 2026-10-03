@@ -25,10 +25,37 @@ Actions tested:
   Reports:      integration-connector-usage-report, integration-sync-volume-report,
                 integration-error-rate-report
 """
+from decimal import Decimal
+
 import pytest
-from integration_helpers import call_action, ns, is_error, is_ok, load_db_query
+from integration_helpers import (
+    call_action, ns, is_error, is_ok, load_db_query,
+    seed_company, seed_naming_series,
+)
 
 mod = load_db_query()
+
+
+# Tables aggregated by the two read-only reports below. Neither report writes:
+# no INSERT/UPDATE, no audit() call — so a snapshot of every row must be
+# identical before and after. Neither action reaches the general ledger, so no
+# two-leg balance assertion can hold for them.
+_READ_REPORT_TABLES = (
+    "connv2_productivity_connector",
+    "connv2_booking_sync_log",
+    "connv2_delivery_order",
+    "connv2_realestate_lead",
+    "audit_log",
+)
+
+
+def _snapshot(conn):
+    """Full ordered row dump of every table the reports below read."""
+    return {
+        table: [tuple(row) for row in conn.execute(
+            "SELECT * FROM %s ORDER BY id" % table).fetchall()]
+        for table in _READ_REPORT_TABLES
+    }
 
 
 # =============================================================================
@@ -625,15 +652,103 @@ class TestProductivityConnector:
         assert result["total_count"] >= 1
 
     def test_sync_status_report(self, conn, env):
-        call_action(mod.integration_add_productivity_connector, conn, ns(
+        # Behavioural: the report aggregates the stored connector rows for
+        # this company only. Seed two google_workspace connectors (default
+        # flags: calendar=1, contacts=1, files=0) and one slack connector,
+        # plus one connector on a second company that must NOT leak in.
+        cid = env["company_id"]
+        for workspace in ("WS-A", "WS-B"):
+            added = call_action(mod.integration_add_productivity_connector, conn, ns(
+                company_id=cid,
+                platform="google_workspace",
+                workspace_id=workspace,
+            ))
+            assert is_ok(added), added
+        added = call_action(mod.integration_add_productivity_connector, conn, ns(
+            company_id=cid,
+            platform="slack",
+            workspace_id="WS-C",
+        ))
+        assert is_ok(added), added
+        other_company = seed_company(conn)
+        seed_naming_series(conn, other_company)
+        other = call_action(mod.integration_add_productivity_connector, conn, ns(
+            company_id=other_company,
+            platform="zoom",
+            workspace_id="WS-OTHER",
+        ))
+        assert is_ok(other), other
+
+        # Stored rows the report must aggregate, read back through the seam.
+        stored = conn.execute(
+            "SELECT platform, connector_status, sync_calendar, sync_contacts,"
+            " sync_files FROM connv2_productivity_connector"
+            " WHERE company_id = ?", (cid,)).fetchall()
+        assert len(stored) == 3
+        expected = {}
+        for platform, status, cal, con, fil in stored:
+            agg = expected.setdefault(platform, [0, 0, 0, 0, 0, 0])
+            agg[0] += 1
+            agg[1] += 1 if status == "active" else 0
+            agg[2] += 1 if status == "error" else 0
+            agg[3] += cal
+            agg[4] += con
+            agg[5] += fil
+
+        before = _snapshot(conn)
+        result = call_action(mod.integration_sync_status_report, conn, ns(
+            company_id=cid,
+        ))
+        assert is_ok(result), result
+        # Read-only: no row written, changed, or audited — other company's
+        # zoom connector included in the snapshot, untouched.
+        assert _snapshot(conn) == before
+
+        assert result["count"] == len(expected) == 2
+        by_platform = {row["platform"]: row for row in result["rows"]}
+        assert set(by_platform) == {"google_workspace", "slack"}
+        for platform, (total, active, errors, cal, con, fil) in expected.items():
+            row = by_platform[platform]
+            assert row["connector_count"] == total
+            assert row["active_count"] == active
+            assert row["error_count"] == errors
+            assert row["calendars_synced"] == cal
+            assert row["contacts_synced"] == con
+            assert row["files_synced"] == fil
+        # Exact values for the seeded shape (calendar+contacts on, files off).
+        google = by_platform["google_workspace"]
+        assert (google["connector_count"], google["active_count"],
+                google["error_count"]) == (2, 0, 0)
+        assert (google["calendars_synced"], google["contacts_synced"],
+                google["files_synced"]) == (2, 2, 0)
+        slack = by_platform["slack"]
+        assert (slack["connector_count"], slack["calendars_synced"],
+                slack["contacts_synced"], slack["files_synced"]) == (1, 1, 1, 0)
+        # Ordered by connector_count DESC.
+        assert [row["platform"] for row in result["rows"]] == [
+            "google_workspace", "slack"]
+
+    def test_sync_status_report_refuses_bad_company(self, conn, env):
+        # Refusal: missing and unknown companies are rejected with a truthful
+        # message, and the database is byte-identical afterwards — a refusal
+        # that half-writes is worse than no refusal.
+        seeded = call_action(mod.integration_add_productivity_connector, conn, ns(
             company_id=env["company_id"],
             platform="zoom",
         ))
-        result = call_action(mod.integration_sync_status_report, conn, ns(
-            company_id=env["company_id"],
+        assert is_ok(seeded), seeded
+        before = _snapshot(conn)
+        missing = call_action(mod.integration_sync_status_report, conn, ns(
+            company_id=None,
         ))
-        assert is_ok(result), result
-        assert "rows" in result
+        assert is_error(missing), missing
+        assert missing["message"] == "--company-id is required"
+        unknown = call_action(mod.integration_sync_status_report, conn, ns(
+            company_id="no-such-company",
+        ))
+        assert is_error(unknown), unknown
+        assert unknown["message"] == "Company no-such-company not found"
+        assert _snapshot(conn) == before
 
 
 # =============================================================================
@@ -659,13 +774,111 @@ class TestConnV2Reports:
         assert "delivery" in domains
 
     def test_sync_volume_report(self, conn, env):
+        # Behavioural: the report aggregates the stored booking sync logs,
+        # delivery orders and real-estate leads for this company only.
+        cid = env["company_id"]
+        booking = call_action(mod.integration_add_booking_connector, conn, ns(
+            company_id=cid, platform="airbnb", property_id="PROP-1",
+        ))
+        assert is_ok(booking), booking
+        first = call_action(mod.integration_sync_reservations, conn, ns(
+            connector_id=booking["id"], records_synced=10, errors=0,
+        ))
+        assert is_ok(first), first
+        second = call_action(mod.integration_sync_reservations, conn, ns(
+            connector_id=booking["id"], records_synced=5, errors=2,
+        ))
+        assert is_ok(second), second
+
+        delivery = call_action(mod.integration_add_delivery_connector, conn, ns(
+            company_id=cid, platform="doordash", store_id="STORE-1",
+        ))
+        assert is_ok(delivery), delivery
+        order = call_action(mod.integration_ingest_orders, conn, ns(
+            connector_id=delivery["id"], external_order_id="EXT-1",
+            total_amount="100.00", commission="10.00",
+        ))
+        assert is_ok(order), order
+
+        estate = call_action(mod.integration_add_realestate_connector, conn, ns(
+            company_id=cid, platform="zillow", agent_id="AGENT-1",
+        ))
+        assert is_ok(estate), estate
+        for name, source in (("Jane Buyer", "website"), ("Joe Seller", "referral")):
+            lead = call_action(mod.integration_capture_leads, conn, ns(
+                connector_id=estate["id"], contact_name=name,
+                lead_source=source,
+            ))
+            assert is_ok(lead), lead
+
+        # Second company whose rows must NOT leak into this company's report.
+        other_company = seed_company(conn)
+        seed_naming_series(conn, other_company)
+        other_booking = call_action(mod.integration_add_booking_connector, conn, ns(
+            company_id=other_company, platform="vrbo", property_id="PROP-X",
+        ))
+        assert is_ok(other_booking), other_booking
+        other_sync = call_action(mod.integration_sync_reservations, conn, ns(
+            connector_id=other_booking["id"], records_synced=99, errors=9,
+        ))
+        assert is_ok(other_sync), other_sync
+
+        # Stored rows the report must aggregate, read back through the seam.
+        logs = [tuple(row) for row in conn.execute(
+            "SELECT records_synced, errors, sync_status, company_id"
+            " FROM connv2_booking_sync_log WHERE company_id = ?"
+            " ORDER BY records_synced", (cid,)).fetchall()]
+        assert logs == [(5, 2, "failed", cid), (10, 0, "completed", cid)]
+        stored_order = conn.execute(
+            "SELECT total_amount, commission, net_amount, order_status"
+            " FROM connv2_delivery_order WHERE company_id = ?", (cid,)).fetchone()
+        # Money is text: exact strings, Decimal arithmetic, never float.
+        assert tuple(stored_order) == ("100.00", "10.00", "90.00", "received")
+        assert (Decimal(stored_order["total_amount"])
+                - Decimal(stored_order["commission"])
+                == Decimal(stored_order["net_amount"]))
+        leads = [tuple(row) for row in conn.execute(
+            "SELECT contact_name, lead_source, lead_status"
+            " FROM connv2_realestate_lead WHERE company_id = ?"
+            " ORDER BY contact_name", (cid,)).fetchall()]
+        assert leads == [("Jane Buyer", "website", "new"),
+                         ("Joe Seller", "referral", "new")]
+
+        before = _snapshot(conn)
         result = call_action(mod.integration_sync_volume_report, conn, ns(
-            company_id=env["company_id"],
+            company_id=cid,
         ))
         assert is_ok(result), result
-        assert "booking_syncs" in result
-        assert "delivery_orders" in result
-        assert "realestate_leads" in result
+        # Read-only: stored rows and audit log untouched.
+        assert _snapshot(conn) == before
+
+        assert result["booking_syncs"] == {
+            "total_syncs": 2, "total_records": 15, "total_errors": 2}
+        assert result["delivery_orders"] == {"total_orders": 1}
+        assert result["realestate_leads"] == {"total_leads": 2}
+        # Neither action reaches the general ledger: no GL postings exist for
+        # these tables, so no two-leg balance assertion can hold here.
+
+    def test_sync_volume_report_refuses_bad_company(self, conn, env):
+        # Refusal: missing and unknown companies are rejected with a truthful
+        # message, and the database is byte-identical afterwards — a refusal
+        # that half-writes is worse than no refusal.
+        booking = call_action(mod.integration_add_booking_connector, conn, ns(
+            company_id=env["company_id"], platform="airbnb",
+        ))
+        assert is_ok(booking), booking
+        before = _snapshot(conn)
+        missing = call_action(mod.integration_sync_volume_report, conn, ns(
+            company_id=None,
+        ))
+        assert is_error(missing), missing
+        assert missing["message"] == "--company-id is required"
+        unknown = call_action(mod.integration_sync_volume_report, conn, ns(
+            company_id="no-such-company",
+        ))
+        assert is_error(unknown), unknown
+        assert unknown["message"] == "Company no-such-company not found"
+        assert _snapshot(conn) == before
 
     def test_error_rate_report(self, conn, env):
         result = call_action(mod.integration_error_rate_report, conn, ns(

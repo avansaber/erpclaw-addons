@@ -5,7 +5,6 @@ POS session lifecycle — open, close, track cash float and totals.
 Imported by the unified erpclaw-pos db_query.py router.
 """
 import os
-import sqlite3
 import sys
 import uuid
 from datetime import datetime
@@ -17,7 +16,13 @@ if importlib.util.find_spec("erpclaw_lib") is None:
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.db import integrity_error_types
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
+try:
+    from transactions import is_cancelled_outside_pos
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from transactions import is_cancelled_outside_pos
 
 SKILL = "erpclaw-pos"
 
@@ -33,6 +38,20 @@ def _dec(val):
 
 def _round(val):
     return val.quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+
+def _exact_total(rows, column):
+    """Sum a fetched money column exactly with Decimal, never float."""
+    return sum((_dec(r[column]) for r in rows), Decimal("0"))
+
+
+def _is_return_document(status, grand_total) -> bool:
+    """A return document is a returned row whose stored total is signed.
+
+    The original sale keeps status returned with its unsigned total and
+    counts as a sale; only the negated return document (including -0.00)
+    counts as the return, reported as a positive figure."""
+    return status == "returned" and _dec(grand_total).is_signed()
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +94,7 @@ def open_session(conn, args):
         conn.execute(sql,
             (session_id, naming, profile_id, cashier_name, opening,
              "0", "0", 0, "open", company_id))
-    except sqlite3.IntegrityError as e:
+    except integrity_error_types() as e:
         sys.stderr.write(f"[{SKILL}] {e}\n")
         err("Session creation failed")
 
@@ -102,18 +121,24 @@ def get_session(conn, args):
 
     data = row_to_dict(row)
 
-    # Compute live totals from transactions
-    stats = conn.execute(
-        """SELECT
-             COUNT(*) as txn_count,
-             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as live_sales,
-             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as live_returns
-           FROM pos_transaction WHERE pos_session_id = ?""",
-        (sid,)).fetchone()
+    # Compute live totals from transactions. Money is exact text: fetch the
+    # rows and total them in Python with Decimal rather than summing a
+    # numeric cast in SQL.
+    t = Table("pos_transaction")
+    q = (Q.from_(t).select(t.status, t.grand_total)
+         .where(t.pos_session_id == P()))
+    lines = conn.execute(q.get_sql(), (sid,)).fetchall()
 
-    data["live_transaction_count"] = stats["txn_count"]
-    data["live_total_sales"] = str(_round(_dec(stats["live_sales"])))
-    data["live_total_returns"] = str(_round(_dec(stats["live_returns"])))
+    data["live_transaction_count"] = len(lines)
+    data["live_total_sales"] = str(_round(sum(
+        (_dec(r["grand_total"]) for r in lines
+         if not _is_return_document(r["status"], r["grand_total"])
+         and r["status"] in ("submitted", "returned")),
+        Decimal("0"))))
+    data["live_total_returns"] = str(_round(abs(sum(
+        (_dec(r["grand_total"]) for r in lines
+         if _is_return_document(r["status"], r["grand_total"])),
+        Decimal("0")))))
 
     # Rename status to session_status to avoid ok() overwrite
     data["session_status"] = data.pop("status", None)
@@ -185,52 +210,68 @@ def close_session(conn, args):
     if row["status"] != "open":
         err(f"Session {sid} is not open (current: {row['status']})")
 
+    in_flight = conn.execute(Q.from_(Table("pos_transaction")).select(Field("id"), Field("status"), Field("sales_invoice_id"), Field("return_against_id")).where(Field("pos_session_id") == P()).get_sql(), (sid,)).fetchall()
+    pending = sorted(r["id"] for r in in_flight if r["status"] in ("draft", "held") and r["sales_invoice_id"])
+    pending = sorted(set(pending) | {r["id"] for r in in_flight if r["status"] == "draft" and r["return_against_id"]})
+    voiding = [r["id"] for r in in_flight if is_cancelled_outside_pos(conn, r)]
+    pending = sorted(set(pending) | set(voiding))
+    if pending:
+        err(f"Session {sid} has a POS action in progress ({', '.join(pending)}); finish it before closing")
+
     closing = _round(_dec(closing_amount))
     opening = _dec(row["opening_amount"])
 
-    # PyPika: skipped — complex CASE+SUM+CAST aggregates in close-session queries
-    # Calculate totals from submitted transactions
-    stats = conn.execute(
-        """SELECT
-             COUNT(*) as txn_count,
-             COALESCE(SUM(CASE WHEN status = 'submitted' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as total_sales,
-             COALESCE(SUM(CASE WHEN status = 'returned' THEN CAST(grand_total AS NUMERIC) ELSE 0 END), 0) as total_returns
-           FROM pos_transaction WHERE pos_session_id = ?""",
-        (sid,)).fetchone()
+    # Money is exact text: fetch the rows and total them in Python with
+    # Decimal rather than summing a numeric cast in SQL.
+    t = Table("pos_transaction")
+    q = (Q.from_(t).select(t.status, t.grand_total, t.change_amount)
+         .where(t.pos_session_id == P()))
+    lines = conn.execute(q.get_sql(), (sid,)).fetchall()
 
-    total_sales = _round(_dec(stats["total_sales"]))
-    total_returns = _round(_dec(stats["total_returns"]))
-    txn_count = stats["txn_count"]
+    # A returned original stays a sale; only the return document is the
+    # return, reported as a positive figure.
+    total_sales = _round(sum(
+        (_dec(r["grand_total"]) for r in lines
+         if not _is_return_document(r["status"], r["grand_total"])
+         and r["status"] in ("submitted", "returned")),
+        Decimal("0")))
+    total_returns = _round(abs(sum(
+        (_dec(r["grand_total"]) for r in lines
+         if _is_return_document(r["status"], r["grand_total"])),
+        Decimal("0"))))
+    txn_count = len(lines)
 
-    # Calculate cash-only sales for expected amount
-    cash_stats = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as cash_total
-           FROM pos_payment pp
-           JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
-           WHERE pt.pos_session_id = ? AND pt.status = 'submitted'
-             AND pp.payment_method = 'cash'""",
-        (sid,)).fetchone()
-    cash_in = _round(_dec(cash_stats["cash_total"]))
+    # Also account for change given in cash on sales only.
+    total_change = _round(sum(
+        (_dec(r["change_amount"]) for r in lines
+         if not _is_return_document(r["status"], r["grand_total"])
+         and r["status"] in ("submitted", "returned")),
+        Decimal("0")))
 
-    # Cash returns
-    cash_returns = conn.execute(
-        """SELECT COALESCE(SUM(CAST(pp.amount AS NUMERIC)), 0) as cash_return
-           FROM pos_payment pp
-           JOIN pos_transaction pt ON pp.pos_transaction_id = pt.id
-           WHERE pt.pos_session_id = ? AND pt.status = 'returned'
-             AND pp.payment_method = 'cash'""",
-        (sid,)).fetchone()
-    cash_out = _round(_dec(cash_returns["cash_return"]))
+    pp = Table("pos_payment")
+    pt = Table("pos_transaction")
 
-    # Also account for change given in cash
-    change_given = conn.execute(
-        """SELECT COALESCE(SUM(CAST(change_amount AS NUMERIC)), 0) as total_change
-           FROM pos_transaction
-           WHERE pos_session_id = ? AND status = 'submitted'""",
-        (sid,)).fetchone()
-    total_change = _round(_dec(change_given["total_change"]))
+    cq = (Q.from_(pp).join(pt).on(pp.pos_transaction_id == pt.id)
+          .select(pp.amount, pt.status, pt.grand_total)
+          .where(pt.pos_session_id == P())
+          .where(pt.status.isin(["submitted", "returned"]))
+          .where(pp.payment_method == "cash"))
+    cash_rows = conn.execute(cq.get_sql(), (sid,)).fetchall()
 
-    expected = opening + cash_in - abs(cash_out) - total_change
+    # Calculate cash-only sales for expected amount; a returned original
+    # stays a sale and only the return document is the cash return.
+    cash_in = _round(sum(
+        (_dec(r["amount"]) for r in cash_rows
+         if not _is_return_document(r["status"], r["grand_total"])),
+        Decimal("0")))
+
+    # Cash returns as a positive figure.
+    cash_out = _round(abs(sum(
+        (_dec(r["amount"]) for r in cash_rows
+         if _is_return_document(r["status"], r["grand_total"])),
+        Decimal("0"))))
+
+    expected = opening + cash_in - cash_out - total_change
     expected = _round(expected)
     difference = _round(closing - expected)
 

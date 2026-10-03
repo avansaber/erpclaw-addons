@@ -324,6 +324,7 @@ def test_reconciliation_summary(banked):
     assert res["statement_balance"] == "6249.50"
     # nothing matched yet -> unmatched_total is the sum of the 4 lines
     assert res["unmatched_total"] == "3249.50"
+    assert res["difference"] == "4749.50"
 
 
 def test_add_rule_validation(banked):

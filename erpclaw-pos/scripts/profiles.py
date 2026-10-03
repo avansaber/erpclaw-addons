@@ -5,7 +5,6 @@ POS profile management — register types, warehouse/price list config,
 discount rules. Imported by the unified erpclaw-pos db_query.py router.
 """
 import os
-import sqlite3
 import sys
 import uuid
 from datetime import datetime
@@ -17,6 +16,7 @@ if importlib.util.find_spec("erpclaw_lib") is None:
 from erpclaw_lib.naming import get_next_name
 from erpclaw_lib.response import ok, err, row_to_dict
 from erpclaw_lib.audit import audit
+from erpclaw_lib.db import integrity_error_types
 from erpclaw_lib.query import Field, Order, P, Q, Table, dynamic_update, fn, insert_row, now as sql_now, update_row
 SKILL = "erpclaw-pos"
 
@@ -82,7 +82,7 @@ def add_pos_profile(conn, args):
             (profile_id, naming, name, warehouse_id, price_list_id,
              default_pm, allow_discount, max_discount_pct,
              auto_print, 1, company_id))
-    except sqlite3.IntegrityError as e:
+    except integrity_error_types() as e:
         sys.stderr.write(f"[{SKILL}] {e}\n")
         err("Profile creation failed — check for duplicates or invalid references")
 

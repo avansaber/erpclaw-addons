@@ -20,6 +20,8 @@ try:
 except ImportError:
     pass
 
+SKILL = "erpclaw-compliance"
+
 # Register naming prefixes
 ENTITY_PREFIXES.setdefault("control_test", "CTRL-")
 ENTITY_PREFIXES.setdefault("compliance_calendar", "CCAL-")
@@ -93,7 +95,7 @@ def add_control_test(conn, args):
         getattr(args, "next_test_date", None),
         args.company_id, now, now,
     ))
-    audit(conn, "control_test", test_id, "compliance-add-control-test", args.company_id)
+    audit(conn, SKILL, "compliance-add-control-test", "control_test", test_id)
     conn.commit()
     ok({
         "id": test_id, "naming_series": naming,
@@ -144,7 +146,7 @@ def update_control_test(conn, args):
     data["updated_at"] = sql_now()
     sql, params = dynamic_update("control_test", data, {"id": test_id})
     conn.execute(sql, params)
-    audit(conn, "control_test", test_id, "compliance-update-control-test", None, {"updated_fields": changed})
+    audit(conn, SKILL, "compliance-update-control-test", "control_test", test_id, new_values={"updated_fields": changed})
     conn.commit()
     ok({"id": test_id, "updated_fields": changed})
 
@@ -247,7 +249,7 @@ def execute_control_test(conn, args):
 
     sql, params = dynamic_update("control_test", upd_data, {"id": test_id})
     conn.execute(sql, params)
-    audit(conn, "control_test", test_id, "compliance-execute-control-test", None, {"test_result": test_result})
+    audit(conn, SKILL, "compliance-execute-control-test", "control_test", test_id, new_values={"test_result": test_result})
     conn.commit()
     ok({"id": test_id, "test_result_status": test_result, "test_date": _today_iso()})
 
@@ -296,7 +298,7 @@ def add_calendar_item(conn, args):
         getattr(args, "notes", None),
         args.company_id, now, now,
     ))
-    audit(conn, "compliance_calendar", item_id, "compliance-add-calendar-item", args.company_id)
+    audit(conn, SKILL, "compliance-add-calendar-item", "compliance_calendar", item_id)
     conn.commit()
     ok({"id": item_id, "title": title, "due_date": due_date, "calendar_status": "upcoming"})
 
@@ -347,7 +349,7 @@ def update_calendar_item(conn, args):
     data["updated_at"] = sql_now()
     sql, params = dynamic_update("compliance_calendar", data, {"id": item_id})
     conn.execute(sql, params)
-    audit(conn, "compliance_calendar", item_id, "compliance-update-calendar-item", None, {"updated_fields": changed})
+    audit(conn, SKILL, "compliance-update-calendar-item", "compliance_calendar", item_id, new_values={"updated_fields": changed})
     conn.commit()
     ok({"id": item_id, "updated_fields": changed})
 
@@ -422,7 +424,7 @@ def complete_calendar_item(conn, args):
                      data={"status": P(), "completed_date": P(), "updated_at": P()},
                      where={"id": P()})
     conn.execute(sql, ("completed", _today_iso(), now, item_id))
-    audit(conn, "compliance_calendar", item_id, "compliance-complete-calendar-item", None)
+    audit(conn, SKILL, "compliance-complete-calendar-item", "compliance_calendar", item_id)
     conn.commit()
     ok({"id": item_id, "calendar_status": "completed", "completed_date": _today_iso()})
 

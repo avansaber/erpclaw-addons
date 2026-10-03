@@ -79,12 +79,12 @@ def revenue_summary(conn, args):
     rows = conn.execute(
         f"""SELECT
                 COUNT(*) AS order_count,
-                COALESCE(SUM(CAST(subtotal_amount AS REAL)), 0) AS product_revenue,
-                COALESCE(SUM(CAST(shipping_amount AS REAL)), 0) AS shipping_revenue,
-                COALESCE(SUM(CAST(tax_amount AS REAL)), 0) AS tax_collected,
-                COALESCE(SUM(CAST(discount_amount AS REAL)), 0) AS total_discounts,
-                COALESCE(SUM(CAST(total_amount AS REAL)), 0) AS gross_revenue,
-                COALESCE(SUM(CAST(refunded_amount AS REAL)), 0) AS total_refunded
+                COALESCE(decimal_sum(subtotal_amount), '0') AS product_revenue,
+                COALESCE(decimal_sum(shipping_amount), '0') AS shipping_revenue,
+                COALESCE(decimal_sum(tax_amount), '0') AS tax_collected,
+                COALESCE(decimal_sum(discount_amount), '0') AS total_discounts,
+                COALESCE(decimal_sum(total_amount), '0') AS gross_revenue,
+                COALESCE(decimal_sum(refunded_amount), '0') AS total_refunded
             FROM shopify_order
             WHERE shopify_account_id = ?
               AND order_date >= ? AND order_date <= ?""",
@@ -129,9 +129,9 @@ def fee_summary(conn, args):
     row = conn.execute(
         """SELECT
                 COUNT(*) AS payout_count,
-                COALESCE(SUM(CAST(fee_amount AS REAL)), 0) AS total_fees,
-                COALESCE(SUM(CAST(gross_amount AS REAL)), 0) AS total_gross,
-                COALESCE(SUM(CAST(net_amount AS REAL)), 0) AS total_net
+                COALESCE(decimal_sum(fee_amount), '0') AS total_fees,
+                COALESCE(decimal_sum(gross_amount), '0') AS total_gross,
+                COALESCE(decimal_sum(net_amount), '0') AS total_net
             FROM shopify_payout
             WHERE shopify_account_id = ?
               AND issued_at >= ? AND issued_at <= ?""",
@@ -170,9 +170,9 @@ def refund_summary(conn, args):
     row = conn.execute(
         """SELECT
                 COUNT(*) AS refund_count,
-                COALESCE(SUM(CAST(r.refund_amount AS REAL)), 0) AS total_refund_amount,
-                COALESCE(SUM(CAST(r.tax_refund_amount AS REAL)), 0) AS total_tax_refunded,
-                COALESCE(SUM(CAST(r.shipping_refund_amount AS REAL)), 0) AS total_shipping_refunded,
+                COALESCE(decimal_sum(r.refund_amount), '0') AS total_refund_amount,
+                COALESCE(decimal_sum(r.tax_refund_amount), '0') AS total_tax_refunded,
+                COALESCE(decimal_sum(r.shipping_refund_amount), '0') AS total_shipping_refunded,
                 SUM(CASE WHEN r.refund_type = 'full' THEN 1 ELSE 0 END) AS full_refunds,
                 SUM(CASE WHEN r.refund_type = 'partial' THEN 1 ELSE 0 END) AS partial_refunds
             FROM shopify_refund r
@@ -237,9 +237,9 @@ def payout_detail_report(conn, args):
         # Transaction breakdown for this payout
         txns = conn.execute(
             """SELECT transaction_type, COUNT(*) as cnt,
-                      COALESCE(SUM(CAST(gross_amount AS REAL)), 0) as type_gross,
-                      COALESCE(SUM(CAST(fee_amount AS REAL)), 0) as type_fee,
-                      COALESCE(SUM(CAST(net_amount AS REAL)), 0) as type_net
+                      COALESCE(decimal_sum(gross_amount), '0') as type_gross,
+                      COALESCE(decimal_sum(fee_amount), '0') as type_fee,
+                      COALESCE(decimal_sum(net_amount), '0') as type_net
                FROM shopify_payout_transaction
                WHERE shopify_payout_id_local = ?
                GROUP BY transaction_type""",
@@ -300,18 +300,19 @@ def product_revenue_report(conn, args):
                 li.sku,
                 li.title,
                 SUM(li.quantity) AS total_quantity,
-                COALESCE(SUM(CAST(li.total_amount AS REAL)), 0) AS total_revenue,
-                COALESCE(SUM(CAST(li.discount_amount AS REAL)), 0) AS total_discounts,
-                COALESCE(SUM(CAST(li.tax_amount AS REAL)), 0) AS total_tax,
+                COALESCE(decimal_sum(li.total_amount), '0') AS total_revenue,
+                COALESCE(decimal_sum(li.discount_amount), '0') AS total_discounts,
+                COALESCE(decimal_sum(li.tax_amount), '0') AS total_tax,
                 COUNT(DISTINCT li.shopify_order_id_local) AS order_count
             FROM shopify_order_line_item li
             JOIN shopify_order o ON li.shopify_order_id_local = o.id
             WHERE o.shopify_account_id = ?
               AND o.order_date >= ? AND o.order_date <= ?
-            GROUP BY li.sku, li.title
-            ORDER BY total_revenue DESC""",
+            GROUP BY li.sku, li.title""",
         (shopify_account_id, date_from, date_to)
     ).fetchall()
+
+    rows = sorted(rows, key=lambda r: to_decimal(str(r["total_revenue"])), reverse=True)
 
     products = []
     for r in rows:
@@ -351,8 +352,8 @@ def customer_revenue_report(conn, args):
                 o.customer_id,
                 c.name AS customer_name,
                 COUNT(*) AS order_count,
-                COALESCE(SUM(CAST(o.total_amount AS REAL)), 0) AS total_revenue,
-                COALESCE(SUM(CAST(o.refunded_amount AS REAL)), 0) AS total_refunded,
+                COALESCE(decimal_sum(o.total_amount), '0') AS total_revenue,
+                COALESCE(decimal_sum(o.refunded_amount), '0') AS total_refunded,
                 MIN(o.order_date) AS first_order,
                 MAX(o.order_date) AS last_order
             FROM shopify_order o
@@ -360,10 +361,11 @@ def customer_revenue_report(conn, args):
             WHERE o.shopify_account_id = ?
               AND o.order_date >= ? AND o.order_date <= ?
               AND o.customer_id IS NOT NULL
-            GROUP BY o.customer_id
-            ORDER BY total_revenue DESC""",
+            GROUP BY o.customer_id""",
         (shopify_account_id, date_from, date_to)
     ).fetchall()
+
+    rows = sorted(rows, key=lambda r: to_decimal(str(r["total_revenue"])), reverse=True)
 
     customers = []
     for r in rows:
@@ -406,7 +408,7 @@ def shopify_status(conn, args):
                 SUM(CASE WHEN gl_status = 'posted' THEN 1 ELSE 0 END) AS posted,
                 SUM(CASE WHEN gl_status = 'pending' THEN 1 ELSE 0 END) AS pending,
                 SUM(CASE WHEN gl_status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                COALESCE(SUM(CAST(total_amount AS REAL)), 0) AS total_revenue
+                COALESCE(decimal_sum(total_amount), '0') AS total_revenue
             FROM shopify_order
             WHERE shopify_account_id = ?""",
         (shopify_account_id,)
@@ -418,7 +420,7 @@ def shopify_status(conn, args):
                 COUNT(*) AS total_payouts,
                 SUM(CASE WHEN reconciliation_status = 'unreconciled' THEN 1 ELSE 0 END) AS unreconciled,
                 SUM(CASE WHEN reconciliation_status != 'unreconciled' THEN 1 ELSE 0 END) AS reconciled,
-                COALESCE(SUM(CAST(net_amount AS REAL)), 0) AS total_net_paid
+                COALESCE(decimal_sum(net_amount), '0') AS total_net_paid
             FROM shopify_payout
             WHERE shopify_account_id = ?""",
         (shopify_account_id,)
@@ -428,7 +430,7 @@ def shopify_status(conn, args):
     refund_stats = conn.execute(
         """SELECT
                 COUNT(*) AS total_refunds,
-                COALESCE(SUM(CAST(r.refund_amount AS REAL)), 0) AS total_refunded
+                COALESCE(decimal_sum(r.refund_amount), '0') AS total_refunded
             FROM shopify_refund r
             JOIN shopify_order o ON r.shopify_order_id_local = o.id
             WHERE o.shopify_account_id = ?""",
@@ -440,7 +442,7 @@ def shopify_status(conn, args):
         """SELECT
                 COUNT(*) AS total_disputes,
                 SUM(CASE WHEN status = 'needs_response' THEN 1 ELSE 0 END) AS needs_response,
-                COALESCE(SUM(CAST(amount AS REAL)), 0) AS total_disputed
+                COALESCE(decimal_sum(amount), '0') AS total_disputed
             FROM shopify_dispute
             WHERE shopify_account_id = ?""",
         (shopify_account_id,)
@@ -468,7 +470,7 @@ def shopify_status(conn, args):
     ok({
         "shopify_account_id": shopify_account_id,
         "shop_name": acct_row["shop_name"],
-        "status": acct_row["status"],
+        "document_status": acct_row["status"],
         "orders": {
             "total": order_stats["total_orders"],
             "gl_posted": order_stats["posted"] or 0,

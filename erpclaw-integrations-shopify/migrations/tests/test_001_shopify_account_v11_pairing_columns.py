@@ -242,3 +242,67 @@ def test_every_v11_column_is_declared_by_the_installer_too():
     declared = {c.name for c in installer.SHOPIFY_ACCOUNT.columns}
     assert set(V11_COLUMNS) <= declared
     assert [column for column, _ in mig.ADD_COLUMNS] == V11_COLUMNS
+
+
+def _stub_seam_noop(monkeypatch, seen):
+    def _stub_exists(name, db_path=None):
+        seen.append(db_path)
+        return True
+
+    def _stub_columns(table, db_path=None):
+        seen.append(db_path)
+        return list(V11_COLUMNS)
+
+    def _no_connect(target):
+        raise AssertionError("no-op run must not open a connection")
+
+    monkeypatch.setattr(seam, "table_exists", _stub_exists)
+    monkeypatch.setattr(seam, "column_names", _stub_columns)
+    monkeypatch.setattr(mig, "get_connection", _no_connect)
+
+
+def test_postgresql_url_argument_reaches_the_seam(monkeypatch):
+    """The runner's resolved URL is the database the migration questions."""
+    monkeypatch.setenv("ERPCLAW_DB_DIALECT", "postgresql")
+    monkeypatch.delenv("ERPCLAW_DB_URL", raising=False)
+    monkeypatch.setenv("ERPCLAW_DB_PATH", "postgresql://h/a")
+    seen = []
+    _stub_seam_noop(monkeypatch, seen)
+
+    result = mig.run_migration("postgresql://h/b")
+
+    assert result["added"] == []
+    assert sorted(result["already_present"]) == sorted(V11_COLUMNS)
+    assert seen != []
+    assert all(target == "postgresql://h/b" for target in seen)
+
+
+def test_postgresql_file_argument_yields_no_target(monkeypatch):
+    """A file path on PostgreSQL is not a URL, so the seam resolves itself."""
+    monkeypatch.setenv("ERPCLAW_DB_DIALECT", "postgresql")
+    monkeypatch.delenv("ERPCLAW_DB_URL", raising=False)
+    monkeypatch.setenv("ERPCLAW_DB_PATH", "postgresql://h/a")
+    seen = []
+    _stub_seam_noop(monkeypatch, seen)
+
+    result = mig.run_migration("/tmp/x.sqlite")
+
+    assert result["added"] == []
+    assert sorted(result["already_present"]) == sorted(V11_COLUMNS)
+    assert seen != []
+    assert all(target is None for target in seen)
+
+
+def test_sqlite_path_reaches_the_seam_verbatim(monkeypatch):
+    """On SQLite the argument reaches the seam exactly as passed."""
+    monkeypatch.setenv("ERPCLAW_DB_DIALECT", "sqlite")
+    monkeypatch.delenv("ERPCLAW_DB_URL", raising=False)
+    seen = []
+    _stub_seam_noop(monkeypatch, seen)
+
+    result = mig.run_migration("/tmp/x.sqlite")
+
+    assert result["added"] == []
+    assert sorted(result["already_present"]) == sorted(V11_COLUMNS)
+    assert seen != []
+    assert all(target == "/tmp/x.sqlite" for target in seen)

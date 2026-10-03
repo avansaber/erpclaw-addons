@@ -20,6 +20,8 @@ try:
 except ImportError:
     pass
 
+SKILL = "erpclaw-compliance"
+
 # Register naming prefixes
 ENTITY_PREFIXES.setdefault("audit_plan", "AUD-")
 
@@ -75,7 +77,7 @@ def add_audit_plan(conn, args):
         getattr(args, "notes", None),
         args.company_id, now, now,
     ))
-    audit(conn, "audit_plan", plan_id, "compliance-add-audit-plan", args.company_id)
+    audit(conn, SKILL, "compliance-add-audit-plan", "audit_plan", plan_id)
     conn.commit()
     ok({"id": plan_id, "naming_series": naming, "name": name, "plan_status": "draft"})
 
@@ -116,7 +118,7 @@ def update_audit_plan(conn, args):
     data["updated_at"] = sql_now()
     sql, params = dynamic_update("audit_plan", data, {"id": plan_id})
     conn.execute(sql, params)
-    audit(conn, "audit_plan", plan_id, "compliance-update-audit-plan", None, {"updated_fields": changed})
+    audit(conn, SKILL, "compliance-update-audit-plan", "audit_plan", plan_id, new_values={"updated_fields": changed})
     conn.commit()
     ok({"id": plan_id, "updated_fields": changed})
 
@@ -204,7 +206,7 @@ def start_audit(conn, args):
                      data={"status": P(), "actual_start": P(), "updated_at": P()},
                      where={"id": P()})
     conn.execute(sql, ("in_progress", now, now, plan_id))
-    audit(conn, "audit_plan", plan_id, "compliance-start-audit", None)
+    audit(conn, SKILL, "compliance-start-audit", "audit_plan", plan_id)
     conn.commit()
     ok({"id": plan_id, "plan_status": "in_progress", "actual_start": now})
 
@@ -228,7 +230,7 @@ def complete_audit(conn, args):
                      data={"status": P(), "actual_end": P(), "updated_at": P()},
                      where={"id": P()})
     conn.execute(sql, ("completed", now, now, plan_id))
-    audit(conn, "audit_plan", plan_id, "compliance-complete-audit", None)
+    audit(conn, SKILL, "compliance-complete-audit", "audit_plan", plan_id)
     conn.commit()
     ok({"id": plan_id, "plan_status": "completed", "actual_end": now})
 
@@ -273,7 +275,7 @@ def add_audit_finding(conn, args):
         getattr(args, "assigned_to", None),
         args.company_id, now, now,
     ))
-    audit(conn, "audit_finding", finding_id, "compliance-add-audit-finding", args.company_id)
+    audit(conn, SKILL, "compliance-add-audit-finding", "audit_finding", finding_id)
     conn.commit()
     ok({"id": finding_id, "title": title, "finding_type": finding_type, "finding_status": "open"})
 

@@ -21,14 +21,14 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
     from erpclaw_lib.validation import check_input_lengths
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, Criterion, insert_row
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, Criterion, insert_row, now as sql_now
     from erpclaw_lib.voucher_types import canonical_voucher_type
     from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
@@ -36,6 +36,14 @@ except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company"]
 
@@ -398,6 +406,23 @@ def add_quality_inspection(conn, args):
     })
 
 
+def _derive_inspection_status(readings) -> str:
+    """Derive an inspection's status from its reading rows.
+
+    All readings accepted -> 'accepted'; all rejected -> 'rejected';
+    otherwise -> 'partially_accepted'.
+    """
+    readings = list(readings)
+    total_count = len(readings)
+    accepted_count = sum(1 for r in readings if r["status"] == "accepted")
+    rejected_count = sum(1 for r in readings if r["status"] == "rejected")
+    if accepted_count == total_count:
+        return "accepted"
+    if rejected_count == total_count:
+        return "rejected"
+    return "partially_accepted"
+
+
 # ---------------------------------------------------------------------------
 # 5. record-inspection-readings
 # ---------------------------------------------------------------------------
@@ -416,7 +441,8 @@ def record_inspection_readings(conn, args):
     if not args.readings:
         err("--readings is required (JSON array)")
 
-    _validate_inspection_exists(conn, args.quality_inspection_id)
+    qi = _validate_inspection_exists(conn, args.quality_inspection_id)
+    previous_inspection_status = qi["status"]
 
     readings = _parse_json_arg(args.readings, "readings")
     if not readings or not isinstance(readings, list):
@@ -511,6 +537,23 @@ def record_inspection_readings(conn, args):
                 "remarks": remarks,
             })
 
+    rq = (Q.from_(T_qir).select(T_qir.id, T_qir.status)
+          .where(T_qir.quality_inspection_id == P()))
+    stored_readings = conn.execute(rq.get_sql(), (args.quality_inspection_id,)).fetchall()
+    if stored_readings:
+        new_inspection_status = _derive_inspection_status(stored_readings)
+    else:
+        new_inspection_status = previous_inspection_status
+    if new_inspection_status != previous_inspection_status:
+        uq = (Q.update(T_qi).set(T_qi.status, P()).where(T_qi.id == P()))
+        conn.execute(uq.get_sql(), (new_inspection_status, args.quality_inspection_id))
+        audit(conn, "erpclaw-quality", "record-inspection-readings", "quality_inspection",
+               args.quality_inspection_id,
+               old_values={"status": previous_inspection_status},
+               new_values={"status": new_inspection_status},
+               description=(f"Inspection status {previous_inspection_status} -> "
+                            f"{new_inspection_status}"))
+
     audit(conn, "erpclaw-quality", "record-inspection-readings", "quality_inspection",
            args.quality_inspection_id,
            description=f"Recorded {len(updated_readings)} reading(s)")
@@ -518,6 +561,8 @@ def record_inspection_readings(conn, args):
 
     ok({
         "readings": updated_readings,
+        "inspection_status": new_inspection_status,
+        "previous_inspection_status": previous_inspection_status,
         "message": f"Recorded {len(updated_readings)} reading(s) for inspection {args.quality_inspection_id}",
     })
 
@@ -555,12 +600,7 @@ def evaluate_inspection(conn, args):
 
     old_status = qi["status"]
 
-    if accepted_count == total_count:
-        new_status = "accepted"
-    elif rejected_count == total_count:
-        new_status = "rejected"
-    else:
-        new_status = "partially_accepted"
+    new_status = _derive_inspection_status(readings)
 
     uq = (Q.update(T_qi).set(T_qi.status, P()).where(T_qi.id == P()))
     conn.execute(uq.get_sql(), (new_status, args.quality_inspection_id))
@@ -793,7 +833,7 @@ def update_non_conformance(conn, args):
     if not updates:
         err("No fields to update. Provide at least one optional flag.")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
 
     values.append(args.non_conformance_id)
     sql = f"UPDATE non_conformance SET {', '.join(updates)} WHERE id = ?"
@@ -985,7 +1025,7 @@ def update_quality_goal(conn, args):
     if not updates:
         err("No fields to update. Provide at least one optional flag.")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
 
     values.append(args.quality_goal_id)
     sql = f"UPDATE quality_goal SET {', '.join(updates)} WHERE id = ?"
@@ -1008,6 +1048,19 @@ def update_quality_goal(conn, args):
     })
 
 
+def _quality_reference_company(conn, reference_type, reference_id):
+    if not reference_type or not reference_id:
+        return None
+    if reference_type not in VALID_REFERENCE_TYPES:
+        return None
+    ref_table = Table(reference_type)
+    query = Q.from_(ref_table).select(ref_table.company_id).where(ref_table.id == P())
+    row = conn.execute(query.get_sql(), (reference_id,)).fetchone()
+    if row is None:
+        return None
+    return row["company_id"]
+
+
 # ---------------------------------------------------------------------------
 # 13. quality-dashboard
 # ---------------------------------------------------------------------------
@@ -1016,14 +1069,49 @@ def quality_dashboard(conn, args):
     """Return a quality dashboard summary.
 
     Returns: total inspections by status, pass rate %, open NCRs by severity,
-    quality goals summary.
+    quality goals summary. When --company-id is given, inspections and open
+    non-conformances are scoped to that company; quality goals stay
+    install-wide.
     """
-    # --- Inspections by status ---
-    iq = (Q.from_(T_qi)
-          .select(T_qi.status, fn.Count("*").as_("cnt"))
-          .groupby(T_qi.status))
-    inspection_rows = conn.execute(iq.get_sql()).fetchall()
-    inspections_by_status = {r["status"]: r["cnt"] for r in inspection_rows}
+    company_id = getattr(args, "company_id", None)
+    if not company_id:
+        company_table = Table("company")
+        company_query = Q.from_(company_table).select(fn.Count("*").as_("cnt"))
+        company_count = conn.execute(company_query.get_sql(), ()).fetchone()["cnt"]
+        if company_count > 1:
+            err("--company-id is required when more than one company exists")
+
+    scoped = bool(company_id)
+
+    insp_query = Q.from_(T_qi).select(
+        T_qi.id, T_qi.status, T_qi.reference_type, T_qi.reference_id)
+    inspection_rows = conn.execute(insp_query.get_sql(), ()).fetchall()
+    inspection_company = {}
+    reference_cache = {}
+    unattributed_inspections = 0
+    for insp_row in inspection_rows:
+        cache_key = (insp_row["reference_type"], insp_row["reference_id"])
+        if cache_key in reference_cache:
+            owner = reference_cache[cache_key]
+        else:
+            owner = _quality_reference_company(
+                conn, insp_row["reference_type"], insp_row["reference_id"])
+            reference_cache[cache_key] = owner
+        inspection_company[insp_row["id"]] = owner
+        if owner is None:
+            unattributed_inspections += 1
+
+    if scoped:
+        counted_inspections = [
+            insp_row for insp_row in inspection_rows
+            if inspection_company[insp_row["id"]] == company_id
+        ]
+    else:
+        counted_inspections = list(inspection_rows)
+    inspections_by_status = {}
+    for insp_row in counted_inspections:
+        inspections_by_status[insp_row["status"]] = (
+            inspections_by_status.get(insp_row["status"], 0) + 1)
     total_inspections = sum(inspections_by_status.values())
 
     # Pass rate: accepted / total * 100
@@ -1035,11 +1123,24 @@ def quality_dashboard(conn, args):
 
     # --- Open NCRs by severity ---
     nq = (Q.from_(T_nc)
-          .select(T_nc.severity, fn.Count("*").as_("cnt"))
-          .where(T_nc.status.isin([P(), P()]))
-          .groupby(T_nc.severity))
+          .select(T_nc.severity, T_nc.quality_inspection_id)
+          .where(T_nc.status.isin([P(), P()])))
     ncr_rows = conn.execute(nq.get_sql(), ("open", "investigating")).fetchall()
-    open_ncrs_by_severity = {r["severity"]: r["cnt"] for r in ncr_rows}
+    if scoped:
+        scoped_ncr_rows = []
+        for ncr_row in ncr_rows:
+            insp_id = ncr_row["quality_inspection_id"]
+            if not insp_id:
+                continue
+            if insp_id not in inspection_company:
+                continue
+            if inspection_company[insp_id] == company_id:
+                scoped_ncr_rows.append(ncr_row)
+        ncr_rows = scoped_ncr_rows
+    open_ncrs_by_severity = {}
+    for ncr_row in ncr_rows:
+        open_ncrs_by_severity[ncr_row["severity"]] = (
+            open_ncrs_by_severity.get(ncr_row["severity"], 0) + 1)
     total_open_ncrs = sum(open_ncrs_by_severity.values())
 
     # --- Quality goals summary ---
@@ -1065,6 +1166,9 @@ def quality_dashboard(conn, args):
                 "total": total_goals,
                 "by_status": goals_by_status,
             },
+            "company_id": company_id,
+            "unattributed_inspections": unattributed_inspections,
+            "quality_goals_scope": "install",
         },
     })
 
@@ -1162,8 +1266,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check
@@ -1179,7 +1282,7 @@ def main():
     except Exception as e:
         conn.rollback()
         sys.stderr.write(f"[erpclaw-quality] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 

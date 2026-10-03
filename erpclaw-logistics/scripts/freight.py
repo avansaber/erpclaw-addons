@@ -237,11 +237,16 @@ def list_carrier_invoices(conn, args):
 # 6. verify-carrier-invoice
 # ===========================================================================
 def verify_carrier_invoice(conn, args):
-    """Verify a carrier invoice and create a purchase invoice via cross_skill.
+    """Verify a carrier invoice, creating exactly one draft purchase invoice.
 
-    Transitions invoice_status from 'pending' to 'verified' and calls
-    erpclaw-buying to create a real purchase_invoice (carriers are suppliers).
-    The carrier must have a supplier_id linked for the PI to be created.
+    Verifying a pending carrier invoice creates one draft, non-stock purchase
+    invoice for the carrier's supplier through the buying module, links it to
+    the carrier invoice and marks the carrier invoice 'verified', all in one
+    logistics write. A carrier invoice that already carries a purchase invoice
+    link never causes a second purchase invoice: verification reuses the linked
+    one when it is usable and refuses when it is not. Verification writes no
+    ledger row; the purchase invoice stays a draft until someone submits it in
+    the buying module.
     """
     invoice_id = getattr(args, "id", None)
     if not invoice_id:
@@ -281,6 +286,48 @@ def verify_carrier_invoice(conn, args):
     # Get db_path from connection (for cross_skill subprocess)
     db_path = getattr(args, "db_path", None)
 
+    # A carrier invoice that already carries a purchase invoice link never
+    # causes a second purchase invoice: reuse the linked one when usable.
+    linked_pi_id = inv.get("purchase_invoice_id")
+    if linked_pi_id:
+        t_pi = Table("purchase_invoice")
+        pi_row = conn.execute(
+            Q.from_(t_pi).select(t_pi.status, t_pi.supplier_id).where(t_pi.id == P()).get_sql(),
+            (linked_pi_id,),
+        ).fetchone()
+        pi_status = pi_row["status"] if pi_row is not None else None
+        pi_supplier_id = pi_row["supplier_id"] if pi_row is not None else None
+        if pi_row is None or pi_status == "cancelled":
+            err(
+                f"Carrier invoice {inv_number} is linked to purchase invoice {linked_pi_id} "
+                f"in status '{pi_status}'; it cannot be verified against that invoice."
+            )
+        if pi_supplier_id != supplier_id:
+            err(
+                f"Carrier invoice {inv_number} is linked to purchase invoice {linked_pi_id} "
+                f"of supplier {pi_supplier_id}, not the carrier's supplier {supplier_id}."
+            )
+        _ts = _now_iso()
+        sql = update_row("logistics_carrier_invoice",
+            data={"invoice_status": P(), "updated_at": P()},
+            where={"id": P()})
+        conn.execute(sql, ("verified", _ts, invoice_id))
+        audit(conn, SKILL, "logistics-verify-carrier-invoice", "logistics_carrier_invoice", invoice_id,
+              new_values={
+                  "invoice_status": "verified",
+                  "purchase_invoice_id": linked_pi_id,
+                  "supplier_id": supplier_id,
+              })
+        conn.commit()
+        ok({
+            "id": invoice_id,
+            "invoice_status": "verified",
+            "purchase_invoice_id": linked_pi_id,
+            "supplier_id": supplier_id,
+            "carrier_id": inv["carrier_id"],
+            "total_amount": total_amount,
+        })
+
     # Create purchase invoice via cross_skill
     try:
         pi_result = create_purchase_invoice(
@@ -292,20 +339,12 @@ def verify_carrier_invoice(conn, args):
             }],
             company_id=company_id,
             posting_date=inv.get("invoice_date"),
-            remarks=f"Auto-created from logistics carrier invoice {inv_number}",
             db_path=db_path,
         )
     except CrossSkillError as e:
         err(f"Failed to create purchase invoice: {e}")
 
-    # Extract purchase_invoice_id from the buying skill response
-    # The response structure depends on erpclaw-buying's add-purchase-invoice action
-    pi_data = pi_result.get("purchase_invoice") or pi_result.get("data") or pi_result
-    purchase_invoice_id = (
-        pi_data.get("id")
-        if isinstance(pi_data, dict)
-        else pi_result.get("id")
-    )
+    purchase_invoice_id = pi_result.get("purchase_invoice_id")
 
     if not purchase_invoice_id:
         err(f"Purchase invoice created but could not extract ID from response: {pi_result}")

@@ -194,10 +194,10 @@ CWIP lifecycle: `under_construction` → accumulate costs → `in_use` (transfer
 |--------|-------------|
 | `add-inspection-template` / `get-inspection-template` / `list-inspection-templates` | Template CRUD |
 | `add-quality-inspection` / `list-quality-inspections` | Inspection CRUD |
-| `record-inspection-readings` / `evaluate-inspection` | Record measurements, determine pass/fail |
+| `record-inspection-readings` / `evaluate-inspection` | Record measurements (also updates inspection status), determine pass/fail |
 | `add-non-conformance` / `update-non-conformance` / `list-non-conformances` | NCR tracking |
 | `add-quality-goal` / `update-quality-goal` | Quality KPIs |
-| `quality-dashboard` | Pass rates, open NCRs, goal progress |
+| `quality-dashboard` | Pass rates, open NCRs, goal progress (optional --company-id) |
 | `status` | Quality dashboard |
 
 ### Support (18 actions)

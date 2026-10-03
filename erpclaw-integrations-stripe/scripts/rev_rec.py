@@ -483,48 +483,19 @@ def recognize_subscription_revenue(conn, args):
                 if amount <= Decimal("0"):
                     continue
 
-                # Create journal entry as voucher
-                je_id = _create_journal_entry(
-                    conn, company_id, period_match, amount,
-                    remark=f"ASC 606 revenue recognition - {sub['stripe_id']} - {period_match}",
-                    currency=sub_currency,
-                )
-
-                # Post GL entries: DR Unearned Revenue, CR Revenue
-                gl_entry_defs = [
-                    {
-                        "account_id": unearned_account_id,
-                        "debit": str(round_currency(amount)),
-                        "credit": "0",
-                        "currency": sub_currency,
-                        "exchange_rate": "1",
-                    },
-                    {
-                        "account_id": revenue_account_id,
-                        "debit": "0",
-                        "credit": str(round_currency(amount)),
-                        "cost_center_id": cost_center_id,
-                        "currency": sub_currency,
-                        "exchange_rate": "1",
-                    },
-                ]
-
-                gl_ids = insert_gl_entries(
-                    conn, gl_entry_defs,
-                    voucher_type="journal_entry",
-                    voucher_id=je_id,
-                    posting_date=period_match,
-                    company_id=company_id,
-                    remarks=f"ASC 606 rev rec: {sub['stripe_id']}",
-                )
-
-                # Mark schedule entry as recognized via erpclaw-accounting-adv (Article 5)
-                _delegate_revenue_action(conn, "recognize-schedule-entry", {
+                # Post DR unearned / CR revenue and flag the entry together
+                # via erpclaw-accounting-adv (Article 5): one voucher-plus-flag
+                # pair per schedule entry, on one connection.
+                result = _delegate_revenue_action(conn, "recognize-schedule-entry", {
                     "id": sched_dict["id"],
+                    "deferred_revenue_account_id": unearned_account_id,
+                    "revenue_account_id": revenue_account_id,
+                    "cost_center_id": cost_center_id,
+                    "currency": sub_currency,
                 })
+                sub_entries += len(result.get("gl_entry_ids") or [])
 
                 sub_recognized += amount
-                sub_entries += len(gl_ids)
 
         if sub_recognized > Decimal("0"):
             subscriptions_processed += 1
@@ -601,8 +572,8 @@ def rev_rec_status(conn, args):
         # Calculate recognized and deferred from schedule (READ)
         sched_rows = conn.execute("""
             SELECT
-                COALESCE(SUM(CASE WHEN rs.recognized = 1 THEN CAST(rs.amount AS NUMERIC) ELSE 0 END), 0) as recognized_amount,
-                COALESCE(SUM(CASE WHEN rs.recognized = 0 THEN CAST(rs.amount AS NUMERIC) ELSE 0 END), 0) as deferred_amount
+                COALESCE(decimal_sum(CASE WHEN rs.recognized = 1 THEN rs.amount ELSE '0' END), '0') as recognized_amount,
+                COALESCE(decimal_sum(CASE WHEN rs.recognized = 0 THEN rs.amount ELSE '0' END), '0') as deferred_amount
             FROM advacct_revenue_schedule rs
             JOIN advacct_performance_obligation po ON po.id = rs.obligation_id
             WHERE po.contract_id = ?
@@ -706,7 +677,7 @@ def handle_subscription_change(conn, args):
 
         # Count remaining unrecognized entries (READ is allowed)
         remaining = conn.execute("""
-            SELECT COUNT(*) as cnt, COALESCE(SUM(CAST(rs.amount AS NUMERIC)), 0) as total
+            SELECT COUNT(*) as cnt, COALESCE(decimal_sum(rs.amount), '0') as total
             FROM advacct_revenue_schedule rs
             JOIN advacct_performance_obligation po ON po.id = rs.obligation_id
             WHERE po.contract_id = ? AND rs.recognized = 0
@@ -742,13 +713,11 @@ def handle_subscription_change(conn, args):
 
         plan_interval = sub["plan_interval"] or "month"
 
-        # Calculate new total value for remaining period
+        # New monthly amount for the remaining period
         if plan_interval == "year":
-            new_total = new_amount
             new_monthly = (new_amount / Decimal("12")).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
         else:
-            new_total = new_amount * Decimal("12")
             new_monthly = new_amount
 
         # Get obligation IDs for this contract (READ is allowed)
@@ -760,11 +729,24 @@ def handle_subscription_change(conn, args):
             (contract_id,)
         ).fetchall()
 
-        # Count unrecognized entries before update (READ)
+        # Per obligation, read the recognized sum and the open count (READs
+        # are allowed). Each obligation keeps what it already recognized and
+        # reprices only its open periods at the new monthly amount.
+        alloc_updates = []
+        new_total = Decimal("0")
         entries_updated = 0
         for ob_row in ob_ids:
             ob_id = ob_row["id"]
             sched_t = Table("advacct_revenue_schedule")
+            rec_rows = conn.execute(
+                Q.from_(sched_t).select(sched_t.amount)
+                .where(sched_t.obligation_id == P())
+                .where(sched_t.recognized == P())
+                .get_sql(),
+                (ob_id, 1)
+            ).fetchall()
+            recognized_sum = sum(
+                (to_decimal(item["amount"]) for item in rec_rows), Decimal("0"))
             unrec_count = conn.execute(
                 Q.from_(sched_t).select(fn.Count("*").as_("cnt"))
                 .where(sched_t.obligation_id == P())
@@ -772,7 +754,11 @@ def handle_subscription_change(conn, args):
                 .get_sql(),
                 (ob_id, 0)
             ).fetchone()
-            entries_updated += unrec_count["cnt"] if unrec_count else 0
+            open_count = unrec_count["cnt"] if unrec_count else 0
+            new_alloc = round_currency(recognized_sum + new_monthly * open_count)
+            alloc_updates.append((ob_id, new_alloc))
+            new_total += new_alloc
+            entries_updated += open_count
 
         # Update contract with new total value and modification count via
         # erpclaw-accounting-adv (Article 5)
@@ -789,22 +775,19 @@ def handle_subscription_change(conn, args):
             "total_value": str(round_currency(new_total)),
         })
 
-        # Update obligation prices and schedule entries via
+        # Update obligation prices and re-spread their schedules via
         # erpclaw-accounting-adv (Article 5)
-        for ob_row in ob_ids:
-            ob_id = ob_row["id"]
-
+        for ob_id, new_alloc in alloc_updates:
             # Update obligation standalone/allocated price
             _delegate_revenue_action(conn, "update-performance-obligation", {
                 "id": ob_id,
-                "standalone_price": str(round_currency(new_total)),
-                "allocated_price": str(round_currency(new_total)),
+                "standalone_price": str(new_alloc),
+                "allocated_price": str(new_alloc),
             })
 
-            # Update unrecognized schedule entries with new monthly amount
+            # Re-spread the new allocation over the unrecognized entries
             _delegate_revenue_action(conn, "update-schedule-amounts", {
                 "obligation_id": ob_id,
-                "amount": str(round_currency(new_monthly)),
             })
 
         audit(conn, SKILL, "stripe-handle-subscription-change",

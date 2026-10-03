@@ -18,7 +18,7 @@ All notable changes to the erpclaw-integrations-shopify addon.
   later-wave capability. Text only — no behavior change; `shop/redact` (real
   hard-delete, GL preserved) and `app/uninstalled` were already accurate.
 
-## [1.3.0] — 2026-07-05 — M33 / B8 (integrations deep-sync completion)
+## [1.3.0] — 2026-07-05 — integrations deep-sync completion
 
 ### Added
 - **Payout transaction sync.** Payout sync now fetches each payout's individual

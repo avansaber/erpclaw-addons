@@ -193,7 +193,10 @@ def _layer3_payout_verification(conn, stripe_account_id, date_from=None, date_to
     For each payout, SUM(stripe_balance_transaction.net WHERE payout_id = payout.stripe_id)
     should equal the payout amount. Mark reconciled if matched.
 
-    Returns (matched_count, mismatched_count, total_count).
+    Returns (matched_count, mismatched_count, total_count, rechecked_count,
+        cleared_count). Already reconciled payouts are re-checked and cleared
+    back to unreconciled when their constituent net no longer equals the
+    payout amount; cleared payouts count only in rechecked/cleared.
     """
     payout_table = Table("stripe_payout")
 
@@ -212,6 +215,24 @@ def _layer3_payout_verification(conn, stripe_account_id, date_from=None, date_to
         params.append(date_to)
 
     payouts = conn.execute(q.get_sql(), tuple(params)).fetchall()
+
+    # Snapshot the already reconciled payouts before this layer reconciles
+    # anything: payouts matched below must not be re-checked in this run.
+    q2 = Q.from_(payout_table).select("*").where(
+        payout_table.stripe_account_id == P()
+    ).where(
+        payout_table.reconciled == 1
+    )
+    params2 = [stripe_account_id]
+
+    if date_from:
+        q2 = q2.where(payout_table.created_stripe >= P())
+        params2.append(date_from)
+    if date_to:
+        q2 = q2.where(payout_table.created_stripe <= P())
+        params2.append(date_to)
+
+    reconciled_payouts = conn.execute(q2.get_sql(), tuple(params2)).fetchall()
 
     matched = 0
     mismatched = 0
@@ -244,7 +265,34 @@ def _layer3_payout_verification(conn, stripe_account_id, date_from=None, date_to
         else:
             mismatched += 1
 
-    return matched, mismatched, len(payouts)
+    # Re-check already reconciled payouts of the same account and date
+    # filters: a payout whose constituent net no longer equals its amount
+    # is cleared back to unreconciled with the current constituent count.
+    bt_table = Table("stripe_balance_transaction")
+    cleared = 0
+    for payout in reconciled_payouts:
+        payout_stripe_id = payout["stripe_id"]
+        payout_amount = Decimal(payout["amount"])
+
+        bt_rows = conn.execute(
+            Q.from_(bt_table).select(bt_table.net)
+            .where(bt_table.payout_id == P())
+            .where(bt_table.stripe_account_id == P())
+            .get_sql(),
+            (payout_stripe_id, stripe_account_id)
+        ).fetchall()
+
+        total_net = sum((Decimal(bt["net"]) for bt in bt_rows), Decimal("0"))
+
+        if total_net != payout_amount:
+            sql, update_params = dynamic_update("stripe_payout", {
+                "reconciled": 0,
+                "transaction_count": len(bt_rows),
+            }, {"id": payout["id"]})
+            conn.execute(sql, update_params)
+            cleared += 1
+
+    return matched, mismatched, len(payouts), len(reconciled_payouts), cleared
 
 
 # ===========================================================================
@@ -295,7 +343,7 @@ def run_reconciliation(conn, args):
         conn, stripe_account_id, date_from, date_to)
 
     # Run Layer 3
-    l3_matched, l3_mismatched, l3_total = _layer3_payout_verification(
+    l3_matched, l3_mismatched, l3_total, l3_rechecked, l3_cleared = _layer3_payout_verification(
         conn, stripe_account_id, date_from, date_to)
 
     total_processed = l1_total + l2_total + l3_total
@@ -352,6 +400,8 @@ def run_reconciliation(conn, args):
             "total": l3_total,
             "matched": l3_matched,
             "mismatched": l3_mismatched,
+            "rechecked": l3_rechecked,
+            "cleared": l3_cleared,
         },
         "totals": {
             "processed": total_processed,
@@ -417,6 +467,17 @@ def reconcile_payout(conn, args):
         }, {"id": payout["id"]})
         conn.execute(sql, params)
         conn.commit()
+        flag_cleared = False
+    elif payout["reconciled"] == 1:
+        sql, params = dynamic_update("stripe_payout", {
+            "reconciled": 0,
+            "transaction_count": len(bt_rows),
+        }, {"id": payout["id"]})
+        conn.execute(sql, params)
+        conn.commit()
+        flag_cleared = True
+    else:
+        flag_cleared = False
 
     transactions = []
     for bt in bt_rows:
@@ -438,6 +499,7 @@ def reconcile_payout(conn, args):
         "transaction_count": len(bt_rows),
         "transactions": transactions,
         "reconciled": balanced,
+        "flag_cleared": flag_cleared,
     })
 
 

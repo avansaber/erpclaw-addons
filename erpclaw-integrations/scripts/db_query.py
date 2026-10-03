@@ -18,7 +18,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.args import SafeArgumentParser
@@ -257,10 +257,8 @@ def main():
     action = args.action
 
     # DB setup
-    db_path = args.db_path or os.environ.get("ERPCLAW_DB_PATH", DEFAULT_DB_PATH)
-    ensure_db_exists(db_path)
-
-    conn = get_connection(db_path) if args.db_path else get_connection()
+    db_path = getattr(args, "db_path", None)
+    conn = get_connection(db_path)
 
     # Check required tables exist
     check_required_tables(conn, REQUIRED_TABLES)

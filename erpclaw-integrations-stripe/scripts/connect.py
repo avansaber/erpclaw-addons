@@ -173,39 +173,66 @@ def connect_revenue_report(conn, args):
 # 6. stripe-connect-payout-report
 # ---------------------------------------------------------------------------
 def connect_payout_report(conn, args):
-    """Generate Connect platform payout report: SUM transfers by month."""
+    """Generate Connect platform payout report: SUM transfers by month.
+
+    Fully reversed transfers are excluded from the paid-out totals and
+    reported separately under reversed_count / reversed_amount.
+    """
     stripe_account_id = getattr(args, "stripe_account_id", None)
     if not stripe_account_id:
         err("--stripe-account-id is required")
     validate_stripe_account(conn, stripe_account_id)
 
-    rows = conn.execute(
-        """SELECT
-               substr(created_stripe, 1, 7) as month,
-               COUNT(*) as transfer_count,
-               decimal_sum(amount) as total_amount
-           FROM stripe_transfer
-           WHERE stripe_account_id = ?
-           GROUP BY substr(created_stripe, 1, 7)
-           ORDER BY month DESC""",
-        (stripe_account_id,)
-    ).fetchall()
+    t = Table("stripe_transfer")
+    q = Q.from_(t).select(
+        t.created_stripe, t.amount, t.reversed
+    ).where(t.stripe_account_id == P())
+    rows = conn.execute(q.get_sql(), (stripe_account_id,)).fetchall()
+
+    buckets = {}
+    for r in rows:
+        created = r["created_stripe"]
+        month = created[:7] if created else None
+        bucket = buckets.setdefault(month, {
+            "live_count": 0,
+            "live_total": Decimal("0"),
+            "reversed_count": 0,
+            "reversed_total": Decimal("0"),
+        })
+        amt = to_decimal(str(r["amount"])) if r["amount"] else Decimal("0")
+        if r["reversed"]:
+            bucket["reversed_count"] += 1
+            bucket["reversed_total"] += amt
+        else:
+            bucket["live_count"] += 1
+            bucket["live_total"] += amt
+
+    dated = sorted((m for m in buckets if m is not None), reverse=True)
+    ordered = dated + ([None] if None in buckets else [])
 
     months = []
     grand_total = Decimal("0")
-    for r in rows:
-        amt = to_decimal(str(r["total_amount"])) if r["total_amount"] else Decimal("0")
-        grand_total += amt
+    grand_reversed_count = 0
+    grand_reversed_total = Decimal("0")
+    for month in ordered:
+        bucket = buckets[month]
+        grand_total += bucket["live_total"]
+        grand_reversed_count += bucket["reversed_count"]
+        grand_reversed_total += bucket["reversed_total"]
         months.append({
-            "month": r["month"],
-            "transfer_count": r["transfer_count"],
-            "total_amount": str(round_currency(amt)),
+            "month": month,
+            "transfer_count": bucket["live_count"],
+            "total_amount": str(round_currency(bucket["live_total"])),
+            "reversed_count": bucket["reversed_count"],
+            "reversed_amount": str(round_currency(bucket["reversed_total"])),
         })
 
     ok({
         "report": "connect_payouts",
         "months": months,
         "grand_total": str(round_currency(grand_total)),
+        "reversed_count": grand_reversed_count,
+        "reversed_total": str(round_currency(grand_reversed_total)),
         "month_count": len(months),
     })
 

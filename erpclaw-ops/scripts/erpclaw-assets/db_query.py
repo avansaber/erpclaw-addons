@@ -24,15 +24,16 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
-    from erpclaw_lib.gl_posting import insert_gl_entries, reverse_gl_entries
+    from erpclaw_lib.gl_posting import insert_gl_entries, reverse_gl_entries, take_chain_heads
     from erpclaw_lib.cwip_posting import record_cwip_accumulation, cwip_account_for_asset
     from erpclaw_lib.validation import check_input_lengths
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
+    from erpclaw_lib.query_helpers import get_default_cost_center, resolve_company_id, resolve_scope_company
     from erpclaw_lib.query import Case, Criterion, DecimalAbs, DecimalSum, Field, NULL, Not, Order, P, Q, Table, fn, now as sql_now
     from erpclaw_lib.vendor.pypika.terms import ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
@@ -40,6 +41,14 @@ except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company", "account"]
 
@@ -49,6 +58,11 @@ VALID_DEPRECIATION_METHODS = ("straight_line", "written_down_value", "double_dec
 # on asset.status was dropped so states (e.g. under_construction for CWIP) are
 # registry-sourced + addable at runtime without a migration.
 VALID_ASSET_STATUSES = ("draft", "submitted", "in_use", "scrapped", "sold")
+# Statuses only a ledger-posting action writes, and the action that writes each.
+# update-asset refuses them: setting one there moves the asset without the
+# posting, and dispose-asset then refuses the asset as already disposed.
+POSTED_ASSET_STATUSES = {"scrapped": "dispose-asset", "sold": "dispose-asset",
+                         "impaired": "impair-asset"}
 VALID_MOVEMENT_TYPES = ("transfer", "issue", "receipt")
 VALID_MAINTENANCE_TYPES = ("preventive", "corrective")
 VALID_MAINTENANCE_STATUSES = ("planned", "overdue", "completed")
@@ -88,7 +102,7 @@ GAIN_LOSS_ACCOUNT_TYPES = (DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE,)
 # Shipping the tight allowlist unconditionally would make dispose-asset refuse
 # every disposal on that install. So the strictness is chosen per-install from
 # the install's own registry (_gain_loss_account_types), which is what M0 built
-# account_type_registry for. Full reasoning: planning/simlogs/m94_SIM_2026-08-12.md §2.
+# account_type_registry for.
 GAIN_LOSS_ACCOUNT_TYPES_PRE_M94 = ("revenue", "expense")
 
 
@@ -101,26 +115,21 @@ def _parse_json_arg(value, name):
         err(f"Invalid JSON for --{name}: {value}")
 
 
-def _get_fiscal_year(conn, posting_date: str) -> str | None:
-    """Return the fiscal year name for a posting date, or None."""
+def _company_fiscal_year(conn, posting_date: str, company_id: str) -> str | None:
+    """Return the posting company's own open fiscal year name for a posting date, or None."""
     t = Table("fiscal_year")
     q = (Q.from_(t).select(t.name)
+         .where(t.company_id == P())
          .where(t.start_date <= P())
          .where(t.end_date >= P())
          .where(t.is_closed == 0))
-    fy = conn.execute(q.get_sql(), (posting_date, posting_date)).fetchone()
+    fy = conn.execute(q.get_sql(), (company_id, posting_date, posting_date)).fetchone()
     return fy["name"] if fy else None
 
 
 def _get_cost_center(conn, company_id: str) -> str | None:
     """Return the first non-group cost center for a company, or None."""
-    t = Table("cost_center")
-    q = (Q.from_(t).select(t.id)
-         .where(t.company_id == P())
-         .where(t.is_group == 0)
-         .limit(1))
-    cc = conn.execute(q.get_sql(), (company_id,)).fetchone()
-    return cc["id"] if cc else None
+    return get_default_cost_center(conn, company_id)
 
 
 def _validate_company_exists(conn, company_id: str):
@@ -179,8 +188,7 @@ def _gain_loss_account_types(conn):
     foundation migration 035 registers it on a live one. Until then this returns
     M91's allowlist, so an install that updated this addon without updating the
     foundation behaves precisely as it did before M94 rather than refusing every
-    disposal. See planning/simlogs/m94_SIM_2026-08-12.md §2 for the skew this
-    exists to absorb, and for the one direction it cannot absorb.
+    disposal. It exists to absorb version skew in one direction only.
     """
     registered, active = _account_type_registry_state(
         conn, DISPOSAL_GAIN_LOSS_ACCOUNT_TYPE)
@@ -546,6 +554,10 @@ def update_asset(conn, args):
         params.append(args.depreciation_start_date)
 
     if args.status is not None:
+        owner = POSTED_ASSET_STATUSES.get(args.status)
+        if owner:
+            err(f"Status '{args.status}' is set only by {owner}, which posts it "
+                f"to the ledger. Use {owner} instead of update-asset.")
         if not _asset_status_registered(conn, args.status):
             err(f"Invalid status '{args.status}'. Register it in asset_status_registry "
                 f"or use a standard state: {', '.join(VALID_ASSET_STATUSES)}")
@@ -558,7 +570,7 @@ def update_asset(conn, args):
         err("No fields to update. Provide at least one of: --name, --location, "
              "--custodian-employee-id, --warranty-expiry-date, --depreciation-start-date, --status")
 
-    updates.append("updated_at = datetime('now')")
+    updates.append(f"updated_at = {sql_now()}")
     params.append(args.asset_id)
 
     # raw SQL — dynamic column building based on which args are provided
@@ -695,8 +707,9 @@ def _generate_schedule_core(conn, asset_dict):
     """Build + insert the full pending depreciation schedule for an asset from its
     gross value over its useful life. Deletes any existing pending rows first
     (idempotent regeneration). Raises ValueError on invalid config (caller maps to
-    err). Does NOT commit — the caller owns the transaction. Returns
-    (schedule_entries, dep_method, depreciable_amount).
+    err). Refuses to rebuild once any row is posted; a posted book can only be
+    rebased from its current value. Does NOT commit — the caller owns the
+    transaction. Returns (schedule_entries, dep_method, depreciable_amount).
 
     Shared by generate-depreciation-schedule (initial schedule) and
     transfer-cwip-to-asset (schedule seeded from the transfer date)."""
@@ -712,6 +725,15 @@ def _generate_schedule_core(conn, asset_dict):
     if not start_date:
         raise ValueError("Asset has no depreciation_start_date set. "
                          "Update the asset with --depreciation-start-date first.")
+
+    ds_post_t = Table("depreciation_schedule")
+    posted_existing = conn.execute(
+        (Q.from_(ds_post_t).select(fn.Count("*").as_("c"))
+         .where(ds_post_t.asset_id == P())
+         .where(ds_post_t.status == ValueWrapper("posted"))).get_sql(),
+        (asset_dict["id"],)).fetchone()["c"]
+    if posted_existing:
+        raise ValueError(f"Asset {asset_dict['id']} has posted depreciation; its schedule can only be rebased from book value")
 
     gross_value = to_decimal(asset_dict["gross_value"])
     salvage_value = to_decimal(asset_dict["salvage_value"])
@@ -876,12 +898,64 @@ def generate_depreciation_schedule(conn, args):
                           monthly = book_value * annual_rate / 12
     - double_declining: annual_rate = 2 / years,
                         monthly = book_value * annual_rate / 12
+
+    A book with no posted rows is built from gross over the full life. Once
+    any row is posted the pending tail is rebased from the current value over
+    the remaining months. A disposed book is refused.
     """
     if not args.asset_id:
         err("--asset-id is required")
 
     asset = _validate_asset_exists(conn, args.asset_id)
     asset_dict = row_to_dict(asset)
+
+    status = asset_dict.get("status")
+    if status in ("scrapped", "sold"):
+        err(f"Asset is '{status}'. Cannot generate a depreciation schedule for a disposed asset.")
+
+    ds_c = Table("depreciation_schedule")
+    posted_count = conn.execute(
+        (Q.from_(ds_c).select(fn.Count("*").as_("c"))
+         .where(ds_c.asset_id == P())
+         .where(ds_c.status == ValueWrapper("posted"))).get_sql(),
+        (args.asset_id,)).fetchone()["c"]
+
+    if posted_count:
+        dep_method = asset_dict["depreciation_method"]
+        if not dep_method:
+            err("Asset has no depreciation method set")
+        useful_life = asset_dict["useful_life_years"]
+        if not useful_life or useful_life <= 0:
+            err("Asset has no valid useful life years set")
+        start_date = asset_dict["depreciation_start_date"]
+        if not start_date:
+            err("Asset has no depreciation_start_date set. Update the asset with --depreciation-start-date first.")
+        method = dep_method
+        if method != "straight_line":
+            err(f"Asset {args.asset_id} has posted {method} depreciation; only a straight_line schedule is rebased from book value")
+        book = str(asset_dict["current_book_value"])
+        recompute = _recompute_pending_depreciation(conn, args.asset_id)
+        n = recompute["regenerated"]
+        pend_t = Table("depreciation_schedule")
+        pend_q = (Q.from_(pend_t).select(pend_t.star)
+                  .where(pend_t.asset_id == P())
+                  .where(pend_t.status == ValueWrapper("pending"))
+                  .orderby(pend_t.schedule_date))
+        pending_rows = conn.execute(pend_q.get_sql(), (args.asset_id,)).fetchall()
+        schedule = [row_to_dict(r) for r in pending_rows]
+        audit(conn, "erpclaw-assets", "generate-depreciation-schedule", "asset", args.asset_id,
+               new_values={"entries_count": n, "method": method,
+                           "rebased_from_book_value": book,
+                           "posted_entries_kept": posted_count},
+               description=f"Rebased {n} pending depreciation entries from book value {book}")
+        conn.commit()
+        ok({"asset_id": args.asset_id,
+             "entries_generated": n,
+             "depreciation_method": method,
+             "rebased_from_book_value": book,
+             "posted_entries_kept": posted_count,
+             "schedule": schedule,
+             "message": f"Rebased {n} pending depreciation entries from book value {book}"})
 
     try:
         schedule_entries, dep_method, depreciable_amount = _generate_schedule_core(conn, asset_dict)
@@ -970,7 +1044,7 @@ def post_depreciation(conn, args):
     dep_amount = sched_dict["depreciation_amount"]
 
     # Fiscal year
-    fiscal_year = _get_fiscal_year(conn, posting_date)
+    fiscal_year = _company_fiscal_year(conn, posting_date, asset_dict["company_id"])
 
     # Cost center
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
@@ -1004,6 +1078,7 @@ def post_depreciation(conn, args):
             remarks=f"Depreciation for {asset_dict['naming_series']} on {posting_date}",
         )
     except (ValueError, NotImplementedError) as e:
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL posting failed: {e}")
 
@@ -1087,7 +1162,7 @@ def run_depreciation(conn, args):
         ok({"entries_posted": 0, "message": "No pending depreciation entries found"})
 
     cost_center_id = args.cost_center_id or _get_cost_center(conn, args.company_id)
-    fiscal_year = _get_fiscal_year(conn, args.posting_date)
+    fiscal_year = _company_fiscal_year(conn, args.posting_date, args.company_id)
 
     posted_count = 0
     errors = []
@@ -1272,7 +1347,7 @@ def record_asset_movement(conn, args):
         update_params.append(args.to_employee_id)
 
     if update_fields:
-        update_fields.append("updated_at = datetime('now')")
+        update_fields.append(f"updated_at = {sql_now()}")
         update_params.append(args.asset_id)
         # raw SQL — dynamic column building based on which movement fields are provided
         conn.execute(
@@ -1398,7 +1473,7 @@ def complete_maintenance(conn, args):
     asset_dict = row_to_dict(asset)
     cat_dict, asset_acct, dep_acct, accum_acct = _category_accounts(conn, asset_dict)
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
-    fiscal_year = _get_fiscal_year(conn, actual_date)
+    fiscal_year = _company_fiscal_year(conn, actual_date, asset_dict["company_id"])
 
     if is_capex == 1:
         branch = "capex"
@@ -1426,6 +1501,7 @@ def complete_maintenance(conn, args):
                 company_id=asset_dict["company_id"],
                 remarks=f"Capex maintenance on {asset_dict['naming_series']}")
         except (ValueError, NotImplementedError) as e:
+            conn.rollback()
             sys.stderr.write(f"[erpclaw-assets] {e}\n")
             err(f"GL posting failed: {e}")
 
@@ -1458,6 +1534,7 @@ def complete_maintenance(conn, args):
                 company_id=asset_dict["company_id"],
                 remarks=f"Repair (opex) on {asset_dict['naming_series']}")
         except (ValueError, NotImplementedError) as e:
+            conn.rollback()
             sys.stderr.write(f"[erpclaw-assets] {e}\n")
             err(f"GL posting failed: {e}")
 
@@ -1804,7 +1881,7 @@ def dispose_asset(conn, args):
     # the P&L leg entirely — the disposal moves no profit at all.
     #
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
-    fiscal_year = _get_fiscal_year(conn, args.disposal_date)
+    fiscal_year = _company_fiscal_year(conn, args.disposal_date, asset_dict["company_id"])
 
     gl_entries = []
 
@@ -1925,6 +2002,8 @@ def asset_register_report(conn, args):
     Optional: --as-of-date (defaults to today)
 
     Returns all assets with gross_value, accumulated_depreciation, current_book_value.
+    Accumulated depreciation as of the date is posted depreciation plus unreversed
+    impairments, and an asset disposed by the date carries a zero book value.
     """
     if not args.company_id:
         err("--company-id is required")
@@ -1968,7 +2047,24 @@ def asset_register_report(conn, args):
         for dep_row in posted_dep_entries:
             accum_dep = round_currency(accum_dep + to_decimal(dep_row["depreciation_amount"]))
 
-        book_value = round_currency(gross - accum_dep)
+        imp_t = Table("asset_impairment")
+        imp_q = (Q.from_(imp_t).select(imp_t.impairment_amount)
+                 .where(imp_t.asset_id == P())
+                 .where(imp_t.status == ValueWrapper("submitted"))
+                 .where(imp_t.impairment_date <= P()))
+        imp_rows = conn.execute(imp_q.get_sql(), (asset_id, as_of_date)).fetchall()
+        for imp_row in imp_rows:
+            accum_dep = round_currency(accum_dep + to_decimal(imp_row["impairment_amount"]))
+
+        disp_t = Table("asset_disposal")
+        disp_q = (Q.from_(disp_t).select(disp_t.id)
+                  .where(disp_t.asset_id == P())
+                  .where(disp_t.disposal_date <= P()))
+        disp_rows = conn.execute(disp_q.get_sql(), (asset_id, as_of_date)).fetchall()
+        if disp_rows:
+            book_value = round_currency(Decimal("0"))
+        else:
+            book_value = round_currency(gross - accum_dep)
 
         total_gross = round_currency(total_gross + gross)
         total_accum_dep = round_currency(total_accum_dep + accum_dep)
@@ -2120,17 +2216,7 @@ def status_action(conn, args):
 
     Required: --company-id
     """
-    company_id = args.company_id
-    if not company_id:
-        co_t = Table("company")
-        co_q = Q.from_(co_t).select(co_t.id).limit(1)
-        row = conn.execute(co_q.get_sql()).fetchone()
-        if not row:
-            err("No company found. Create one with erpclaw first.",
-                 suggestion="Run 'tutorial' to create a demo company, or 'setup company' to create your own.")
-        company_id = row["id"]
-
-    _validate_company_exists(conn, company_id)
+    company_id = resolve_scope_company(conn, args.company_id, getattr(args, "company_name", None))
 
     # Assets by status
     asset_t = Table("asset")
@@ -2430,7 +2516,7 @@ def impair_asset(conn, args):
 
     impairment_date = args.impairment_date or _today_str()
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
-    fiscal_year = _get_fiscal_year(conn, impairment_date)
+    fiscal_year = _company_fiscal_year(conn, impairment_date, asset_dict["company_id"])
 
     impairment_id = str(uuid.uuid4())
     imp_t = Table("asset_impairment")
@@ -2453,6 +2539,7 @@ def impair_asset(conn, args):
             posting_date=impairment_date, company_id=asset_dict["company_id"],
             remarks=f"Impairment of {asset_dict['naming_series']}")
     except (ValueError, NotImplementedError) as e:
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL posting failed: {e}")
 
@@ -2521,6 +2608,7 @@ def reverse_impairment(conn, args):
             conn, voucher_type="asset_impairment", voucher_id=args.impairment_id,
             posting_date=posting_date)
     except (ValueError, NotImplementedError) as e:
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL reversal failed: {e}")
 
@@ -2658,7 +2746,7 @@ def capitalize_asset(conn, args):
                   cap_date, args.source_account_id))
 
     cost_center_id = args.cost_center_id or _get_cost_center(conn, args.company_id)
-    fiscal_year = _get_fiscal_year(conn, cap_date)
+    fiscal_year = _company_fiscal_year(conn, cap_date, args.company_id)
     gl_entries = [
         {"account_id": asset_acct, "debit": str(round_currency(amount)), "credit": "0",
          "cost_center_id": cost_center_id, "fiscal_year": fiscal_year},
@@ -2671,6 +2759,7 @@ def capitalize_asset(conn, args):
             posting_date=cap_date, company_id=args.company_id,
             remarks=f"Capitalization of {naming}")
     except (ValueError, NotImplementedError) as e:
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL posting failed: {e}")
 
@@ -2743,7 +2832,7 @@ def revalue_asset(conn, args):
 
     reval_date = args.revaluation_date or _today_str()
     cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
-    fiscal_year = _get_fiscal_year(conn, reval_date)
+    fiscal_year = _company_fiscal_year(conn, reval_date, asset_dict["company_id"])
     reval_id = str(uuid.uuid4())
 
     if delta > 0:
@@ -2767,6 +2856,7 @@ def revalue_asset(conn, args):
             posting_date=reval_date, company_id=asset_dict["company_id"],
             remarks=f"Revaluation of {asset_dict['naming_series']} to {new_value}")
     except (ValueError, NotImplementedError) as e:
+        conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
         err(f"GL posting failed: {e}")
 
@@ -2850,7 +2940,7 @@ def _post_accumulation(conn, asset_dict, amount, cwip_acct_id, source_acct_id,
     erpclaw_lib.cwip_posting.record_cwip_accumulation — the same helper the
     buying/journals invoice/JE hooks call in-transaction (AVA-43)."""
     accum_id = str(uuid.uuid4())
-    fiscal_year = _get_fiscal_year(conn, posting_date)
+    fiscal_year = _company_fiscal_year(conn, posting_date, asset_dict["company_id"])
     project_id = asset_dict.get("cwip_project_id")
     gl_entries = [
         {"account_id": cwip_acct_id, "debit": str(round_currency(amount)), "credit": "0",
@@ -2959,37 +3049,56 @@ def accumulate_cwip_cost(conn, args):
     if amount <= 0:
         err("--amount must be greater than 0")
 
-    _validate_cwip_account(conn, args.cwip_account_id)
-    if not _account_exists(conn, args.source_account_id):
-        err(f"Source account {args.source_account_id} not found")
-
     try:
-        prior = _cwip_account_for_asset(conn, args.asset_id)
-    except ValueError as e:
-        err(str(e))
-    if prior and prior != args.cwip_account_id:
-        err(f"Asset is already accumulating to CWIP account {prior}; "
-            f"pass the same --cwip-account-id (one CWIP account per asset).")
+        take_chain_heads(conn, [asset_dict["company_id"]])
+        _rr_t = Table("asset")
+        _rr_q = Q.from_(_rr_t).select(_rr_t.star).where(_rr_t.id == P())
+        _rr_row = conn.execute(_rr_q.get_sql(), (args.asset_id,)).fetchone()
+        if not _rr_row:
+            conn.rollback()
+            err(f"Asset {args.asset_id} not found",
+                suggestion="Use 'list assets' to see available assets.")
+        asset_dict = row_to_dict(_rr_row)
+        if asset_dict["status"] != "under_construction":
+            conn.rollback()
+            err(f"accumulate-cwip-cost requires an under_construction asset; "
+                f"'{asset_dict['naming_series']}' is '{asset_dict['status']}'. Start one with add-cwip.")
 
-    posting_date = args.posting_date or _today_str()
-    cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
+        _validate_cwip_account(conn, args.cwip_account_id)
+        if not _account_exists(conn, args.source_account_id):
+            err(f"Source account {args.source_account_id} not found")
 
-    try:
-        accum_id, gl_ids = _post_accumulation(
-            conn, asset_dict, amount, args.cwip_account_id, args.source_account_id,
-            args.source_voucher_type, args.source_voucher_id, posting_date,
-            cost_center_id, args.notes)
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-assets] {e}\n")
-        err(f"GL posting failed: {e}")
+        try:
+            prior = _cwip_account_for_asset(conn, args.asset_id)
+        except ValueError as e:
+            err(str(e))
+        if prior and prior != args.cwip_account_id:
+            err(f"Asset is already accumulating to CWIP account {prior}; "
+                f"pass the same --cwip-account-id (one CWIP account per asset).")
 
-    audit(conn, "erpclaw-assets", "accumulate-cwip-cost", "asset", args.asset_id,
-          new_values={"amount": str(round_currency(amount)),
-                      "source_voucher_type": args.source_voucher_type,
-                      "accumulated_total": asset_dict["current_book_value"]},
-          description=f"Accumulated {amount} into CWIP {asset_dict['naming_series']}")
+        posting_date = args.posting_date or _today_str()
+        cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
 
-    conn.commit()
+        try:
+            accum_id, gl_ids = _post_accumulation(
+                conn, asset_dict, amount, args.cwip_account_id, args.source_account_id,
+                args.source_voucher_type, args.source_voucher_id, posting_date,
+                cost_center_id, args.notes)
+        except (ValueError, NotImplementedError) as e:
+            conn.rollback()
+            sys.stderr.write(f"[erpclaw-assets] {e}\n")
+            err(f"GL posting failed: {e}")
+
+        audit(conn, "erpclaw-assets", "accumulate-cwip-cost", "asset", args.asset_id,
+              new_values={"amount": str(round_currency(amount)),
+                          "source_voucher_type": args.source_voucher_type,
+                          "accumulated_total": asset_dict["current_book_value"]},
+              description=f"Accumulated {amount} into CWIP {asset_dict['naming_series']}")
+
+        conn.commit()
+    except SystemExit:
+        conn.rollback()
+        raise
     ok({"accumulation_id": accum_id, "asset_id": args.asset_id,
         "amount": str(round_currency(amount)),
         "accumulated_total": asset_dict["current_book_value"],
@@ -3030,120 +3139,153 @@ def transfer_cwip_to_asset(conn, args):
     if posted:
         err("Cannot transfer: depreciation has already been posted against this asset.")
 
-    cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
+    try:
+        take_chain_heads(conn, [asset_dict["company_id"]])
+        _rr_t = Table("asset")
+        _rr_q = Q.from_(_rr_t).select(_rr_t.star).where(_rr_t.id == P())
+        _rr_row = conn.execute(_rr_q.get_sql(), (args.asset_id,)).fetchone()
+        if not _rr_row:
+            conn.rollback()
+            err(f"Asset {args.asset_id} not found",
+                suggestion="Use 'list assets' to see available assets.")
+        asset_dict = row_to_dict(_rr_row)
+        if asset_dict["status"] != "under_construction":
+            conn.rollback()
+            err(f"transfer-cwip-to-asset requires an under_construction asset; "
+                f"'{asset_dict['naming_series']}' is '{asset_dict['status']}'.")
 
-    # Optional final additional cost: route through the same accumulation path so
-    # it lands in CWIP before the transfer (one transaction).
-    if args.final_additional_cost is not None:
+        cost_center_id = args.cost_center_id or _get_cost_center(conn, asset_dict["company_id"])
+
+        # Optional final additional cost: route through the same accumulation path so
+        # it lands in CWIP before the transfer (one transaction).
+        if args.final_additional_cost is not None:
+            try:
+                final_amt = to_decimal(args.final_additional_cost)
+            except (InvalidOperation, ValueError):
+                err("--final-additional-cost must be numeric")
+            if final_amt <= 0:
+                err("--final-additional-cost must be greater than 0")
+            if not args.source_account_id:
+                err("--source-account-id is required with --final-additional-cost (its credit leg)")
+            try:
+                existing_cwip = _cwip_account_for_asset(conn, args.asset_id)
+            except ValueError as e:
+                err(str(e))
+            final_cwip_acct = existing_cwip or args.cwip_account_id
+            if not final_cwip_acct:
+                err("--cwip-account-id is required for --final-additional-cost when no "
+                    "cost has been accumulated yet.")
+            _validate_cwip_account(conn, final_cwip_acct)
+            if not _account_exists(conn, args.source_account_id):
+                err(f"Source account {args.source_account_id} not found")
+            try:
+                _post_accumulation(conn, asset_dict, final_amt, final_cwip_acct,
+                                   args.source_account_id, "transfer_final_cost", None,
+                                   args.depreciation_start_date or _today_str(),
+                                   cost_center_id, "Final additional cost at transfer")
+            except (ValueError, NotImplementedError) as e:
+                conn.rollback()
+                sys.stderr.write(f"[erpclaw-assets] {e}\n")
+                err(f"GL posting failed: {e}")
+
+        total = to_decimal(asset_dict["current_book_value"])
+        if total <= 0:
+            err("transfer-cwip-to-asset requires accumulated cost > 0; nothing to capitalize.")
+
         try:
-            final_amt = to_decimal(args.final_additional_cost)
-        except (InvalidOperation, ValueError):
-            err("--final-additional-cost must be numeric")
-        if final_amt <= 0:
-            err("--final-additional-cost must be greater than 0")
-        if not args.source_account_id:
-            err("--source-account-id is required with --final-additional-cost (its credit leg)")
-        try:
-            existing_cwip = _cwip_account_for_asset(conn, args.asset_id)
+            cwip_acct = _cwip_account_for_asset(conn, args.asset_id)
         except ValueError as e:
             err(str(e))
-        final_cwip_acct = existing_cwip or args.cwip_account_id
-        if not final_cwip_acct:
-            err("--cwip-account-id is required for --final-additional-cost when no "
-                "cost has been accumulated yet.")
-        _validate_cwip_account(conn, final_cwip_acct)
-        if not _account_exists(conn, args.source_account_id):
-            err(f"Source account {args.source_account_id} not found")
+        if not cwip_acct:
+            err("No CWIP account found for this asset (no accumulations). Accumulate cost first.")
+
+        cat_dict, asset_acct, dep_acct, accum_acct = _category_accounts(conn, asset_dict)
+        if not asset_acct:
+            err("Asset category has no asset_account_id set")
+
+        salvage = to_decimal(args.salvage_value or "0")
+        if salvage < 0 or salvage >= total:
+            err("--salvage-value must be >= 0 and less than the accumulated cost")
+        useful_life = int(args.useful_life_years) if args.useful_life_years else cat_dict["useful_life_years"]
+        dep_method = cat_dict["depreciation_method"]
+        transfer_date = args.depreciation_start_date or _today_str()
+        fiscal_year = _company_fiscal_year(conn, transfer_date, asset_dict["company_id"])
+
+        # Flip the asset to a normal, depreciable fixed asset.
+        asset_t = Table("asset")
+        _flip_cur = conn.execute((Q.update(asset_t)
+                      .set(Field("status"), ValueWrapper("in_use"))
+                      .set(Field("gross_value"), P())
+                      .set(Field("current_book_value"), P())
+                      .set(Field("salvage_value"), P())
+                      .set(Field("depreciation_method"), P())
+                      .set(Field("useful_life_years"), P())
+                      .set(Field("depreciation_start_date"), P())
+                      .set(Field("updated_at"), sql_now())
+                      .where(asset_t.id == P())
+                      .where(Field("status") == ValueWrapper("under_construction"))).get_sql(),
+                     (str(round_currency(total)), str(round_currency(total)),
+                      str(round_currency(salvage)), dep_method, useful_life,
+                      transfer_date, args.asset_id))
+        if _flip_cur.rowcount == 0:
+            conn.rollback()
+            _fr_t = Table("asset")
+            _fr_row = conn.execute(
+                Q.from_(_fr_t).select(_fr_t.star).where(_fr_t.id == P()).get_sql(),
+                (args.asset_id,)).fetchone()
+            if not _fr_row:
+                err(f"Asset {args.asset_id} not found",
+                    suggestion="Use 'list assets' to see available assets.")
+            _fr_dict = row_to_dict(_fr_row)
+            err(f"transfer-cwip-to-asset requires an under_construction asset; "
+                f"'{_fr_dict['naming_series']}' is '{_fr_dict['status']}'.")
+
+        cap_id = str(uuid.uuid4())
+        cap_t = Table("asset_capitalization")
+        conn.execute((Q.into(cap_t)
+                      .columns("id", "asset_id", "cwip_source_id", "capitalized_amount",
+                               "capitalization_date", "source_account_id")
+                      .insert(P(), P(), P(), P(), P(), P())).get_sql(),
+                     (cap_id, args.asset_id, args.asset_id, str(round_currency(total)),
+                      transfer_date, cwip_acct))
+
+        gl_entries = [
+            {"account_id": asset_acct, "debit": str(round_currency(total)), "credit": "0",
+             "cost_center_id": cost_center_id, "fiscal_year": fiscal_year,
+             "project_id": asset_dict.get("cwip_project_id")},
+            {"account_id": cwip_acct, "debit": "0", "credit": str(round_currency(total)),
+             "cost_center_id": cost_center_id, "fiscal_year": fiscal_year,
+             "project_id": asset_dict.get("cwip_project_id")},
+        ]
         try:
-            _post_accumulation(conn, asset_dict, final_amt, final_cwip_acct,
-                               args.source_account_id, "transfer_final_cost", None,
-                               args.depreciation_start_date or _today_str(),
-                               cost_center_id, "Final additional cost at transfer")
+            gl_ids = insert_gl_entries(
+                conn, gl_entries, voucher_type="asset_capitalization", voucher_id=cap_id,
+                posting_date=transfer_date, company_id=asset_dict["company_id"],
+                remarks=f"CWIP transfer/capitalization of {asset_dict['naming_series']}")
         except (ValueError, NotImplementedError) as e:
+            conn.rollback()
             sys.stderr.write(f"[erpclaw-assets] {e}\n")
             err(f"GL posting failed: {e}")
+        conn.execute((Q.update(cap_t).set(Field("gl_entry_id"), P())
+                      .where(cap_t.id == P())).get_sql(), (gl_ids[0], cap_id))
 
-    total = to_decimal(asset_dict["current_book_value"])
-    if total <= 0:
-        err("transfer-cwip-to-asset requires accumulated cost > 0; nothing to capitalize.")
+        # Initial depreciation schedule from the transfer date.
+        updated = row_to_dict(_validate_asset_exists(conn, args.asset_id))
+        try:
+            schedule_entries, _m, _d = _generate_schedule_core(conn, updated)
+        except ValueError as e:
+            err(f"Depreciation schedule generation failed: {e}")
 
-    try:
-        cwip_acct = _cwip_account_for_asset(conn, args.asset_id)
-    except ValueError as e:
-        err(str(e))
-    if not cwip_acct:
-        err("No CWIP account found for this asset (no accumulations). Accumulate cost first.")
+        audit(conn, "erpclaw-assets", "transfer-cwip-to-asset", "asset", args.asset_id,
+              old_values={"status": "under_construction"},
+              new_values={"status": "in_use", "gross_value": str(round_currency(total)),
+                          "capitalized_amount": str(round_currency(total))},
+              description=f"Transferred CWIP {asset_dict['naming_series']} to fixed asset for {total}")
 
-    cat_dict, asset_acct, dep_acct, accum_acct = _category_accounts(conn, asset_dict)
-    if not asset_acct:
-        err("Asset category has no asset_account_id set")
-
-    salvage = to_decimal(args.salvage_value or "0")
-    if salvage < 0 or salvage >= total:
-        err("--salvage-value must be >= 0 and less than the accumulated cost")
-    useful_life = int(args.useful_life_years) if args.useful_life_years else cat_dict["useful_life_years"]
-    dep_method = cat_dict["depreciation_method"]
-    transfer_date = args.depreciation_start_date or _today_str()
-    fiscal_year = _get_fiscal_year(conn, transfer_date)
-
-    # Flip the asset to a normal, depreciable fixed asset.
-    asset_t = Table("asset")
-    conn.execute((Q.update(asset_t)
-                  .set(Field("status"), ValueWrapper("in_use"))
-                  .set(Field("gross_value"), P())
-                  .set(Field("current_book_value"), P())
-                  .set(Field("salvage_value"), P())
-                  .set(Field("depreciation_method"), P())
-                  .set(Field("useful_life_years"), P())
-                  .set(Field("depreciation_start_date"), P())
-                  .set(Field("updated_at"), sql_now())
-                  .where(asset_t.id == P())).get_sql(),
-                 (str(round_currency(total)), str(round_currency(total)),
-                  str(round_currency(salvage)), dep_method, useful_life,
-                  transfer_date, args.asset_id))
-
-    cap_id = str(uuid.uuid4())
-    cap_t = Table("asset_capitalization")
-    conn.execute((Q.into(cap_t)
-                  .columns("id", "asset_id", "cwip_source_id", "capitalized_amount",
-                           "capitalization_date", "source_account_id")
-                  .insert(P(), P(), P(), P(), P(), P())).get_sql(),
-                 (cap_id, args.asset_id, args.asset_id, str(round_currency(total)),
-                  transfer_date, cwip_acct))
-
-    gl_entries = [
-        {"account_id": asset_acct, "debit": str(round_currency(total)), "credit": "0",
-         "cost_center_id": cost_center_id, "fiscal_year": fiscal_year,
-         "project_id": asset_dict.get("cwip_project_id")},
-        {"account_id": cwip_acct, "debit": "0", "credit": str(round_currency(total)),
-         "cost_center_id": cost_center_id, "fiscal_year": fiscal_year,
-         "project_id": asset_dict.get("cwip_project_id")},
-    ]
-    try:
-        gl_ids = insert_gl_entries(
-            conn, gl_entries, voucher_type="asset_capitalization", voucher_id=cap_id,
-            posting_date=transfer_date, company_id=asset_dict["company_id"],
-            remarks=f"CWIP transfer/capitalization of {asset_dict['naming_series']}")
-    except (ValueError, NotImplementedError) as e:
-        sys.stderr.write(f"[erpclaw-assets] {e}\n")
-        err(f"GL posting failed: {e}")
-    conn.execute((Q.update(cap_t).set(Field("gl_entry_id"), P())
-                  .where(cap_t.id == P())).get_sql(), (gl_ids[0], cap_id))
-
-    # Initial depreciation schedule from the transfer date.
-    updated = row_to_dict(_validate_asset_exists(conn, args.asset_id))
-    try:
-        schedule_entries, _m, _d = _generate_schedule_core(conn, updated)
-    except ValueError as e:
-        err(f"Depreciation schedule generation failed: {e}")
-
-    audit(conn, "erpclaw-assets", "transfer-cwip-to-asset", "asset", args.asset_id,
-          old_values={"status": "under_construction"},
-          new_values={"status": "in_use", "gross_value": str(round_currency(total)),
-                      "capitalized_amount": str(round_currency(total))},
-          description=f"Transferred CWIP {asset_dict['naming_series']} to fixed asset for {total}")
-
-    conn.commit()
+        conn.commit()
+    except SystemExit:
+        conn.rollback()
+        raise
     ok({"asset_id": args.asset_id, "capitalization_id": cap_id,
         "capitalized_amount": str(round_currency(total)), "new_status": "in_use",
         "depreciation_start_date": transfer_date,
@@ -3174,68 +3316,100 @@ def cancel_cwip(conn, args):
         err(f"cancel-cwip is only allowed before transfer; "
             f"'{asset_dict['naming_series']}' is '{asset_dict['status']}'.")
 
-    ds_t = Table("depreciation_schedule")
-    posted = conn.execute(
-        (Q.from_(ds_t).select(fn.Count("*").as_("c"))
-         .where(ds_t.asset_id == P())
-         .where(ds_t.status == ValueWrapper("posted"))).get_sql(),
-        (args.asset_id,)).fetchone()["c"]
-    if posted:
-        err("Cannot cancel: depreciation has already been posted against this asset.")
+    try:
+        take_chain_heads(conn, [asset_dict["company_id"]])
+        _rr_t = Table("asset")
+        _rr_q = Q.from_(_rr_t).select(_rr_t.star).where(_rr_t.id == P())
+        _rr_row = conn.execute(_rr_q.get_sql(), (args.asset_id,)).fetchone()
+        if not _rr_row:
+            conn.rollback()
+            err(f"Asset {args.asset_id} not found",
+                suggestion="Use 'list assets' to see available assets.")
+        asset_dict = row_to_dict(_rr_row)
+        if asset_dict["status"] != "under_construction":
+            conn.rollback()
+            err(f"cancel-cwip is only allowed before transfer; "
+                f"'{asset_dict['naming_series']}' is '{asset_dict['status']}'.")
 
-    # AVA-43: accumulations sourced from a submitted purchase invoice / journal
-    # entry are backed by that document's GL (and its AP liability). cancel-cwip
-    # reverses only its own cwip_capitalization legs (voucher_id=accum_id), so it
-    # would strand a document's CWIP debit. Reject — the source document must be
-    # cancelled instead (its own cancel reverses the CWIP leg).
-    doc_sourced = conn.execute(
-        "SELECT a.source_voucher_type, a.source_voucher_id FROM cwip_cost_accumulation a "
-        "JOIN gl_entry g ON g.id = a.gl_entry_id "
-        "WHERE a.asset_id = ? AND a.status = 'submitted' "
-        "AND g.voucher_type != 'cwip_capitalization'",
-        (args.asset_id,)).fetchall()
-    if doc_sourced:
-        refs = ", ".join(sorted({f"{r['source_voucher_type']} {r['source_voucher_id']}"
-                                 for r in doc_sourced}))
-        err(f"Cannot cancel-cwip: costs were accumulated from submitted documents "
-            f"({refs}). Cancel those documents first — each reverses its own CWIP GL.")
+        ds_t = Table("depreciation_schedule")
+        posted = conn.execute(
+            (Q.from_(ds_t).select(fn.Count("*").as_("c"))
+             .where(ds_t.asset_id == P())
+             .where(ds_t.status == ValueWrapper("posted"))).get_sql(),
+            (args.asset_id,)).fetchone()["c"]
+        if posted:
+            err("Cannot cancel: depreciation has already been posted against this asset.")
 
-    posting_date = args.posting_date or _today_str()
-    accum_t = Table("cwip_cost_accumulation")
-    rows = conn.execute(
-        (Q.from_(accum_t).select(accum_t.id)
-         .where(accum_t.asset_id == P())
-         .where(accum_t.status == ValueWrapper("submitted"))).get_sql(),
-        (args.asset_id,)).fetchall()
+        # AVA-43: accumulations sourced from a submitted purchase invoice / journal
+        # entry are backed by that document's GL (and its AP liability). cancel-cwip
+        # reverses only its own cwip_capitalization legs (voucher_id=accum_id), so it
+        # would strand a document's CWIP debit. Reject — the source document must be
+        # cancelled instead (its own cancel reverses the CWIP leg).
+        doc_sourced = conn.execute(
+            "SELECT a.source_voucher_type, a.source_voucher_id FROM cwip_cost_accumulation a "
+            "JOIN gl_entry g ON g.id = a.gl_entry_id "
+            "WHERE a.asset_id = ? AND a.status = 'submitted' "
+            "AND g.voucher_type != 'cwip_capitalization'",
+            (args.asset_id,)).fetchall()
+        if doc_sourced:
+            refs = ", ".join(sorted({f"{r['source_voucher_type']} {r['source_voucher_id']}"
+                                     for r in doc_sourced}))
+            err(f"Cannot cancel-cwip: costs were accumulated from submitted documents "
+                f"({refs}). Cancel those documents first — each reverses its own CWIP GL.")
 
-    reversal_ids = []
-    for r in rows:
-        try:
-            rev = reverse_gl_entries(
-                conn, voucher_type="cwip_capitalization", voucher_id=r["id"],
-                posting_date=posting_date)
-        except (ValueError, NotImplementedError) as e:
-            sys.stderr.write(f"[erpclaw-assets] {e}\n")
-            err(f"GL reversal failed: {e}")
-        reversal_ids.extend(rev)
-        conn.execute((Q.update(accum_t).set(Field("status"), ValueWrapper("reversed"))
-                      .where(accum_t.id == P())).get_sql(), (r["id"],))
+        posting_date = args.posting_date or _today_str()
+        accum_t = Table("cwip_cost_accumulation")
+        rows = conn.execute(
+            (Q.from_(accum_t).select(accum_t.id)
+             .where(accum_t.asset_id == P())
+             .where(accum_t.status == ValueWrapper("submitted"))).get_sql(),
+            (args.asset_id,)).fetchall()
 
-    asset_t = Table("asset")
-    conn.execute((Q.update(asset_t)
-                  .set(Field("status"), ValueWrapper("cancelled"))
-                  .set(Field("gross_value"), ValueWrapper("0"))
-                  .set(Field("current_book_value"), ValueWrapper("0"))
-                  .set(Field("updated_at"), sql_now())
-                  .where(asset_t.id == P())).get_sql(), (args.asset_id,))
+        reversal_ids = []
+        for r in rows:
+            try:
+                rev = reverse_gl_entries(
+                    conn, voucher_type="cwip_capitalization", voucher_id=r["id"],
+                    posting_date=posting_date)
+            except (ValueError, NotImplementedError) as e:
+                conn.rollback()
+                sys.stderr.write(f"[erpclaw-assets] {e}\n")
+                err(f"GL reversal failed: {e}")
+            reversal_ids.extend(rev)
+            conn.execute((Q.update(accum_t).set(Field("status"), ValueWrapper("reversed"))
+                          .where(accum_t.id == P())).get_sql(), (r["id"],))
 
-    audit(conn, "erpclaw-assets", "cancel-cwip", "asset", args.asset_id,
-          old_values={"status": "under_construction",
-                      "current_book_value": asset_dict["current_book_value"]},
-          new_values={"status": "cancelled", "current_book_value": "0"},
-          description=f"Cancelled CWIP {asset_dict['naming_series']}: {args.reason}")
+        asset_t = Table("asset")
+        _cancel_cur = conn.execute((Q.update(asset_t)
+                      .set(Field("status"), ValueWrapper("cancelled"))
+                      .set(Field("gross_value"), ValueWrapper("0"))
+                      .set(Field("current_book_value"), ValueWrapper("0"))
+                      .set(Field("updated_at"), sql_now())
+                      .where(asset_t.id == P())
+                      .where(Field("status") == ValueWrapper("under_construction"))).get_sql(), (args.asset_id,))
+        if _cancel_cur.rowcount == 0:
+            conn.rollback()
+            _fr_t = Table("asset")
+            _fr_row = conn.execute(
+                Q.from_(_fr_t).select(_fr_t.star).where(_fr_t.id == P()).get_sql(),
+                (args.asset_id,)).fetchone()
+            if not _fr_row:
+                err(f"Asset {args.asset_id} not found",
+                    suggestion="Use 'list assets' to see available assets.")
+            _fr_dict = row_to_dict(_fr_row)
+            err(f"cancel-cwip is only allowed before transfer; "
+                f"'{_fr_dict['naming_series']}' is '{_fr_dict['status']}'.")
 
-    conn.commit()
+        audit(conn, "erpclaw-assets", "cancel-cwip", "asset", args.asset_id,
+              old_values={"status": "under_construction",
+                          "current_book_value": asset_dict["current_book_value"]},
+              new_values={"status": "cancelled", "current_book_value": "0"},
+              description=f"Cancelled CWIP {asset_dict['naming_series']}: {args.reason}")
+
+        conn.commit()
+    except SystemExit:
+        conn.rollback()
+        raise
     ok({"asset_id": args.asset_id, "new_status": "cancelled",
         "accumulations_reversed": len(rows), "reversal_gl_entry_ids": reversal_ids,
         "message": f"CWIP {asset_dict['naming_series']} cancelled "
@@ -3332,6 +3506,23 @@ ACTIONS = {
 }
 
 
+def _resolve_company_flag(conn, args):
+    """Resolve --company (name or id) into args.company_id.
+
+    main() calls this once before dispatch. An id passed through --company
+    keeps working: a bound read checks whether the value is exactly an
+    existing company.id first, and only otherwise resolves it as an exact
+    company name (a miss refuses).
+    """
+    if getattr(args, "company_name", None) and not getattr(args, "company_id", None):
+        _t = Table("company")
+        probe = (Q.from_(_t).select(_t.id).where(_t.id == P()))
+        if conn.execute(probe.get_sql(), (args.company_name,)).fetchone():
+            args.company_id = args.company_name
+            return
+        args.company_id = resolve_company_id(conn, None, args.company_name)
+
+
 # ---------------------------------------------------------------------------
 # main()
 # ---------------------------------------------------------------------------
@@ -3343,6 +3534,7 @@ def main():
 
     # Entity IDs
     parser.add_argument("--company-id")
+    parser.add_argument("--company", dest="company_name", default=None)
     parser.add_argument("--asset-id")
     parser.add_argument("--asset-category-id")
     parser.add_argument("--item-id")
@@ -3438,8 +3630,7 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check
@@ -3450,12 +3641,14 @@ def main():
         conn.close()
         sys.exit(1)
 
+    _resolve_company_flag(conn, args)
+
     try:
         ACTIONS[args.action](conn, args)
     except Exception as e:
         conn.rollback()
         sys.stderr.write(f"[erpclaw-assets] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 

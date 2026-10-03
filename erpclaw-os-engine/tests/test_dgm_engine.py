@@ -884,3 +884,127 @@ class TestDgmSelectBest:
             result = handle_dgm_select_best(args)
             assert result["result"] == "ok"
             assert result.get("already_selected") is True
+
+
+# ===========================================================================
+# Test: run completion timestamps come from the dialect helper
+# ===========================================================================
+
+_STAMP = "2001-02-03T04:05:06Z"
+
+
+def _fixed_now():
+    # A SQL literal, as the real helper returns, so update_row renders it as SQL
+    # rather than binding it as a quoted string value.
+    from erpclaw_lib.query import LiteralValue
+    return LiteralValue(f"'{_STAMP}'")
+
+
+def _run_status(conn, run_id):
+    return conn.execute(
+        "SELECT status, completed_at FROM erpclaw_dgm_run WHERE id = ?", (run_id,),
+    ).fetchone()
+
+
+class TestRunCompletionStampsThroughDialectHelper:
+    """Every completed_at the DGM run lifecycle writes comes from erpclaw_lib.query.now().
+
+    Each test replaces sql_now in the namespace of the code under test with a
+    function returning a fixed quoted timestamp; the stored completed_at must
+    be that timestamp, not the wall clock.
+    """
+
+    def test_select_best_stamps_completed_at(self, db_conn, monkeypatch):
+        monkeypatch.setitem(select_best.__globals__, "sql_now", _fixed_now)
+        run_id = _create_run(db_conn)
+        _create_variant(db_conn, run_id, variant_number=1, exec_time_ms=50)
+        db_conn.commit()
+
+        assert select_best(db_conn, run_id) is not None
+        db_conn.commit()
+
+        row = _run_status(db_conn, run_id)
+        assert row["status"] == "completed"
+        assert row["completed_at"] == _STAMP
+
+    def test_select_best_action_without_qualifying_variant_stamps_completed_at(
+            self, db_path, db_conn, monkeypatch):
+        monkeypatch.setitem(handle_dgm_select_best.__globals__, "sql_now", _fixed_now)
+        run_id = _create_run(db_conn)
+        _create_variant(db_conn, run_id, variant_number=1, test_pass_count=8, test_total=10)
+        db_conn.commit()
+
+        result = handle_dgm_select_best(_make_args(run_id=run_id, db_path=db_path))
+        assert result["status"] == "no_improvement"
+
+        row = _run_status(db_conn, run_id)
+        assert row["status"] == "no_improvement"
+        assert row["completed_at"] == _STAMP
+
+    def test_run_without_qualifying_variant_stamps_completed_at(
+            self, db_path, db_conn, monkeypatch):
+        monkeypatch.setitem(handle_dgm_run_variant.__globals__, "sql_now", _fixed_now)
+        monkeypatch.setitem(handle_dgm_run_variant.__globals__, "select_best",
+                            lambda conn, run_id: None)
+        result = handle_dgm_run_variant(_make_args(
+            module_name_arg="retailclaw", module_name="retailclaw",
+            action_name="list-products", variant_count=2, db_path=db_path,
+        ))
+        assert result["status"] == "no_improvement"
+
+        row = _run_status(db_conn, result["run_id"])
+        assert row["status"] == "no_improvement"
+        assert row["completed_at"] == _STAMP
+
+    def test_failed_run_stamps_completed_at(self, db_path, db_conn, monkeypatch):
+        def _selection_fails(conn, run_id):
+            raise RuntimeError("selection failed")
+
+        monkeypatch.setitem(handle_dgm_run_variant.__globals__, "sql_now", _fixed_now)
+        monkeypatch.setitem(handle_dgm_run_variant.__globals__, "select_best",
+                            _selection_fails)
+        result = handle_dgm_run_variant(_make_args(
+            module_name_arg="retailclaw", module_name="retailclaw",
+            action_name="list-products", variant_count=2, db_path=db_path,
+        ))
+        assert "error" in result
+
+        row = _run_status(db_conn, result["run_id"])
+        assert row["status"] == "failed"
+        assert row["completed_at"] == _STAMP
+
+
+class TestCleanupCutoffComesFromTheApplicationClock:
+    """cleanup_old_variants computes its age cutoff in Python and binds it.
+
+    The module's clock is frozen at 2100-01-01. A variant stamped 32 days
+    earlier must be purged and one stamped 17 days earlier kept; a cutoff read
+    from the database clock would purge neither.
+    """
+
+    def test_cleanup_cutoff_uses_the_application_clock(self, db_conn, monkeypatch):
+        from datetime import datetime as real_datetime, timezone
+
+        class _FrozenDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setitem(cleanup_old_variants.__globals__, "datetime", _FrozenDatetime)
+        run_id = _create_run(db_conn)
+        old_vid = _create_variant(db_conn, run_id, variant_number=1)
+        recent_vid = _create_variant(db_conn, run_id, variant_number=2)
+        db_conn.execute("UPDATE erpclaw_dgm_variant SET created_at = ? WHERE id = ?",
+                        ("2099-11-30 00:00:00", old_vid))
+        db_conn.execute("UPDATE erpclaw_dgm_variant SET created_at = ? WHERE id = ?",
+                        ("2099-12-15 00:00:00", recent_vid))
+        db_conn.commit()
+
+        deleted = cleanup_old_variants(db_conn, days=30)
+        db_conn.commit()
+
+        assert deleted == 1
+        assert db_conn.execute("SELECT id FROM erpclaw_dgm_variant WHERE id = ?",
+                               (old_vid,)).fetchone() is None
+        assert db_conn.execute("SELECT id FROM erpclaw_dgm_variant WHERE id = ?",
+                               (recent_vid,)).fetchone() is not None

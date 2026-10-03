@@ -22,19 +22,28 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH  # noqa: E402
+    from erpclaw_lib.db import get_connection  # noqa: E402
     from erpclaw_lib.decimal_utils import to_decimal, round_currency  # noqa: E402
     from erpclaw_lib.validation import check_input_lengths  # noqa: E402
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.dependencies import check_required_tables
     from erpclaw_lib.query import Q, P, Table, Field, fn, Case, Order, Criterion, Not, NULL, DecimalSum, DecimalAbs
+    from erpclaw_lib.query import abs_days_between, days_between
     from erpclaw_lib.vendor.pypika.terms import LiteralValue, ValueWrapper
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
 except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company", "account"]
 
@@ -1337,10 +1346,10 @@ def categorize_transaction(conn, args):
 
     desc_lower = args.description.lower()
 
-    # raw SQL — ORDER BY arithmetic expression (confidence + 0) not well supported by PyPika
+    # raw SQL — ORDER BY a numeric cast of the TEXT confidence, not well supported by PyPika
     rules = conn.execute(
         """SELECT * FROM categorization_rule
-           ORDER BY confidence + 0 DESC, times_applied DESC"""
+           ORDER BY CAST(confidence AS NUMERIC) DESC, times_applied DESC"""
     ).fetchall()
 
     best_match = None
@@ -1799,16 +1808,16 @@ def detect_anomalies(conn, args):
     by_type = {}
     by_severity = {}
 
-    # raw SQL — complex self-join with ABS(julianday()) and correlated subquery
+    # raw SQL — complex self-join with a day-distance helper and correlated subquery
     dupes = conn.execute(
-        """SELECT g1.id as id1, g2.id as id2,
+        f"""SELECT g1.id as id1, g2.id as id2,
                   g1.posting_date as date1, g2.posting_date as date2,
                   g1.account_id, g1.debit, g1.credit
            FROM gl_entry g1
            JOIN gl_entry g2 ON g1.account_id = g2.account_id
              AND g1.debit = g2.debit AND g1.credit = g2.credit
              AND g1.id < g2.id
-             AND ABS(julianday(g2.posting_date) - julianday(g1.posting_date)) <= 7
+             AND {abs_days_between('g2.posting_date', 'g1.posting_date')} <= 7
            WHERE g1.account_id IN (SELECT id FROM account WHERE company_id = ?)
              AND g1.posting_date >= ? AND g1.posting_date <= ?
              AND g1.is_cancelled = 0 AND g2.is_cancelled = 0""",
@@ -1831,7 +1840,7 @@ def detect_anomalies(conn, args):
             by_type["duplicate_possible"] = by_type.get("duplicate_possible", 0) + 1
             by_severity["warning"] = by_severity.get("warning", 0) + 1
 
-    # raw SQL — arithmetic expressions (col + 0, % 1000) and correlated subquery
+    # raw SQL — numeric casts of TEXT amounts, % 1000, and a correlated subquery
     rounds = conn.execute(
         """SELECT id, posting_date, account_id, debit, credit
            FROM gl_entry
@@ -1839,10 +1848,10 @@ def detect_anomalies(conn, args):
              AND posting_date >= ? AND posting_date <= ?
              AND is_cancelled = 0
              AND (
-               (debit + 0 >= 1000 AND (debit + 0) % 1000 = 0
+               (CAST(debit AS NUMERIC) >= 1000 AND CAST(debit AS NUMERIC) % 1000 = 0
                 AND debit != '0')
                OR
-               (credit + 0 >= 1000 AND (credit + 0) % 1000 = 0
+               (CAST(credit AS NUMERIC) >= 1000 AND CAST(credit AS NUMERIC) % 1000 = 0
                 AND credit != '0')
              )""",
         (company_id, from_date, to_date),
@@ -1877,9 +1886,10 @@ def detect_anomalies(conn, args):
         if not bd["account_id"]:
             continue
 
-        # raw SQL — COALESCE(decimal_sum()) arithmetic with dynamic WHERE
+        # raw SQL — COALESCE(decimal_sum()) legs with dynamic WHERE; subtracted in Python
         actual_query = """
-            SELECT COALESCE(decimal_sum(debit), '0') - COALESCE(decimal_sum(credit), '0') as actual
+            SELECT COALESCE(decimal_sum(debit), '0') as total_debit,
+                   COALESCE(decimal_sum(credit), '0') as total_credit
             FROM gl_entry
             WHERE account_id = ? AND posting_date >= ? AND posting_date <= ?
             AND is_cancelled = 0
@@ -1889,7 +1899,9 @@ def detect_anomalies(conn, args):
             actual_query += " AND cost_center_id = ?"
             actual_params.append(bd["cost_center_id"])
 
-        actual = to_decimal(str(conn.execute(actual_query, actual_params).fetchone()["actual"]))
+        actual_row = conn.execute(actual_query, actual_params).fetchone()
+        actual = (to_decimal(str(actual_row["total_debit"]))
+                  - to_decimal(str(actual_row["total_credit"])))
 
         if budget_amt > 0 and actual > budget_amt:
             deviation = ((actual - budget_amt) / budget_amt * Decimal("100")).quantize(
@@ -1912,7 +1924,7 @@ def detect_anomalies(conn, args):
                 by_type["budget_overrun"] = by_type.get("budget_overrun", 0) + 1
                 by_severity[severity] = by_severity.get(severity, 0) + 1
 
-    # raw SQL — arithmetic expression (outstanding_amount + 0 > 0) for TEXT-to-number cast
+    # raw SQL — numeric cast of the TEXT outstanding_amount
     overdue = conn.execute(
         """SELECT id, customer_id, posting_date, due_date,
                   outstanding_amount, grand_total
@@ -1920,7 +1932,7 @@ def detect_anomalies(conn, args):
            WHERE company_id = ?
              AND status IN ('submitted', 'partially_paid', 'overdue')
              AND due_date < ?
-             AND outstanding_amount + 0 > 0""",
+             AND CAST(outstanding_amount AS NUMERIC) > 0""",
         (company_id, to_date),
     ).fetchall()
 
@@ -2195,12 +2207,12 @@ def forecast_cash_flow(conn, args):
     ).fetchone()
     starting_balance = round_currency(to_decimal(str(bal_row["total_debit"])) - to_decimal(str(bal_row["total_credit"])))
 
-    # raw SQL — arithmetic expression (outstanding_amount + 0 > 0) for TEXT-to-number cast
+    # raw SQL — numeric cast of the TEXT outstanding_amount
     ar_rows = conn.execute(
         """SELECT due_date, outstanding_amount FROM sales_invoice
            WHERE company_id = ?
            AND status IN ('submitted', 'partially_paid', 'overdue')
-           AND outstanding_amount + 0 > 0""",
+           AND CAST(outstanding_amount AS NUMERIC) > 0""",
         (company_id,),
     ).fetchall()
 
@@ -2212,12 +2224,12 @@ def forecast_cash_flow(conn, args):
         inflows.append({"date": due, "amount": str(amt)})
         total_inflows += amt
 
-    # raw SQL — arithmetic expression (outstanding_amount + 0 > 0) for TEXT-to-number cast
+    # raw SQL — numeric cast of the TEXT outstanding_amount
     ap_rows = conn.execute(
         """SELECT due_date, outstanding_amount FROM purchase_invoice
            WHERE company_id = ?
            AND status IN ('submitted', 'partially_paid', 'overdue')
-           AND outstanding_amount + 0 > 0""",
+           AND CAST(outstanding_amount AS NUMERIC) > 0""",
         (company_id,),
     ).fetchall()
 
@@ -2383,17 +2395,17 @@ def discover_correlations(conn, args):
              if ratio > Decimal("0.7") else None))
         new_correlations.append(corr_id)
 
-    # raw SQL — complex CASE with correlated subqueries, AVG(julianday()), GROUP BY
+    # raw SQL — CASE with correlated subqueries, averaged day distance, GROUP BY
+    invoice_date = (
+        "(CASE WHEN pe.party_type = 'customer'"
+        " THEN (SELECT si.posting_date FROM sales_invoice si"
+        " WHERE si.customer_id = pe.party_id LIMIT 1)"
+        " ELSE (SELECT pi.posting_date FROM purchase_invoice pi"
+        " WHERE pi.supplier_id = pe.party_id LIMIT 1)"
+        " END)")
     pay_data = conn.execute(
-        """SELECT pe.party_type, COUNT(*) as cnt,
-                  AVG(julianday(pe.posting_date) - julianday(
-                    CASE WHEN pe.party_type = 'customer'
-                         THEN (SELECT si.posting_date FROM sales_invoice si
-                               WHERE si.customer_id = pe.party_id LIMIT 1)
-                         ELSE (SELECT pi.posting_date FROM purchase_invoice pi
-                               WHERE pi.supplier_id = pe.party_id LIMIT 1)
-                    END
-                  )) as avg_days
+        f"""SELECT pe.party_type, COUNT(*) as cnt,
+                  AVG({days_between('pe.posting_date', invoice_date)}) as avg_days
            FROM payment_entry pe
            WHERE pe.company_id = ? AND pe.posting_date >= ? AND pe.posting_date <= ?
            AND pe.status = 'submitted'
@@ -2647,12 +2659,8 @@ def main():
     check_unknown_args(parser, unknown)
     check_input_lengths(args)
 
-    db_path = args.db_path
-    if db_path:
-        os.environ["ERPCLAW_DB_PATH"] = db_path
-
-    ensure_db_exists()
-    conn = get_connection()
+    db_path = getattr(args, "db_path", None)
+    conn = get_connection(db_path)
 
     # Dependency check
     _dep = check_required_tables(conn, REQUIRED_TABLES)
@@ -2668,7 +2676,7 @@ def main():
         raise
     except Exception as e:
         sys.stderr.write(f"[erpclaw-ai-engine] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 

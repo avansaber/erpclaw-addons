@@ -19,7 +19,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import importlib.util
 if importlib.util.find_spec("erpclaw_lib") is None:
     sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+from erpclaw_lib.db import get_connection
 from erpclaw_lib.decimal_utils import to_decimal, round_currency
 from erpclaw_lib.dependencies import (
     table_exists,
@@ -80,9 +80,34 @@ def _parse_json_arg(value, name):
         err(f"Invalid JSON for --{name}: {value}")
 
 
+# Invoices that count as revenue: every posted, uncancelled status. A payment
+# moves an invoice between these; it does not remove its revenue.
+REVENUE_INVOICE_STATUSES = ("submitted", "partially_paid", "overdue", "paid")
+
+
+def _revenue_statuses():
+    return [ValueWrapper(s) for s in REVENUE_INVOICE_STATUSES]
+
+
 def _require_company(args):
     if not args.company_id:
         err("--company-id is required")
+
+
+_INSPECTION_REFERENCE_TABLES = ("purchase_receipt", "delivery_note", "stock_entry")
+
+
+def _quality_reference_company(conn, reference_type, reference_id):
+    if not reference_type or not reference_id:
+        return None
+    if reference_type not in _INSPECTION_REFERENCE_TABLES:
+        return None
+    ref_table = Table(reference_type)
+    query = Q.from_(ref_table).select(ref_table.company_id).where(ref_table.id == P())
+    row = conn.execute(query.get_sql(), (reference_id,)).fetchone()
+    if row is None:
+        return None
+    return row["company_id"]
 
 
 def _require_dates(args):
@@ -146,6 +171,10 @@ def _get_account_balance(conn, company_id, root_type=None, account_type=None,
     For asset/expense accounts (debit_normal): balance = SUM(debit) - SUM(credit)
     For liability/equity/income accounts (credit_normal): balance = SUM(credit) - SUM(debit)
 
+    Credit-normal account types are payable, revenue, equity,
+    payroll_payable and tax. Receivable is debit-normal (an asset:
+    invoices post DR Receivable), so it uses debit minus credit.
+
     Returns Decimal.
     """
     where = ["a.company_id = ?", "g.is_cancelled = 0", "a.is_group = 0"]
@@ -204,7 +233,7 @@ def _get_account_balance(conn, company_id, root_type=None, account_type=None,
             return total_credit - total_debit
     if account_type:
         at = account_type if isinstance(account_type, str) else account_type[0]
-        if at in ("receivable", "payable", "revenue", "equity",
+        if at in ("payable", "revenue", "equity",
                    "payroll_payable", "tax"):
             return total_credit - total_debit
 
@@ -704,6 +733,15 @@ def action_cost_trend(conn, args):
     periodicity = getattr(args, "periodicity", None) or "monthly"
     account_id = getattr(args, "account_id", None)
 
+    if account_id:
+        acct = Table("account")
+        q = Q.from_(acct).select(acct.company_id).where(acct.id == P())
+        row = conn.execute(q.get_sql(), (account_id,)).fetchone()
+        if row is None:
+            err(f"Account {account_id} not found")
+        if row["company_id"] != company_id:
+            err(f"Account {account_id} does not belong to company {company_id}")
+
     periods = _get_period_breaks(from_date, to_date, periodicity)
     trend = []
 
@@ -897,18 +935,18 @@ def action_revenue_by_customer(conn, args):
                  fn.Count(si.id).as_("invoice_count"),
                  fn.Coalesce(DecimalSum(si.grand_total), ValueWrapper("0")).as_("total_revenue"))
          .where(c.company_id == P())
-         .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+         .where(si.status.isin(_revenue_statuses()))
          .where(si.posting_date >= P())
          .where(si.posting_date <= P())
          .groupby(c.id, c.name)
-         .orderby(Field("total_revenue"), order=Order.desc)
+         .orderby(fn.Cast(DecimalSum(si.grand_total), "NUMERIC"), order=Order.desc)
          .limit(P()).offset(P()))
     rows = conn.execute(q.get_sql(), (company_id, args.from_date, args.to_date, limit, offset)).fetchall()
 
     q_total = (Q.from_(si).join(c).on(si.customer_id == c.id)
                .select(fn.Coalesce(DecimalSum(si.grand_total), ValueWrapper("0")).as_("total"))
                .where(c.company_id == P())
-               .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+               .where(si.status.isin(_revenue_statuses()))
                .where(si.posting_date >= P())
                .where(si.posting_date <= P()))
     total_row = conn.execute(q_total.get_sql(), (company_id, args.from_date, args.to_date)).fetchone()
@@ -965,11 +1003,11 @@ def action_revenue_by_item(conn, args):
                  DecimalSum(sii.quantity).as_("total_qty"),
                  DecimalSum(sii.amount).as_("total_amount"))
          .where(c.company_id == P())
-         .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+         .where(si.status.isin(_revenue_statuses()))
          .where(si.posting_date >= P())
          .where(si.posting_date <= P())
          .groupby(it.id, it.item_name)
-         .orderby(Field("total_amount"), order=Order.desc)
+         .orderby(fn.Cast(DecimalSum(sii.amount), "NUMERIC"), order=Order.desc)
          .limit(P()).offset(P()))
     rows = conn.execute(q.get_sql(), (company_id, args.from_date, args.to_date, limit, offset)).fetchall()
 
@@ -978,7 +1016,7 @@ def action_revenue_by_item(conn, args):
                .join(c).on(si.customer_id == c.id)
                .select(fn.Coalesce(DecimalSum(sii.amount), ValueWrapper("0")).as_("total"))
                .where(c.company_id == P())
-               .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+               .where(si.status.isin(_revenue_statuses()))
                .where(si.posting_date >= P())
                .where(si.posting_date <= P()))
     total_row = conn.execute(q_total.get_sql(), (company_id, args.from_date, args.to_date)).fetchone()
@@ -1030,7 +1068,7 @@ def action_revenue_trend(conn, args):
         q_inv = (Q.from_(si).join(c).on(si.customer_id == c.id)
                  .select(fn.Coalesce(DecimalSum(si.grand_total), ValueWrapper("0")).as_("total"))
                  .where(c.company_id == P())
-                 .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+                 .where(si.status.isin(_revenue_statuses()))
                  .where(si.posting_date >= P())
                  .where(si.posting_date <= P()))
         inv_sql = q_inv.get_sql()
@@ -1096,11 +1134,11 @@ def action_customer_concentration(conn, args):
          .select(c.name.as_("customer_name"),
                  fn.Coalesce(DecimalSum(si.grand_total), ValueWrapper("0")).as_("revenue"))
          .where(c.company_id == P())
-         .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+         .where(si.status.isin(_revenue_statuses()))
          .where(si.posting_date >= P())
          .where(si.posting_date <= P())
          .groupby(c.id, c.name)
-         .orderby(Field("revenue"), order=Order.desc))
+         .orderby(fn.Cast(DecimalSum(si.grand_total), "NUMERIC"), order=Order.desc))
     rows = conn.execute(q.get_sql(), (company_id, args.from_date, args.to_date)).fetchall()
 
     total = sum(_d(r["revenue"]) for r in rows)
@@ -1232,7 +1270,7 @@ def action_abc_analysis(conn, args):
         where.append("sle.posting_date <= ?")
         params.append(as_of)
 
-    # raw SQL — HAVING with arithmetic expression (value + 0 > 0)
+    # raw SQL — HAVING on the aggregate itself: PostgreSQL cannot compute on a select alias there
     rows = conn.execute(
         f"""SELECT i.id as item_id, i.item_name as item_name,
                    COALESCE(decimal_sum(sle.stock_value_difference), '0') as value
@@ -1241,8 +1279,8 @@ def action_abc_analysis(conn, args):
             JOIN warehouse w ON sle.warehouse_id = w.id
             WHERE {' AND '.join(where)}
             GROUP BY i.id, i.item_name
-            HAVING value + 0 > 0
-            ORDER BY value + 0 DESC""",
+            HAVING CAST(COALESCE(decimal_sum(sle.stock_value_difference), '0') AS NUMERIC) > 0
+            ORDER BY CAST(COALESCE(decimal_sum(sle.stock_value_difference), '0') AS NUMERIC) DESC""",
         params,
     ).fetchall()
 
@@ -1364,7 +1402,7 @@ def action_aging_inventory(conn, args):
     buckets_str = getattr(args, "aging_buckets", None) or "30,60,90,120"
     bucket_limits = [int(b) for b in buckets_str.split(",")]
 
-    # raw SQL — HAVING with arithmetic expression (qty_balance + 0 > 0)
+    # raw SQL — HAVING on the aggregate itself: PostgreSQL cannot compute on a select alias there
     rows = conn.execute(
         """SELECT i.id as item_id, i.item_name as item_name,
                   MAX(sle.posting_date) as last_movement,
@@ -1375,7 +1413,7 @@ def action_aging_inventory(conn, args):
            JOIN warehouse w ON sle.warehouse_id = w.id
            WHERE w.company_id = ? AND sle.posting_date <= ? AND sle.is_cancelled = 0
            GROUP BY i.id, i.item_name
-           HAVING qty_balance + 0 > 0""",
+           HAVING CAST(decimal_sum(sle.actual_qty) AS NUMERIC) > 0""",
         (company_id, as_of),
     ).fetchall()
 
@@ -1626,13 +1664,13 @@ def action_project_profitability(conn, args):
 
     where_clause = " AND ".join(where)
 
-    # raw SQL — COALESCE with arithmetic expressions (col + 0) for type coercion
+    # raw SQL — COALESCE over numeric casts of the TEXT cost columns
     projects = conn.execute(
         f"""SELECT p.id, p.project_name, p.status,
-                   COALESCE(p.estimated_cost + 0, 0) as est_cost,
-                   COALESCE(p.actual_cost + 0, 0) as act_cost,
-                   COALESCE(p.total_billed + 0, 0) as total_billed,
-                   COALESCE(p.profit_margin + 0, 0) as profit_margin
+                   COALESCE(CAST(p.estimated_cost AS NUMERIC), 0) as est_cost,
+                   COALESCE(CAST(p.actual_cost AS NUMERIC), 0) as act_cost,
+                   COALESCE(CAST(p.total_billed AS NUMERIC), 0) as total_billed,
+                   COALESCE(CAST(p.profit_margin AS NUMERIC), 0) as profit_margin
             FROM project p
             WHERE {where_clause}
             ORDER BY p.project_name""",
@@ -1685,47 +1723,78 @@ def action_quality_dashboard(conn, args):
     from_date = getattr(args, "from_date", None)
     to_date = getattr(args, "to_date", None)
 
-    # quality_inspection has no company_id — filter through item if needed
-    where = ["1=1"]
-    params = []
+    qi = Table("quality_inspection")
+    insp_query = Q.from_(qi).select(qi.id, qi.status, qi.reference_type, qi.reference_id)
+    insp_params = []
     if from_date:
-        where.append("qi.inspection_date >= ?")
-        params.append(from_date)
+        insp_query = insp_query.where(qi.inspection_date >= P())
+        insp_params.append(from_date)
     if to_date:
-        where.append("qi.inspection_date <= ?")
-        params.append(to_date)
+        insp_query = insp_query.where(qi.inspection_date <= P())
+        insp_params.append(to_date)
+    inspection_rows = conn.execute(insp_query.get_sql(), insp_params).fetchall()
 
-    where_clause = " AND ".join(where)
+    total = 0
+    passed = 0
+    failed = 0
+    unattributed_inspections = 0
+    inspection_company = {}
+    reference_cache = {}
+    for insp_row in inspection_rows:
+        cache_key = (insp_row["reference_type"], insp_row["reference_id"])
+        if cache_key in reference_cache:
+            owner = reference_cache[cache_key]
+        else:
+            owner = _quality_reference_company(
+                conn, insp_row["reference_type"], insp_row["reference_id"])
+            reference_cache[cache_key] = owner
+        inspection_company[insp_row["id"]] = owner
+        if owner is None:
+            unattributed_inspections += 1
+        elif owner == company_id:
+            total += 1
+            if insp_row["status"] == "accepted":
+                passed += 1
+            elif insp_row["status"] == "rejected":
+                failed += 1
+    if total > 0:
+        pass_rate = _pct(Decimal(str(passed)), Decimal(str(total)))
+    else:
+        pass_rate = "N/A"
 
-    # raw SQL — SUM(CASE WHEN ...) aggregate pattern
-    row = conn.execute(
-        f"""SELECT COUNT(*) as total,
-                   SUM(CASE WHEN qi.status = 'accepted' THEN 1 ELSE 0 END) as passed,
-                   SUM(CASE WHEN qi.status = 'rejected' THEN 1 ELSE 0 END) as failed
-            FROM quality_inspection qi
-            WHERE {where_clause}""",
-        params,
-    ).fetchone()
-
-    total = row["total"]
-    passed = row["passed"] or 0
-    failed = row["failed"] or 0
-    pass_rate = _pct(Decimal(str(passed)), Decimal(str(total))) if total > 0 else "N/A"
-
-    # Non-conformance count if table exists
     nc_count = 0
     if table_exists(conn, "non_conformance"):
         nc = Table("non_conformance")
-        q_nc = Q.from_(nc).select(fn.Count("*").as_("cnt"))
+        nc_query = Q.from_(nc).select(nc.id, nc.quality_inspection_id)
         nc_params = []
         if from_date:
-            q_nc = q_nc.where(nc.created_at >= P())
+            nc_query = nc_query.where(nc.created_at >= P())
             nc_params.append(from_date)
         if to_date:
-            q_nc = q_nc.where(nc.created_at <= P())
+            nc_query = nc_query.where(nc.created_at <= P())
             nc_params.append(to_date)
-        nc_row = conn.execute(q_nc.get_sql(), nc_params).fetchone()
-        nc_count = nc_row["cnt"]
+        nc_rows = conn.execute(nc_query.get_sql(), nc_params).fetchall()
+        for nc_row in nc_rows:
+            insp_id = nc_row["quality_inspection_id"]
+            if not insp_id:
+                continue
+            if insp_id in inspection_company:
+                owner = inspection_company[insp_id]
+            else:
+                lookup = Q.from_(qi).select(
+                    qi.reference_type, qi.reference_id).where(qi.id == P())
+                insp = conn.execute(lookup.get_sql(), (insp_id,)).fetchone()
+                if insp is None:
+                    continue
+                cache_key = (insp["reference_type"], insp["reference_id"])
+                if cache_key in reference_cache:
+                    owner = reference_cache[cache_key]
+                else:
+                    owner = _quality_reference_company(
+                        conn, insp["reference_type"], insp["reference_id"])
+                    reference_cache[cache_key] = owner
+            if owner == company_id:
+                nc_count += 1
 
     ok({
         "period": {"from_date": from_date, "to_date": to_date},
@@ -1736,6 +1805,8 @@ def action_quality_dashboard(conn, args):
             "pass_rate": pass_rate,
         },
         "non_conformances": nc_count,
+        "unattributed_inspections": unattributed_inspections,
+        "company_id": company_id,
     })
 
 
@@ -1872,7 +1943,7 @@ def action_executive_dashboard(conn, args):
              .select(fn.Count("*").as_("cnt"),
                      fn.Coalesce(DecimalSum(si.grand_total), ValueWrapper("0")).as_("total"))
              .where(c_tbl.company_id == P())
-             .where(si.status.isin([ValueWrapper("submitted"), ValueWrapper("paid")]))
+             .where(si.status.isin(_revenue_statuses()))
              .where(si.posting_date >= P())
              .where(si.posting_date <= P()))
         inv_row = conn.execute(q.get_sql(), (company_id, from_date, to_date)).fetchone()
@@ -2445,8 +2516,7 @@ def main():
     if not action_fn:
         err(f"Unknown action: {args.action}. Available: {', '.join(sorted(ACTIONS.keys()))}")
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Hard requirement: setup + gl must be installed

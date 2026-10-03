@@ -7,7 +7,7 @@ if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
 import pytest
-from pos_helpers import init_all_tables, get_conn, build_env, load_db_query
+from pos_helpers import init_all_tables, get_conn, build_env, load_db_query, SRC_DIR
 
 
 @pytest.fixture
@@ -44,3 +44,28 @@ def env(conn):
 def mod():
     """Loaded db_query module with all ACTIONS."""
     return load_db_query()
+
+
+@pytest.fixture
+def selling_bridge(tmp_path, monkeypatch):
+    """Route cross-skill 'erpclaw' calls at this checkout's foundation router.
+
+    resolve_skill_script() checks $OPENCLAW_SKILLS_DIR/<skill>/scripts/db_query.py
+    first; linking the whole scripts directory keeps the router's relative
+    forward() to the selling domain working. Child processes resolve erpclaw_lib
+    through $ERPCLAW_HOME/lib, pinned here to this tree's lib. The fixture's
+    ERPCLAW_DB_PATH already points the subprocess at the test database.
+    """
+    skills = tmp_path / "skills"
+    link = skills / "erpclaw" / "scripts"
+    link.parent.mkdir(parents=True)
+    os.symlink(os.path.join(SRC_DIR, "erpclaw", "scripts"), str(link))
+    monkeypatch.setenv("OPENCLAW_SKILLS_DIR", str(skills))
+    home = tmp_path / "erpclaw_home"
+    home.mkdir()
+    os.symlink(
+        os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup", "lib"),
+        str(home / "lib"),
+    )
+    monkeypatch.setenv("ERPCLAW_HOME", str(home))
+    return str(skills)

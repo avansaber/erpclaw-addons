@@ -2,16 +2,16 @@
 
 All notable changes to the erpclaw-growth addon.
 
-## [Unreleased] — Wave G F7 / M40a (anomaly-sweep NL steer)
+## [Unreleased] — anomaly-sweep NL steer
 
 ### Removed
-- **Two tables this module never used are gone (M63-C).** `elimination_rule` and
+- **Two tables this module never used are gone.** `elimination_rule` and
   `elimination_entry` arrived here from the GL domain during an earlier split. No
   growth code has ever read or written either one: their only reader and writer was
   a foundation action (`run-elimination` in erpclaw-reports), which has been retired
   because it posted group eliminations into the operating companies' live books.
   Intercompany elimination belongs to the consolidation layer
-  (`advacct_elimination_entry`), per ADR-0010. `init_db.py` no longer creates the
+  (`advacct_elimination_entry`). `init_db.py` no longer creates the
   pair (23 tables here now, was 25), and new **migration 007** removes them from
   existing installs. Before dropping anything it **archives every row of both tables**
   to `<ERPCLAW_HOME>/archive/m63c_elimination_legacy_<database>_<UTC>.json` with full
@@ -27,7 +27,6 @@ All notable changes to the erpclaw-growth addon.
   keeps each one's `source_gl_entry_id` / `target_gl_entry_id` so a controller can
   reverse them deliberately with a journal entry. Empty or absent tables produce no
   archive file, and a second run is a clean no-op. No growth action changes.
-  SIM: `planning/simlogs/m63c_SIM_2026-08-12.md`.
 
 ### Changed
 - **`detect-anomalies` is now reachable in plain business English.** The anomaly sweep
@@ -41,10 +40,10 @@ All notable changes to the erpclaw-growth addon.
   (2.10.0): registry re-sign is the wave release gate, not this row.
 
 ### Testing (NL suite)
-- Authored `planning/nl_test_suite/scenarios_growth_basics.yaml` scenario
+- Authored the growth-basics NL scenario
   `growth-b01-anomaly-sweep` (phrasing contains neither "anomaly" nor "suspicious"): seeds
   two round-number GL legs and asserts a routed+executed sweep records a `round_number`
-  find. Status `known-gap` — the cross-model box RED-run is QA's step (WAVE_G_PLAN §8); the
+  find. Status `known-gap` — the cross-model RED run is a QA step; the
   routing claim stays a hypothesis until the box reproduces it.
-- Added an `anomaly` binding to `planning/nl_test_suite/column_map.yaml` so the scenario's
+- Added an `anomaly` binding to the NL suite's column map so the scenario's
   oracle asserts a real end state (the table the sweep writes to had no logical binding).

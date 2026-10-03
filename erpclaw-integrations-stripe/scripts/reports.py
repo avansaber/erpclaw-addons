@@ -98,17 +98,18 @@ def fee_report(conn, args):
         err("--stripe-account-id is required")
     validate_stripe_account(conn, stripe_account_id)
 
-    # Try fee_detail table first (more granular)
+    # Try fee_detail table first (more granular). Amounts are TEXT, so rows
+    # are read per-row and grouped/summed in Python with Decimal.
+    fd = Table("stripe_fee_detail")
+    bt = Table("stripe_balance_transaction")
     rows = conn.execute(
-        """SELECT
-               fd.fee_type,
-               COUNT(*) as count,
-               decimal_sum(fd.amount) as total
-           FROM stripe_fee_detail fd
-           JOIN stripe_balance_transaction bt ON fd.balance_transaction_id = bt.id
-           WHERE bt.stripe_account_id = ?
-           GROUP BY fd.fee_type
-           ORDER BY total DESC""",
+        Q.from_(fd).join(bt).on(
+            fd.balance_transaction_id == bt.id
+        ).select(
+            fd.fee_type, fd.amount
+        ).where(
+            bt.stripe_account_id == P()
+        ).get_sql(),
         (stripe_account_id,)
     ).fetchall()
 
@@ -116,34 +117,45 @@ def fee_report(conn, args):
     grand_total = Decimal("0")
 
     if rows:
+        groups = {}
         for r in rows:
-            amt = to_decimal(str(r["total"])) if r["total"] else Decimal("0")
-            grand_total += amt
+            amt = to_decimal(str(r["amount"])) if r["amount"] is not None else Decimal("0")
+            entry = groups.setdefault(r["fee_type"], {"count": 0, "total": Decimal("0")})
+            entry["count"] += 1
+            entry["total"] += amt
+        for fee_type, entry in sorted(groups.items(), key=lambda kv: (-kv[1]["total"], kv[0])):
+            grand_total += entry["total"]
             fee_types.append({
-                "fee_type": r["fee_type"],
-                "count": r["count"],
-                "total": str(round_currency(amt)),
+                "fee_type": fee_type,
+                "count": entry["count"],
+                "total": str(round_currency(entry["total"])),
             })
     else:
-        # Fallback: aggregate from balance_transaction.fee grouped by type
+        # Fallback: aggregate from balance_transaction.fee grouped by type.
+        # A row counts only when its fee is numerically non-zero.
+        t = Table("stripe_balance_transaction")
         fallback = conn.execute(
-            """SELECT
-                   type,
-                   COUNT(*) as count,
-                   decimal_sum(fee) as total_fee
-               FROM stripe_balance_transaction
-               WHERE stripe_account_id = ? AND fee != '0'
-               GROUP BY type
-               ORDER BY total_fee DESC""",
+            Q.from_(t).select(
+                t.type, t.fee
+            ).where(
+                t.stripe_account_id == P()
+            ).get_sql(),
             (stripe_account_id,)
         ).fetchall()
+        groups = {}
         for r in fallback:
-            amt = to_decimal(str(r["total_fee"])) if r["total_fee"] else Decimal("0")
-            grand_total += amt
+            amt = to_decimal(str(r["fee"])) if r["fee"] is not None else Decimal("0")
+            if amt == 0:
+                continue
+            entry = groups.setdefault(r["type"], {"count": 0, "total": Decimal("0")})
+            entry["count"] += 1
+            entry["total"] += amt
+        for fee_type, entry in sorted(groups.items(), key=lambda kv: (-kv[1]["total"], kv[0])):
+            grand_total += entry["total"]
             fee_types.append({
-                "fee_type": r["type"],
-                "count": r["count"],
-                "total": str(round_currency(amt)),
+                "fee_type": fee_type,
+                "count": entry["count"],
+                "total": str(round_currency(entry["total"])),
             })
 
     ok({
@@ -213,11 +225,13 @@ def payout_detail_report(conn, args):
 
     result = row_to_dict(payout)
 
-    # Get all balance transactions in this payout
+    # Get all balance transactions in this payout, on the payout's own
+    # Stripe account (as stripe-reconcile-payout counts them)
     bt = Table("stripe_balance_transaction")
     txns = conn.execute(
-        Q.from_(bt).select("*").where(bt.payout_id == P()).get_sql(),
-        (payout_stripe_id,)
+        Q.from_(bt).select("*").where(bt.payout_id == P())
+        .where(bt.stripe_account_id == P()).get_sql(),
+        (payout_stripe_id, result["stripe_account_id"])
     ).fetchall()
 
     txn_list = rows_to_list(txns)

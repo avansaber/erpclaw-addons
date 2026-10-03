@@ -7,15 +7,14 @@ dispatches. `test_assets.py` covers the impairment / revaluation / capitalize
 family with real GL asserts; the depreciation and disposal family never got the
 same treatment.
 
-Register rows: `planning/wave_g/F21_TEST_DEPTH_REGISTER_2026-08-11.json`
+Register rows:
 (`post-depreciation`, `run-depreciation`, `dispose-asset`; all
 `routability-only`, ledger reach `gl_entry`).
 
 The disposal pins carried F21-FINDING-2: the shipped GL layout did not match the
 action's own documented layout. **Fixed 2026-08-12 (M61)** — the proceeds and the
 gain/loss plug now take explicit accounts, and these pins read the repaired
-layout, per-leg. `planning/simlogs/m61_SIM_2026-08-12.md` has the before/after
-journal entries.
+layout, per-leg.
 """
 import json
 import os
@@ -208,7 +207,7 @@ def test_batch_is_refused_for_an_unknown_company(conn, genv):
 # to post to the category's depreciation_account_id. The pins below now read the
 # repaired layout — proceeds to --proceeds-account-id, the plug to
 # --gain-loss-account-id, and the depreciation account never touched by a
-# disposal at all. Plan home: planning/pending_items.md row M61.
+# disposal at all.
 
 
 def _by_account(gl):
@@ -615,8 +614,7 @@ def test_a_negative_sale_amount_is_refused(conn, genv):
 #
 # M61 gated both legs on root_type alone. Its merge-QA pass proved that too
 # loose in both directions, and Nik ruled TIGHT on 2026-08-12: the gates read
-# account_type now. Plan home: planning/pending_items.md row M91; measurements in
-# planning/simlogs/m91_SIM_2026-08-12.md.
+# account_type now.
 #
 # M91 could only allow ('revenue','expense') on the gain/loss leg because the
 # registry carried no disposal class at all, which left its own residual: a gain
@@ -805,7 +803,6 @@ def test_one_combined_disposal_account_may_carry_the_loss_too(conn, genv):
 # M91's residual, closed. `disposal_gain_loss` is now a registered account type
 # and the shipped chart's 4220 / 5340 carry it, so the gain/loss leg can be
 # pinned to the disposal line instead of merely excluded from other machinery.
-# Plan home: planning/pending_items.md row M94; SIM: planning/simlogs/m94_SIM_2026-08-12.md.
 
 
 def _deregister_disposal_type(conn):

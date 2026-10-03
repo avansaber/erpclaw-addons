@@ -280,7 +280,8 @@ def reject_eco(conn, args):
 
     notes = getattr(args, "notes", None)
     # PyPika: skipped — too complex (COALESCE + string concatenation with ||)
-    update_sql = "UPDATE \"engineering_change_order\" SET \"status\"='rejected',\"updated_at\"=datetime('now')"
+    update_sql = ("UPDATE \"engineering_change_order\" SET \"status\"='rejected',\"updated_at\"="
+                  + str(sql_now()))
     params = []
     if notes:
         # Store rejection reason in description if no dedicated field

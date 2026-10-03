@@ -318,6 +318,10 @@ SHOPIFY_PAYOUT = Table(
     Column("company_id", Text,
            ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
     Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    # Each holds the journal_entry id of that reserve posting; existing
+    # installs get the columns from migration 002.
+    Column("reserve_hold_voucher_id", Text),
+    Column("reserve_release_voucher_id", Text),
     CheckConstraint(
         "status IN ('scheduled','in_transit','paid','failed','cancelled')",
         name="ck_shopify_payout_status"),

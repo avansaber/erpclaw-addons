@@ -5,19 +5,41 @@ Provides encryption/decryption for access tokens, Shopify amount conversion
 domain modules.
 """
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
-# Auto-install requests if not present (transparent to user)
-try:
-    import requests as _requests_check  # noqa: F401
-except ImportError:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "requests", "-q"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+REQUESTS_PACKAGE = "requests"
+REQUESTS_INSTALL_HINT = (
+    "The 'requests' Python package is required by erpclaw-integrations-shopify "
+    "and is not installed in this Python environment. Install it with: "
+    "python3 -m pip install requests"
+)
+
+
+class MissingDependencyError(ImportError):
+    """A required third-party package is absent.
+
+    Subclasses ImportError so callers that already guard their own direct
+    imports with `except ImportError` keep working unchanged.
+    """
+
+
+def require_requests():
+    """Return the imported requests module.
+
+    Raises MissingDependencyError naming the package and the install command
+    when requests is not importable. ERPClaw does not install packages on the
+    operator's behalf: the environment that runs ERPClaw may be read-only,
+    shared, or managed by the operator's own packaging, and an install that
+    happens as a side effect of an import makes behaviour depend on who ran
+    the process.
+    """
+    try:
+        import requests
+    except ImportError as exc:
+        raise MissingDependencyError(REQUESTS_INSTALL_HINT) from exc
+    return requests
 
 try:
     import importlib.util
@@ -116,7 +138,7 @@ def graphql_request(shop_domain, access_token, query, variables=None):
     Raises:
         Exception on HTTP or GraphQL errors.
     """
-    import requests
+    requests = require_requests()
 
     url = f"https://{shop_domain}/admin/api/2026-04/graphql.json"
     headers = {

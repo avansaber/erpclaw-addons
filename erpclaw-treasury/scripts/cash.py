@@ -209,17 +209,35 @@ def record_bank_balance(conn, args):
     except Exception:
         err(f"Invalid current-balance: {balance}")
 
+    reconciled_date = getattr(args, "reconciled_date", None)
+    if reconciled_date is not None:
+        try:
+            parsed_date = datetime.strptime(reconciled_date, "%Y-%m-%d").date()
+        except Exception:
+            err(f"Invalid --reconciled-date: {reconciled_date}")
+        if parsed_date > date.today():
+            err("--reconciled-date cannot be in the future")
+
     row = conn.execute(Q.from_(Table("bank_account_extended")).select(Table("bank_account_extended").star).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone()
     if not row:
         err(f"Bank account {acct_id} not found")
 
-    company_id = row_to_dict(row)["company_id"]
+    prev = row_to_dict(row)
+    company_id = prev["company_id"]
 
-    sql = update_row("bank_account_extended",
-        data={"current_balance": P(), "last_reconciled_date": sql_today(),
-              "updated_at": sql_now()},
-        where={"id": P()})
-    conn.execute(sql, (balance, acct_id))
+    if reconciled_date is not None:
+        sql = update_row("bank_account_extended",
+            data={"current_balance": P(), "last_reconciled_date": P(),
+                  "updated_at": sql_now()},
+            where={"id": P()})
+        conn.execute(sql, (balance, reconciled_date, acct_id))
+        last_reconciled = reconciled_date
+    else:
+        sql = update_row("bank_account_extended",
+            data={"current_balance": P(), "updated_at": sql_now()},
+            where={"id": P()})
+        conn.execute(sql, (balance, acct_id))
+        last_reconciled = prev.get("last_reconciled_date")
 
     # Create a cash_position snapshot
     pos_id = str(uuid.uuid4())
@@ -236,11 +254,17 @@ def record_bank_balance(conn, args):
         f"Balance recorded for bank account {acct_id}",
         company_id,
     ))
+    new_values = {"balance": balance, "position_id": pos_id}
+    if reconciled_date is not None:
+        new_values["reconciled_date"] = reconciled_date
     audit(conn, SKILL, "treasury-record-bank-balance", "bank_account_extended", acct_id,
-          new_values={"balance": balance, "position_id": pos_id})
+          new_values=new_values)
     conn.commit()
-    ok({"account_id": acct_id, "new_balance": balance, "position_id": pos_id,
-        "naming_series": ns})
+    response = {"account_id": acct_id, "new_balance": balance, "position_id": pos_id,
+        "naming_series": ns, "last_reconciled_date": last_reconciled}
+    if reconciled_date is not None:
+        response["reconciled_date"] = reconciled_date
+    ok(response)
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +706,7 @@ def liquidity_report(conn, args):
          .where(ba.company_id == P())
          .where(ba.is_active == 1)
          .where(ba.account_type.isin(["checking", "savings", "money_market"]))
-         .orderby(ba.current_balance, order=Order.desc))
+         .orderby(ba.bank_name).orderby(ba.account_name))
     liquid_accts = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     liquid_total = Decimal("0")
@@ -691,6 +715,9 @@ def liquidity_report(conn, args):
         d = row_to_dict(r)
         liquid_total += Decimal(d["current_balance"] or "0")
         liquid_list.append(d)
+    # Largest balance first, compared as Decimal: the column is TEXT, so an
+    # ORDER BY on it would rank "900.00" above "12500.50".
+    liquid_list.sort(key=lambda d: Decimal(d["current_balance"] or "0"), reverse=True)
 
     # Short-term investments (active, maturing within 90 days)
     cutoff = (date.today() + timedelta(days=90)).isoformat()

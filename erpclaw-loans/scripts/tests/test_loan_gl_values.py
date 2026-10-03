@@ -8,15 +8,14 @@ is the point of this file: a loan can be recorded, repaid and written off with
 correct-looking documents while the general ledger stays empty, and no existing
 assertion would notice.
 
-Register rows: `planning/wave_g/F21_TEST_DEPTH_REGISTER_2026-08-11.json`
+Register rows:
 (`loan-disburse-loan`, `loan-write-off-loan` — both `behavioral` on payload
 asserts alone, ledger reach `gl_entry`). This file is the worked example behind
 the digest's "behavioral is not ledger-covered" caveat.
 
 F21-FINDING-4 (`loan-disburse-loan` posted nothing) and the repayment site the
 M62 sweep found alongside it are FIXED as of 2026-08-12; the pins below are the
-repaired readings plus the rollback proofs. SIM:
-`planning/simlogs/m62_SIM_2026-08-12.md`.
+repaired readings plus the rollback proofs.
 """
 import os
 import sys

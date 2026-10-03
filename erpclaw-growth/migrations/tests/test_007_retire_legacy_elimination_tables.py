@@ -640,7 +640,7 @@ def test_an_incomplete_archive_is_caught_before_the_drop(seeded_db, home, monkey
 # trail, because it is the only one that COUNTS before it drops and knows where
 # it put the rows. The other eight assert emptiness and never check (row M109),
 # which is why they stay `MIGRATION_DATA_CLASS = "table-drop"` and this one does
-# not. SIM: planning/simlogs/m102_SIM_2026-08-12.md.
+# not.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_the_trail_records_each_dropped_table_with_its_row_count(seeded_db, home):
@@ -779,3 +779,285 @@ def test_the_migration_id_is_the_stem_the_runner_ledgers_it_under():
     expectation from `mig.MIGRATION_ID` would agree with any drifted value."""
     assert mig.MIGRATION_ID == "007_retire_legacy_elimination_tables"
     assert mig.MIGRATION_DATA_CLASS == "rows"
+
+
+def test_write_archive_redacts_url_credentials(home):
+    """The archive's `database` field must not carry URL credentials."""
+    url = "postgresql://user:secret@db.invalid/growth"
+    rows = {"elimination_rule": [{"id": "rule-0001"}],
+            "elimination_entry": []}
+    written = mig._write_archive(url, rows)
+    seam.dispose_engines()
+    with open(written, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert "secret" not in str(payload["database"])
+    assert "growth" in str(payload["database"])
+
+
+def test_require_audit_log_redacts_url_credentials(monkeypatch):
+    """The refusal message must not carry URL credentials."""
+    monkeypatch.setattr(seam, "table_exists", lambda name, db_arg=None: False)
+    url = "postgresql://user:secret@db.invalid/growth"
+    with pytest.raises(RuntimeError) as exc:
+        mig._require_audit_log(url, False)
+    assert "secret" not in str(exc.value)
+    seam.dispose_engines()
+
+
+_PG_URL_MARKER_CASES = [
+    pytest.param(
+        "postgresql://UINFOMARKERu7q:PINFOMARKERp7q@db.invalid/growthdb",
+        ["UINFOMARKERu7q", "PINFOMARKERp7q"],
+        id="userinfo-only",
+    ),
+    pytest.param(
+        "postgresql://db.invalid/growthdb"
+        "?password=QUERYMARKERq8z&sslmode=QUERYMODEMARKERm8z",
+        ["QUERYMARKERq8z", "QUERYMODEMARKERm8z"],
+        id="query-only",
+    ),
+    pytest.param(
+        "postgresql://BOTHUMARKERu9x:BOTHPMARKERp9x@db.invalid/growthdb"
+        "?password=BOTHQMARKERq9x",
+        ["BOTHUMARKERu9x", "BOTHPMARKERp9x", "BOTHQMARKERq9x"],
+        id="userinfo-and-query",
+    ),
+    pytest.param(
+        "postgresql://FRAGUMARKERu4v:FRAGPMARKERp4v@db.invalid/growthdb"
+        "?password=FRAGQMARKERq4v#FRAGFMARKERf4v",
+        ["FRAGUMARKERu4v", "FRAGPMARKERp4v", "FRAGQMARKERq4v", "FRAGFMARKERf4v"],
+        id="userinfo-query-and-fragment",
+    ),
+]
+
+
+@pytest.mark.parametrize("url,markers", _PG_URL_MARKER_CASES)
+def test_url_markers_absent_from_archive_and_refusal(home, monkeypatch, url, markers):
+    """Query/fragment markers must reach neither the archive nor the refusal.
+
+    String and output test only: the mocked connection boundary fails any
+    attempted live connection before network or socket access, and the
+    synthetic host stays `db.invalid` throughout.
+    """
+    calls = []
+
+    def _no_live_connection(*a, **k):
+        calls.append((a, k))
+        raise AssertionError("live connection attempted for inert test URL")
+
+    monkeypatch.setattr(mig, "get_connection", _no_live_connection)
+    monkeypatch.setattr(seam, "table_exists",
+                        lambda name, db_arg=None: False)
+    rows = {"elimination_rule": [{"id": "rule-0001"}],
+            "elimination_entry": []}
+    written = mig._write_archive(url, rows)
+    seam.dispose_engines()
+    with open(written, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    database_field = str(payload["database"])
+    for marker in markers:
+        assert marker not in database_field
+    assert "growthdb" in database_field
+    assert "db.invalid" in database_field
+
+    with pytest.raises(RuntimeError) as exc:
+        mig._require_audit_log(url, False)
+    refusal = str(exc.value)
+    for marker in markers:
+        assert marker not in refusal
+    assert "growthdb" in refusal
+    assert calls == [], "inert test URL reached the connection boundary"
+    seam.dispose_engines()
+
+
+def test_sqlite_path_preserved_exactly_in_archive_and_refusal(home, monkeypatch, tmp_path):
+    """A SQLite file path is display text, not a URL: keep it byte-identical."""
+    def _no_live_connection(*a, **k):
+        raise AssertionError("live connection attempted for sqlite path test")
+
+    monkeypatch.setattr(mig, "get_connection", _no_live_connection)
+    path = str(tmp_path / "growth.sqlite")
+    rows = {"elimination_rule": [{"id": "rule-0001"}],
+            "elimination_entry": []}
+    written = mig._write_archive(path, rows)
+    seam.dispose_engines()
+    with open(written, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert str(payload["database"]) == path
+
+    monkeypatch.setattr(seam, "table_exists",
+                        lambda name, db_arg=None: False)
+    with pytest.raises(RuntimeError) as exc:
+        mig._require_audit_log(path, False)
+    assert path in str(exc.value)
+    seam.dispose_engines()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# M323b6c — URL fragments must not reach the archive filename/discriminator.
+#
+# `_db_discriminator` stripped user-info and the query but left a fragment when
+# the URL had no query, so a fragment-only URL put its marker in the readable
+# filename stem and in the digest input. Report-only output disclosed the same
+# path via `archive_path`. String and output tests only: every case uses the
+# synthetic host `db.invalid`, and the mocked connection/seam boundaries fail
+# any attempted live connection before network or socket access. Markers are
+# kept short so a leaked marker survives the 24-character filename-stem
+# truncation instead of passing vacuously.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_PG_FILENAME_MARKER_CASES = [
+    pytest.param(
+        "postgresql://db.invalid/growthdb#FRAGONLY1a",
+        ["FRAGONLY1a"],
+        id="fragment-only",
+    ),
+    pytest.param(
+        "postgresql://db.invalid/growthdb"
+        "?password=QRYONLY2b&sslmode=QMODE2b",
+        ["QRYONLY2b", "QMODE2b"],
+        id="query-only",
+    ),
+    pytest.param(
+        "postgresql://UINFO3c:PINFO3c@db.invalid/growthdb",
+        ["UINFO3c", "PINFO3c"],
+        id="userinfo-only",
+    ),
+    pytest.param(
+        "postgresql://CUINF4d:CPASS4d@db.invalid/growthdb"
+        "?password=CQRY4d#CFRAG4d",
+        ["CUINF4d", "CPASS4d", "CQRY4d", "CFRAG4d"],
+        id="combined",
+    ),
+]
+
+_CLEAN_PG_LOCATION = "postgresql://db.invalid/growthdb"
+
+
+@pytest.mark.parametrize("url,markers", _PG_FILENAME_MARKER_CASES)
+def test_archive_filename_discriminator_and_report_path_omit_url_markers(
+        home, monkeypatch, url, markers):
+    """Filename stem, digest input and report-only path carry no URL secrets."""
+    calls = []
+
+    def _no_live_connection(*a, **k):
+        calls.append((a, k))
+        raise AssertionError("live connection attempted for inert test URL")
+
+    monkeypatch.setattr(mig, "get_connection", _no_live_connection)
+    monkeypatch.setattr(seam, "table_exists",
+                        lambda name, db_arg=None: (_ for _ in ()).throw(
+                            AssertionError("seam touched for inert filename test")))
+
+    discriminator = mig._db_discriminator(url)
+    for marker in markers:
+        assert marker not in discriminator
+    assert discriminator == mig._db_discriminator(_CLEAN_PG_LOCATION), (
+        "secret-bearing URL components changed the discriminator")
+    assert "growthdb" in discriminator
+
+    stamped = mig.archive_path(url, "20260812T101112Z")
+    for marker in markers:
+        assert marker not in stamped
+    assert stamped == mig.archive_path(
+        _CLEAN_PG_LOCATION, "20260812T101112Z")
+    assert "growthdb" in os.path.basename(stamped)
+
+    report_path = mig.archive_path(url, "<timestamp>")
+    for marker in markers:
+        assert marker not in report_path
+    assert report_path == mig.archive_path(
+        _CLEAN_PG_LOCATION, "<timestamp>")
+
+    rows = {"elimination_rule": [{"id": "rule-0001"}],
+            "elimination_entry": []}
+    written = mig._write_archive(url, rows)
+    seam.dispose_engines()
+    for marker in markers:
+        assert marker not in os.path.basename(written)
+    with open(written, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    for marker in markers:
+        assert marker not in str(payload["database"])
+    assert calls == [], "inert test URL reached the connection boundary"
+    seam.dispose_engines()
+
+
+def test_report_only_output_omits_fragment_marker(home, monkeypatch, capsys):
+    """End-to-end report-only text for the fragment-only URL carries no marker."""
+    marker = "FRAGONLY1a"
+    url = "postgresql://db.invalid/growthdb#" + marker
+
+    class _StubConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mig, "get_connection", lambda p: _StubConn())
+    monkeypatch.setattr(seam, "table_exists",
+                        lambda name, db_arg=None: True)
+    monkeypatch.setattr(mig, "_read_rows",
+                        lambda conn, table: [{"id": "rule-0001"}])
+
+    res = mig.run_migration(url, report_only=True)
+    out = capsys.readouterr().out
+
+    assert res["report_only"] is True
+    assert res["archive"] is None
+    assert marker not in out
+    assert marker not in str(res)
+    assert "growthdb" in out
+    assert _archives(home) == []
+    seam.dispose_engines()
+
+
+def test_fragment_only_predecessor_would_leak(home):
+    """The exact M323b6b ident expression keeps a query-less fragment in both
+    the stem and the digest input; the fixed discriminator drops it."""
+    marker = "FRAGONLY1a"
+    url = "postgresql://db.invalid/growthdb#" + marker
+    predecessor_ident = mig._URL_CREDENTIALS.sub(
+        "//", str(url)).split("?", 1)[0]
+    assert marker in predecessor_ident, (
+        "predecessor reconstruction should still show the leak")
+    fixed = mig._db_discriminator(url)
+    assert marker not in fixed
+    assert fixed == mig._db_discriminator(_CLEAN_PG_LOCATION)
+    assert "growthdb" in fixed
+    seam.dispose_engines()
+
+
+def test_discriminators_equal_when_only_secret_components_differ():
+    """User-info, query and fragment are not identity: same location, one tag."""
+    base = mig._db_discriminator(_CLEAN_PG_LOCATION)
+    variants = [
+        "postgresql://UINFO3c:PINFO3c@db.invalid/growthdb",
+        "postgresql://db.invalid/growthdb"
+        "?password=QRYONLY2b&sslmode=QMODE2b",
+        "postgresql://db.invalid/growthdb#FRAGONLY1a",
+        "postgresql://CUINF4d:CPASS4d@db.invalid/growthdb"
+        "?password=CQRY4d#CFRAG4d",
+    ]
+    for variant in variants:
+        assert mig._db_discriminator(variant) == base
+
+
+def test_discriminator_distinct_for_different_database():
+    """Stripping secrets must not merge two genuinely different locations."""
+    one = mig._db_discriminator("postgresql://db.invalid/growthdb")
+    other = mig._db_discriminator("postgresql://db.invalid/otherdb")
+    assert one != other
+    assert "growthdb" in one and "otherdb" in other
+
+
+def test_sqlite_discriminator_unchanged(tmp_path, home):
+    """A plain file path keeps its exact stem-and-digest behaviour."""
+    import hashlib
+    path = str(tmp_path / "growth.sqlite")
+    discriminator = mig._db_discriminator(path)
+    expected = "growth-%s" % hashlib.sha256(
+        path.encode("utf-8")).hexdigest()[:8]
+    assert discriminator == expected
+    stamped = mig.archive_path(path, "20260812T101112Z")
+    assert os.path.basename(stamped).startswith(
+        "m63c_elimination_legacy_growth-")
+    assert discriminator in os.path.basename(stamped)

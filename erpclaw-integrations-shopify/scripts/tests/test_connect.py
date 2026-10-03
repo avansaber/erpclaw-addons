@@ -180,6 +180,43 @@ def test_duplicate_shop_upserts_token(db_path, conn, connect_module):
     assert len(rows) == 1
 
 
+def test_repair_stamps_updated_at_through_the_dialect_helper(db_path, conn, connect_module):
+    """The re-pair upsert takes its updated_at from erpclaw_lib.query.now().
+
+    The helper is replaced with a fixed quoted timestamp for the second
+    pairing; the stored value must be that timestamp, not the wall clock.
+    """
+    build_env(conn)
+    with patch.object(connect_module, "_fetch_pair", return_value=_mock_pair_response()):
+        with patch.object(connect_module, "_detect_long_lived_process", _mock_long_lived_false):
+            first = call_action(
+                connect_module.shopify_connect,
+                conn,
+                _Args(pairing_code="ABC-XYZ"),
+            )
+    assert is_ok(first), first
+
+    sentinel = "2001-02-03T04:05:06Z"
+    with patch.object(
+        connect_module,
+        "_fetch_pair",
+        return_value=_mock_pair_response(code="DEF-GHI"),
+    ):
+        with patch.object(connect_module, "_detect_long_lived_process", _mock_long_lived_false):
+            with patch.object(connect_module, "sql_now", lambda: f"'{sentinel}'", create=True):
+                second = call_action(
+                    connect_module.shopify_connect,
+                    conn,
+                    _Args(pairing_code="DEF-GHI"),
+                )
+    assert is_ok(second), second
+    row = conn.execute(
+        "SELECT updated_at FROM shopify_account WHERE id = ?",
+        (first["id"],),
+    ).fetchone()
+    assert row["updated_at"] == sentinel
+
+
 def _http_error(code, body_obj):
     err = urllib.error.HTTPError(
         url="https://w/pair/x",

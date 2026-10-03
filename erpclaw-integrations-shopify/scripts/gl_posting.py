@@ -210,14 +210,19 @@ def post_order_gl(conn, args):
     )
 
     # Post GL entries via erpclaw_lib
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify order {order['shopify_order_id']}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify order {order['shopify_order_id']}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
 
     # COGS entries (separate entry_set)
     cogs_total = Decimal("0")
@@ -242,15 +247,20 @@ def post_order_gl(conn, args):
             cogs_entries.append(_build_gl_entry(
                 acct_row["inventory_account_id"], 0, cogs_total))
 
-            cogs_gl_ids = insert_gl_entries(
-                conn, cogs_entries,
-                voucher_type="journal_entry",
-                voucher_id=je_id,
-                posting_date=posting_date,
-                company_id=company_id,
-                remarks=f"Shopify order {order['shopify_order_id']} COGS",
-                entry_set="cogs",
-            )
+            try:
+                cogs_gl_ids = insert_gl_entries(
+                    conn, cogs_entries,
+                    voucher_type="journal_entry",
+                    voucher_id=je_id,
+                    posting_date=posting_date,
+                    company_id=company_id,
+                    remarks=f"Shopify order {order['shopify_order_id']} COGS",
+                    entry_set="cogs",
+                )
+            except (ValueError, NotImplementedError) as e:
+                conn.rollback()
+                sys.stderr.write(f"[{SKILL}] {e}\n")
+                err(f"GL posting failed: {e}")
             gl_ids.extend(cogs_gl_ids)
 
     # Update order with GL status
@@ -348,14 +358,19 @@ def post_refund_gl(conn, args):
         f"Shopify refund {refund['shopify_refund_id']} GL posting",
     )
 
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify refund {refund['shopify_refund_id']}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify refund {refund['shopify_refund_id']}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
 
     # COGS reversal for restocked items
     restock_total = Decimal("0")
@@ -380,15 +395,20 @@ def post_refund_gl(conn, args):
                 _build_gl_entry(acct_row["cogs_account_id"],
                                 0, restock_total, cc_id),
             ]
-            cogs_gl_ids = insert_gl_entries(
-                conn, cogs_entries,
-                voucher_type="journal_entry",
-                voucher_id=je_id,
-                posting_date=posting_date,
-                company_id=company_id,
-                remarks=f"Shopify refund {refund['shopify_refund_id']} restock COGS",
-                entry_set="cogs",
-            )
+            try:
+                cogs_gl_ids = insert_gl_entries(
+                    conn, cogs_entries,
+                    voucher_type="journal_entry",
+                    voucher_id=je_id,
+                    posting_date=posting_date,
+                    company_id=company_id,
+                    remarks=f"Shopify refund {refund['shopify_refund_id']} restock COGS",
+                    entry_set="cogs",
+                )
+            except (ValueError, NotImplementedError) as e:
+                conn.rollback()
+                sys.stderr.write(f"[{SKILL}] {e}\n")
+                err(f"GL posting failed: {e}")
             gl_ids.extend(cogs_gl_ids)
 
     # Update refund GL status
@@ -466,14 +486,19 @@ def post_payout_gl(conn, args):
         f"Shopify payout {payout['shopify_payout_id']} settlement",
     )
 
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify payout {payout['shopify_payout_id']}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify payout {payout['shopify_payout_id']}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
 
     # Update payout GL status
     sql, params = dynamic_update("shopify_payout", {
@@ -535,12 +560,17 @@ def post_dispute_gl(conn, args):
         if dispute["gl_status"] != "posted":
             err("Cannot reverse dispute GL: no entries have been posted")
 
-        reversal_ids = reverse_gl_entries(
-            conn,
-            voucher_type="journal_entry",
-            voucher_id=dispute["gl_voucher_id"],
-            posting_date=posting_date,
-        )
+        try:
+            reversal_ids = reverse_gl_entries(
+                conn,
+                voucher_type="journal_entry",
+                voucher_id=dispute["gl_voucher_id"],
+                posting_date=posting_date,
+            )
+        except (ValueError, NotImplementedError) as e:
+            conn.rollback()
+            sys.stderr.write(f"[{SKILL}] {e}\n")
+            err(f"GL reversal failed: {e}")
 
         sql, params = dynamic_update("shopify_dispute", {
             "gl_status": "posted",  # Keep posted (now reversed)
@@ -585,14 +615,19 @@ def post_dispute_gl(conn, args):
         f"Shopify dispute {dispute['shopify_dispute_id']} chargeback",
     )
 
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify dispute {dispute['shopify_dispute_id']}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify dispute {dispute['shopify_dispute_id']}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
 
     sql, params = dynamic_update("shopify_dispute", {
         "gl_status": "posted",
@@ -667,14 +702,19 @@ def post_gift_card_gl(conn, args):
         f"Shopify gift card {gift_card_type} - order {order['shopify_order_id']}",
     )
 
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify gift card {gift_card_type} - {order['shopify_order_id']}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify gift card {gift_card_type} - {order['shopify_order_id']}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
 
     # Update order GL status
     sql, params = dynamic_update("shopify_order", {
@@ -706,9 +746,12 @@ def bulk_post_gl(conn, args):
     """Post GL for all unposted Shopify objects within a date range.
 
     Posts orders, refunds, payouts, and disputes that have gl_status='pending'.
-    Sub-action stdout is suppressed to avoid multiple JSON outputs.
+    Each object posts in its own transaction, and a failure is rolled back,
+    listed and not counted. Sub-action stdout is suppressed to avoid multiple
+    JSON outputs.
     """
     import io
+    import json
     shopify_account_id = getattr(args, "shopify_account_id", None)
     acct_row = validate_shopify_account(conn, shopify_account_id)
 
@@ -721,16 +764,38 @@ def bulk_post_gl(conn, args):
         "payouts_posted": 0,
         "disputes_posted": 0,
         "errors": [],
+        "failures": [],
     }
 
     def _silent_call(fn, sub_args):
-        """Call a sub-action, suppressing its stdout (ok()/err() calls)."""
+        """Call a sub-action, suppressing its stdout (ok()/err() calls).
+
+        Returns None when the sub-action posted, else the failure reason.
+        A failure rolls back whatever the sub-action left pending.
+        """
         real_stdout = sys.stdout
-        sys.stdout = io.StringIO()
+        buf = io.StringIO()
+        sys.stdout = buf
         try:
             fn(conn, sub_args)
-        except SystemExit:
-            pass
+        except SystemExit as e:
+            if e.code == 0 or e.code is None:
+                return None
+            text = buf.getvalue().strip()
+            if not text:
+                reason = "no output"
+            else:
+                try:
+                    reason = json.loads(text).get("message", "no output")
+                except ValueError:
+                    reason = "no output"
+            conn.rollback()
+            return reason
+        except Exception as e:
+            conn.rollback()
+            return str(e)
+        else:
+            return None
         finally:
             sys.stdout = real_stdout
 
@@ -746,12 +811,14 @@ def bulk_post_gl(conn, args):
 
     orders = conn.execute(order_q, order_params).fetchall()
     for o in orders:
-        try:
-            _args = _make_args(shopify_order_id=o["id"])
-            _silent_call(post_order_gl, _args)
+        _args = _make_args(shopify_order_id=o["id"])
+        reason = _silent_call(post_order_gl, _args)
+        if reason is None:
             results["orders_posted"] += 1
-        except (SystemExit, Exception):
+        else:
             results["errors"].append(f"order:{o['id']}")
+            results["failures"].append(
+                {"object": "order", "id": o["id"], "message": reason})
 
     # Post unposted refunds
     refund_q = """SELECT r.id FROM shopify_refund r
@@ -767,12 +834,14 @@ def bulk_post_gl(conn, args):
 
     refunds = conn.execute(refund_q, refund_params).fetchall()
     for r in refunds:
-        try:
-            _args = _make_args(shopify_refund_id=r["id"])
-            _silent_call(post_refund_gl, _args)
+        _args = _make_args(shopify_refund_id=r["id"])
+        reason = _silent_call(post_refund_gl, _args)
+        if reason is None:
             results["refunds_posted"] += 1
-        except (SystemExit, Exception):
+        else:
             results["errors"].append(f"refund:{r['id']}")
+            results["failures"].append(
+                {"object": "refund", "id": r["id"], "message": reason})
 
     # Post unposted payouts
     payout_q = "SELECT id FROM shopify_payout WHERE shopify_account_id = ? AND gl_status = 'pending'"
@@ -786,12 +855,14 @@ def bulk_post_gl(conn, args):
 
     payouts = conn.execute(payout_q, payout_params).fetchall()
     for p in payouts:
-        try:
-            _args = _make_args(shopify_payout_id=p["id"])
-            _silent_call(post_payout_gl, _args)
+        _args = _make_args(shopify_payout_id=p["id"])
+        reason = _silent_call(post_payout_gl, _args)
+        if reason is None:
             results["payouts_posted"] += 1
-        except (SystemExit, Exception):
+        else:
             results["errors"].append(f"payout:{p['id']}")
+            results["failures"].append(
+                {"object": "payout", "id": p["id"], "message": reason})
 
     # Post unposted disputes
     dispute_q = "SELECT id FROM shopify_dispute WHERE shopify_account_id = ? AND gl_status = 'pending'"
@@ -799,24 +870,29 @@ def bulk_post_gl(conn, args):
 
     disputes = conn.execute(dispute_q, dispute_params).fetchall()
     for d in disputes:
-        try:
-            _args = _make_args(shopify_dispute_id=d["id"])
-            _silent_call(post_dispute_gl, _args)
+        _args = _make_args(shopify_dispute_id=d["id"])
+        reason = _silent_call(post_dispute_gl, _args)
+        if reason is None:
             results["disputes_posted"] += 1
-        except (SystemExit, Exception):
+        else:
             results["errors"].append(f"dispute:{d['id']}")
+            results["failures"].append(
+                {"object": "dispute", "id": d["id"], "message": reason})
 
     total_posted = (results["orders_posted"] + results["refunds_posted"] +
                     results["payouts_posted"] + results["disputes_posted"])
+    failed_count = len(results["failures"])
 
     audit(conn, SKILL, "shopify-bulk-post-gl", "shopify_account",
           shopify_account_id,
-          new_values={"total_posted": total_posted})
+          new_values={"total_posted": total_posted,
+                      "failed_count": failed_count})
     conn.commit()
 
     ok({
         "shopify_account_id": shopify_account_id,
         "total_posted": total_posted,
+        "failed_count": failed_count,
         **results,
     })
 
@@ -896,6 +972,7 @@ def post_reserve_gl(conn, args):
 
     Reserve hold: DR Reserve Receivable, CR Clearing.
     Reserve release: DR Clearing, CR Reserve Receivable.
+    Each of hold and release posts once per payout.
     """
     shopify_payout_id = getattr(args, "shopify_payout_id", None)
     if not shopify_payout_id:
@@ -911,6 +988,15 @@ def post_reserve_gl(conn, args):
     ).fetchone()
     if not payout:
         err(f"Shopify payout {shopify_payout_id} not found")
+
+    if "reserve_hold_voucher_id" not in payout.keys():
+        err("Reserve posting needs the shopify payout reserve columns; run the module migrations (update the module) and retry")
+
+    reserve_column = ("reserve_hold_voucher_id" if reserve_type == "hold"
+                      else "reserve_release_voucher_id")
+    existing = payout[reserve_column]
+    if existing:
+        err(f"Reserve {reserve_type} for payout {shopify_payout_id} is already posted as journal entry {existing}")
 
     acct_row = validate_shopify_account(conn, payout["shopify_account_id"])
     company_id = acct_row["company_id"]
@@ -940,14 +1026,28 @@ def post_reserve_gl(conn, args):
         f"Shopify reserve {reserve_type} - payout {payout['shopify_payout_id']}",
     )
 
-    gl_ids = insert_gl_entries(
-        conn, entries,
-        voucher_type="journal_entry",
-        voucher_id=je_id,
-        posting_date=posting_date,
-        company_id=company_id,
-        remarks=f"Shopify reserve {reserve_type}",
-    )
+    try:
+        gl_ids = insert_gl_entries(
+            conn, entries,
+            voucher_type="journal_entry",
+            voucher_id=je_id,
+            posting_date=posting_date,
+            company_id=company_id,
+            remarks=f"Shopify reserve {reserve_type}",
+        )
+    except (ValueError, NotImplementedError) as e:
+        conn.rollback()
+        sys.stderr.write(f"[{SKILL}] {e}\n")
+        err(f"GL posting failed: {e}")
+
+    t = Table("shopify_payout")
+    reserve_field = Field(reserve_column)
+    sql = (Q.update(t).set(reserve_field, P())
+           .where(t.id == P()).where(reserve_field.isnull()).get_sql())
+    cursor = conn.execute(sql, (je_id, shopify_payout_id))
+    if cursor.rowcount != 1:
+        conn.rollback()
+        err(f"Reserve {reserve_type} for payout {shopify_payout_id} was posted by another call; nothing was written")
 
     audit(conn, SKILL, "shopify-post-reserve-gl", "shopify_payout",
           shopify_payout_id,

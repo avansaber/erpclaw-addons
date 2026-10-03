@@ -13,7 +13,7 @@ if _TESTS_DIR not in sys.path:
 from projects_helpers import (
     load_db_query, call_action, ns, is_ok, is_error,
     seed_company, seed_naming_series, seed_employee,
-    seed_customer, seed_project, _uuid,
+    seed_customer, seed_project, _uuid, SRC_DIR,
 )
 
 M = load_db_query()
@@ -291,3 +291,129 @@ class TestStatus:
     def test_status_ok(self, conn, env):
         r = call_action(M.status, conn, ns())
         assert is_ok(r)
+
+
+# ===================================================================
+# Cross-skill sales-invoice bridge: REAL selling function in-process
+# ===================================================================
+
+def _delegate_selling_in_process(conn, monkeypatch):
+    """Redirect cross_skill.call_skill_action to the REAL foundation functions.
+
+    call_skill_action shells out to the INSTALLED skill tree, which is neither
+    this worktree's code nor this test's database. Running the genuine
+    inventory/selling functions in-process instead keeps every assertion real
+    (item resolution, totals) while still recording exactly which action and
+    flags the vertical sent through the shared library.
+    """
+    import argparse
+    import importlib.util
+    import io
+    from unittest.mock import patch
+
+    def _load(domain):
+        path = os.path.join(SRC_DIR, "erpclaw", "scripts", domain, "db_query.py")
+        spec = importlib.util.spec_from_file_location(f"_fnd_{domain}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    selling = _load("erpclaw-selling")
+    inventory = _load("erpclaw-inventory")
+    from erpclaw_lib import cross_skill as _cs
+    captured = {}
+
+    def _run(fn, args_ns):
+        buf = io.StringIO()
+
+        def _fake_exit(code=0):
+            raise SystemExit(code)
+
+        try:
+            with patch("sys.stdout", buf), patch("sys.exit", side_effect=_fake_exit):
+                fn(conn, args_ns)
+        except SystemExit:
+            pass
+        return json.loads(buf.getvalue().strip())
+
+    def _in_process(skill_name, action, args=None, db_path=None, timeout=30):
+        flags = dict(args or {})
+        captured.setdefault("calls", []).append(
+            {"skill": skill_name, "action": action, "args": flags})
+        if action == "add-item":
+            result = _run(inventory.add_item, argparse.Namespace(
+                item_code=flags.get("--item-code"),
+                item_name=flags.get("--item-name"),
+                item_type=flags.get("--item-type"),
+                valuation_method=None, item_group=None, stock_uom=None,
+                has_batch=None, has_serial=None, standard_rate=None,
+                custom_fields=None))
+        elif action == "list-items":
+            result = _run(inventory.list_items, argparse.Namespace(
+                item_group=None, item_type=None, search=flags.get("--search"),
+                limit="20", offset="0", warehouse_id=None, company_id=None))
+        elif action == "create-sales-invoice":
+            result = _run(selling.create_sales_invoice, argparse.Namespace(
+                company_id=flags.get("--company-id"),
+                customer_id=flags.get("--customer-id"),
+                tax_template_id=None, sales_order_id=None,
+                delivery_note_id=None,
+                posting_date=flags.get("--posting-date"),
+                due_date=flags.get("--due-date"),
+                items=flags.get("--items"), payment_terms_id=None))
+        else:
+            raise AssertionError(f"unexpected cross-skill action {action}")
+        if result.get("status") == "error":
+            raise _cs.CrossSkillError(
+                result.get("message", f"{action} failed"))
+        return result
+
+    monkeypatch.setattr(_cs, "call_skill_action", _in_process)
+    return captured
+
+
+class TestCreateBillingFromTimesheetsSellingBridge:
+    def test_create_billing_from_timesheets_links_sales_invoice(
+            self, conn, env, monkeypatch):
+        _delegate_selling_in_process(conn, monkeypatch)
+        conn.execute(
+            "UPDATE project SET billing_type = 'time_and_material', "
+            "customer_id = ? WHERE id = ?",
+            (env["customer_id"], env["project_id"]),
+        )
+        conn.commit()
+        items_json = json.dumps([{
+            "project_id": env["project_id"],
+            "hours": "8",
+            "billing_rate": "100.00",
+            "billable": 1,
+            "date": "2026-03-10",
+            "activity_type": "development",
+        }])
+        add_r = call_action(M.add_timesheet, conn, ns(
+            company_id=env["company_id"],
+            employee_id=env["employee_id"],
+            start_date="2026-03-10",
+            end_date="2026-03-10",
+            items=items_json,
+        ))
+        assert is_ok(add_r), add_r
+        sub_r = call_action(M.submit_timesheet, conn, ns(
+            timesheet_id=add_r["timesheet"]["id"],
+        ))
+        assert is_ok(sub_r), sub_r
+        r = call_action(M.create_billing_from_timesheets, conn, ns(
+            company_id=env["company_id"],
+            project_id=env["project_id"],
+            db_path=None,
+        ))
+        assert is_ok(r), r
+        assert r.get("invoice_id"), r
+        si = conn.execute(
+            "SELECT grand_total FROM sales_invoice WHERE id = ?",
+            (r["invoice_id"],)).fetchone()
+        assert si["grand_total"] == r["total_amount"]
+        ts = conn.execute(
+            "SELECT status FROM timesheet WHERE id = ?",
+            (add_r["timesheet"]["id"],)).fetchone()
+        assert ts["status"] == "billed"

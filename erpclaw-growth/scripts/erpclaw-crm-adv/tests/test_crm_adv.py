@@ -7,13 +7,17 @@ import os
 import sys
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from crm_adv_helpers import call_action, ns, is_ok, is_error, load_db_query
+from crm_adv_helpers import (
+    call_action, ns, is_ok, is_error, load_db_query,
+    seed_company, seed_naming_series,
+)
 
 MOD = load_db_query()
 
@@ -22,6 +26,45 @@ MOD = load_db_query()
 import automation  # noqa: E402
 # campaigns owns send-campaign; imported here so its M8-C send seam is patchable.
 import campaigns  # noqa: E402
+
+D = Decimal
+
+
+def _msg(result):
+    """Refusal text wherever err() put it (the message or the error key)."""
+    return result.get("message", "") + result.get("error", "")
+
+
+# Every table a CRM-ADV seed or read action below can touch. Snapshots are plain
+# SELECTs on business tables through the test connection; no catalog reads,
+# no PRAGMA, no sqlite_master, no information_schema.
+_SNAPSHOT_TABLES = (
+    "company",
+    "naming_series",
+    "lead",
+    "crmadv_email_campaign",
+    "crmadv_campaign_template",
+    "crmadv_recipient_list",
+    "crmadv_campaign_event",
+    "crmadv_territory",
+    "crmadv_territory_assignment",
+    "crmadv_territory_quota",
+    "crmadv_contract",
+    "crmadv_contract_obligation",
+    "crmadv_automation_workflow",
+    "crmadv_lead_score_rule",
+    "crmadv_nurture_sequence",
+    "audit_log",
+)
+
+
+def _snapshot_tables(conn, tables=_SNAPSHOT_TABLES):
+    """Full row dump of the owned tables, ordered by id, for before/after compare."""
+    snap = {}
+    for table in tables:
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+        snap[table] = [tuple(row) for row in rows]
+    return snap
 
 
 # ===========================================================================
@@ -490,6 +533,115 @@ class TestGetTerritory:
         assert r2["name"] == "Get Terr"
 
 
+class TestListTerritories:
+    """list-territories is a pure read: it must mirror the stored territory rows
+    exactly and write nothing. No ledger is touched (SELECT only; gl_entry is
+    never written by this action), so no two-leg balance assertion can hold."""
+
+    def _seed_three(self, conn, company_id):
+        north = call_action(MOD.add_territory, conn, ns(
+            company_id=company_id, name="North East",
+            region="East Coast", parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(north)
+        west = call_action(MOD.add_territory, conn, ns(
+            company_id=company_id, name="Westfield",
+            region="Midwest", parent_territory_id=None,
+            territory_type="industry", limit=50, offset=0))
+        assert is_ok(west)
+        city = call_action(MOD.add_territory, conn, ns(
+            company_id=company_id, name="North East - City",
+            region=None, parent_territory_id=north["id"],
+            territory_type="named_account", limit=50, offset=0))
+        assert is_ok(city)
+        return north["id"], west["id"], city["id"]
+
+    def test_list_territories_returns_every_stored_row_exactly(self, conn, env):
+        north_id, west_id, city_id = self._seed_three(conn, env["company_id"])
+        before = _snapshot_tables(conn)
+
+        r = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type=None, search=None,
+            limit=50, offset=0))
+        assert is_ok(r)
+        assert r["total_count"] == 3
+        assert r["has_more"] is False
+        by_id = {row["id"]: row for row in r["rows"]}
+        assert set(by_id) == {north_id, west_id, city_id}
+        # Each listed row matches the stored row exactly (read back by id).
+        for tid, want_name, want_region, want_parent, want_type in (
+            (north_id, "North East", "East Coast", None, "geographic"),
+            (west_id, "Westfield", "Midwest", None, "industry"),
+            (city_id, "North East - City", None, north_id, "named_account"),
+        ):
+            stored = conn.execute(
+                "SELECT name, region, parent_territory_id, territory_type, "
+                "territory_status, company_id FROM crmadv_territory "
+                "WHERE id = ?", (tid,)).fetchone()
+            listed = by_id[tid]
+            assert listed["name"] == stored["name"] == want_name
+            assert listed["region"] == stored["region"] == want_region
+            assert listed["parent_territory_id"] == stored["parent_territory_id"] == want_parent
+            assert listed["territory_type"] == stored["territory_type"] == want_type
+            assert listed["territory_status"] == stored["territory_status"] == "active"
+            assert listed["company_id"] == stored["company_id"] == env["company_id"]
+        # Read-only: the list call wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_list_territories_filters_narrow_to_exact_subset(self, conn, env):
+        north_id, west_id, city_id = self._seed_three(conn, env["company_id"])
+        other_company = seed_company(conn, name="Other Co", abbr="OC")
+        seed_naming_series(conn, other_company)
+        foreign = call_action(MOD.add_territory, conn, ns(
+            company_id=other_company, name="Foreign Terr",
+            region="Elsewhere", parent_territory_id=None,
+            territory_type="product", limit=50, offset=0))
+        assert is_ok(foreign)
+
+        by_type = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type="industry", search=None,
+            limit=50, offset=0))
+        assert is_ok(by_type)
+        assert {row["id"] for row in by_type["rows"]} == {west_id}
+        assert by_type["total_count"] == 1
+
+        # search matches name OR region: "coast" hits the region branch only.
+        by_region = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type=None, search="coast",
+            limit=50, offset=0))
+        assert is_ok(by_region)
+        assert {row["id"] for row in by_region["rows"]} == {north_id}
+
+        by_name = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type=None, search="north east",
+            limit=50, offset=0))
+        assert is_ok(by_name)
+        assert {row["id"] for row in by_name["rows"]} == {north_id, city_id}
+
+        # Company scoping: the foreign row never leaks into this company's list.
+        scoped = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type=None, search=None,
+            limit=50, offset=0))
+        assert is_ok(scoped)
+        assert scoped["total_count"] == 3
+        assert foreign["id"] not in {row["id"] for row in scoped["rows"]}
+
+    def test_list_territories_unknown_type_filter_returns_empty(self, conn, env):
+        # list-territories performs no input validation: every argument is an
+        # optional filter, so no refusal case exists without a production change
+        # (forbidden to this task). This pins the real behaviour instead: an
+        # unknown type is not an error, it matches nothing.
+        self._seed_three(conn, env["company_id"])
+        before = _snapshot_tables(conn)
+        r = call_action(MOD.list_territories, conn, ns(
+            company_id=env["company_id"], territory_type="not-a-type", search=None,
+            limit=50, offset=0))
+        assert is_ok(r)
+        assert r["rows"] == []
+        assert r["total_count"] == 0
+        assert _snapshot_tables(conn) == before
+
+
 class TestTerritoryAssignment:
     def test_add_assignment(self, conn, env):
         r = call_action(MOD.add_territory, conn, ns(
@@ -606,16 +758,128 @@ class TestTerritoryReports:
         assert r["total_count"] >= 1
 
     def test_territory_comparison(self, conn, env):
-        call_action(MOD.add_territory, conn, ns(
-            company_id=env["company_id"], name="Compare Terr",
-            region=None, parent_territory_id=None,
-            territory_type="geographic",
-            limit=50, offset=0,
-        ))
+        # Behavioural: one quota + one assignment per territory, so the join
+        # fans out to exactly one row and the aggregates equal the stored
+        # money exactly. No ledger is touched (SELECT only; gl_entry is never
+        # written by this action), so no two-leg balance assertion can hold.
+        north = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Compare North",
+            region="North", parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(north)
+        south = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Compare South",
+            region="South", parent_territory_id=None,
+            territory_type="industry", limit=50, offset=0))
+        assert is_ok(south)
+        for tid, amount in ((north["id"], "100000.00"), (south["id"], "50000.00")):
+            q = call_action(MOD.set_territory_quota, conn, ns(
+                territory_id=tid, company_id=env["company_id"],
+                period="2026-Q1", quota_amount=amount))
+            assert is_ok(q)
+        a = call_action(MOD.add_territory_assignment, conn, ns(
+            territory_id=north["id"], company_id=env["company_id"],
+            salesperson="Amy", start_date=None, end_date=None))
+        assert is_ok(a)
+        before = _snapshot_tables(conn)
+
         r = call_action(MOD.territory_comparison_report, conn, ns(
-            company_id=env["company_id"], limit=50, offset=0,
-        ))
+            company_id=env["company_id"], limit=50, offset=0))
         assert is_ok(r)
+        assert r["total_count"] == 2
+        assert r["count"] == 2
+        assert r["has_more"] is False
+        by_id = {row["id"]: row for row in r["rows"]}
+        assert set(by_id) == {north["id"], south["id"]}
+        # actual_amount is TEXT money no owner action ever sets, so both legs
+        # read back "0.00" and attainment is exactly 0.0.
+        assert by_id[north["id"]]["total_quota"] == "100000.00"
+        assert D(str(by_id[north["id"]]["total_quota"])) == D("100000.00")
+        assert by_id[north["id"]]["total_actual"] == "0.00"
+        assert by_id[north["id"]]["total_reps"] == 1
+        assert by_id[north["id"]]["quota_periods"] == 1
+        assert by_id[north["id"]]["attainment_pct"] == 0.0
+        assert by_id[north["id"]]["overall_attainment_pct"] == 0.0
+        assert by_id[south["id"]]["total_quota"] == "50000.00"
+        assert D(str(by_id[south["id"]]["total_quota"])) == D("50000.00")
+        assert by_id[south["id"]]["total_actual"] == "0.00"
+        assert by_id[south["id"]]["total_reps"] == 0
+        assert by_id[south["id"]]["quota_periods"] == 1
+        # Independent read-back: the reported quota equals the stored quota row.
+        for tid, want in ((north["id"], "100000.00"), (south["id"], "50000.00")):
+            stored = conn.execute(
+                "SELECT quota_amount, actual_amount FROM crmadv_territory_quota "
+                "WHERE territory_id = ? AND company_id = ?",
+                (tid, env["company_id"])).fetchone()
+            assert D(str(stored["quota_amount"])) == D(want)
+            assert D(str(by_id[tid]["total_quota"])) == D(str(stored["quota_amount"]))
+        reps = conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_territory_assignment "
+            "WHERE territory_id = ? AND assignment_status = 'active'",
+            (north["id"],)).fetchone()["c"]
+        assert reps == by_id[north["id"]]["total_reps"] == 1
+        # Read-only: the report wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_territory_comparison_fanout_double_counts_quota(self, conn, env):
+        # FINDING (deliberately not fixed: production changes are forbidden to
+        # this task). territory-comparison-report joins assignments x quotas and
+        # SUMs over the fanned-out rows while COUNTing DISTINCT ids, so the
+        # counts stay right and the money doubles: one quota of 100000.00 with
+        # two active assignments reports total_quota "200000.00" although the
+        # stored quota row still sums to 100000.00. This test pins the real
+        # behaviour and must be rewritten with the fix, not before it.
+        terr = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Fanout Terr",
+            region=None, parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(terr)
+        q = call_action(MOD.set_territory_quota, conn, ns(
+            territory_id=terr["id"], company_id=env["company_id"],
+            period="2026-Q1", quota_amount="100000.00"))
+        assert is_ok(q)
+        for salesperson in ("Amy", "Bob"):
+            a = call_action(MOD.add_territory_assignment, conn, ns(
+                territory_id=terr["id"], company_id=env["company_id"],
+                salesperson=salesperson, start_date=None, end_date=None))
+            assert is_ok(a)
+
+        r = call_action(MOD.territory_comparison_report, conn, ns(
+            company_id=env["company_id"], limit=50, offset=0))
+        assert is_ok(r)
+        assert r["total_count"] == 1
+        row = r["rows"][0]
+        assert row["id"] == terr["id"]
+        assert row["total_reps"] == 2
+        assert row["quota_periods"] == 1
+        assert row["total_quota"] == "200000.00"
+        stored_sum = conn.execute(
+            "SELECT COALESCE(SUM(CAST(quota_amount AS NUMERIC)), 0) AS s "
+            "FROM crmadv_territory_quota WHERE territory_id = ?",
+            (terr["id"],)).fetchone()["s"]
+        assert D(str(stored_sum)) == D("100000.00")
+        assert D(str(row["total_quota"])) == 2 * D(str(stored_sum))
+
+    def test_territory_comparison_refuses_without_company(self, conn, env):
+        terr = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Refusal Terr",
+            region=None, parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(terr)
+        before = _snapshot_tables(conn)
+
+        missing = call_action(MOD.territory_comparison_report, conn, ns(
+            company_id=None, limit=50, offset=0))
+        assert is_error(missing)
+        assert "--company-id is required" in _msg(missing)
+
+        unknown = call_action(MOD.territory_comparison_report, conn, ns(
+            company_id="does-not-exist", limit=50, offset=0))
+        assert is_error(unknown)
+        assert "does-not-exist" in _msg(unknown)
+        assert "not found" in _msg(unknown)
+        # A refusal that half-writes is worse than no refusal: byte-identical.
+        assert _snapshot_tables(conn) == before
 
 
 # ===========================================================================
@@ -695,6 +959,129 @@ class TestGetContract:
         r2 = call_action(MOD.get_contract, conn, ns(contract_id=ctr_id))
         assert is_ok(r2)
         assert r2["customer_name"] == "Get Corp"
+
+
+class TestListContracts:
+    """list-contracts is a pure read: it must mirror the stored contract rows
+    exactly and write nothing. No ledger is touched (SELECT only; gl_entry is
+    never written by this action), so no two-leg balance assertion can hold."""
+
+    def _seed_three(self, conn, company_id):
+        a = call_action(MOD.add_contract, conn, ns(
+            company_id=company_id, customer_name="Acme Corp",
+            contract_type="service", start_date="2026-01-01",
+            end_date="2026-12-31", total_value="120000.00",
+            annual_value="120000.00", auto_renew="1",
+            renewal_terms="Annual auto-renew"))
+        assert is_ok(a)
+        b = call_action(MOD.add_contract, conn, ns(
+            company_id=company_id, customer_name="Beta LLC",
+            contract_type="subscription", start_date=None, end_date=None,
+            total_value="60000.00", annual_value="60000.00", auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(b)
+        renewed = call_action(MOD.renew_contract, conn, ns(
+            contract_id=b["id"], end_date="2026-12-31"))
+        assert is_ok(renewed)
+        c = call_action(MOD.add_contract, conn, ns(
+            company_id=company_id, customer_name="Acme Labs",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="5000.50", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(c)
+        return a["id"], b["id"], c["id"]
+
+    def test_list_contracts_returns_every_stored_row_exactly(self, conn, env):
+        a_id, b_id, c_id = self._seed_three(conn, env["company_id"])
+        before = _snapshot_tables(conn)
+
+        r = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type=None,
+            contract_status_filter=None, search=None, limit=50, offset=0))
+        assert is_ok(r)
+        assert r["total_count"] == 3
+        assert r["has_more"] is False
+        by_id = {row["id"]: row for row in r["rows"]}
+        assert set(by_id) == {a_id, b_id, c_id}
+        # Each listed row matches the stored row exactly (read back by id);
+        # money compares as exact Decimal strings, never float.
+        for cid, want_name, want_type, want_status, want_total, want_annual in (
+            (a_id, "Acme Corp", "service", "draft", "120000.00", "120000.00"),
+            (b_id, "Beta LLC", "subscription", "renewed", "60000.00", "60000.00"),
+            (c_id, "Acme Labs", "service", "draft", "5000.50", None),
+        ):
+            stored = conn.execute(
+                "SELECT customer_name, contract_type, contract_status, "
+                "total_value, annual_value, company_id FROM crmadv_contract "
+                "WHERE id = ?", (cid,)).fetchone()
+            listed = by_id[cid]
+            assert listed["customer_name"] == stored["customer_name"] == want_name
+            assert listed["contract_type"] == stored["contract_type"] == want_type
+            assert listed["contract_status"] == stored["contract_status"] == want_status
+            assert listed["total_value"] == stored["total_value"] == want_total
+            assert D(str(listed["total_value"])) == D(want_total)
+            assert listed["annual_value"] == stored["annual_value"] == want_annual
+            if want_annual is not None:
+                assert D(str(listed["annual_value"])) == D(want_annual)
+            assert listed["company_id"] == stored["company_id"] == env["company_id"]
+        # Read-only: the list call wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_list_contracts_filters_narrow_to_exact_subset(self, conn, env):
+        a_id, b_id, c_id = self._seed_three(conn, env["company_id"])
+        other_company = seed_company(conn, name="Other Co", abbr="OC")
+        seed_naming_series(conn, other_company)
+        foreign = call_action(MOD.add_contract, conn, ns(
+            company_id=other_company, customer_name="Foreign Inc",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="1.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(foreign)
+
+        renewed = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type=None,
+            contract_status_filter="renewed", search=None, limit=50, offset=0))
+        assert is_ok(renewed)
+        assert {row["id"] for row in renewed["rows"]} == {b_id}
+        assert renewed["total_count"] == 1
+
+        service = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type="service",
+            contract_status_filter=None, search=None, limit=50, offset=0))
+        assert is_ok(service)
+        assert {row["id"] for row in service["rows"]} == {a_id, c_id}
+
+        # search is case-insensitive on customer_name: Beta must be absent.
+        searched = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type=None,
+            contract_status_filter=None, search="acme", limit=50, offset=0))
+        assert is_ok(searched)
+        assert {row["id"] for row in searched["rows"]} == {a_id, c_id}
+        assert b_id not in {row["id"] for row in searched["rows"]}
+
+        # Company scoping: the foreign row never leaks into this company's list.
+        scoped = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type=None,
+            contract_status_filter=None, search=None, limit=50, offset=0))
+        assert is_ok(scoped)
+        assert scoped["total_count"] == 3
+        assert foreign["id"] not in {row["id"] for row in scoped["rows"]}
+
+    def test_list_contracts_unknown_status_filter_returns_empty(self, conn, env):
+        # list-contracts performs no input validation: every argument is an
+        # optional filter, so no refusal case exists without a production change
+        # (forbidden to this task). This pins the real behaviour instead: an
+        # unknown status is not an error, it matches nothing.
+        self._seed_three(conn, env["company_id"])
+        before = _snapshot_tables(conn)
+        r = call_action(MOD.list_contracts, conn, ns(
+            company_id=env["company_id"], contract_type=None,
+            contract_status_filter="not-a-status", search=None,
+            limit=50, offset=0))
+        assert is_ok(r)
+        assert r["rows"] == []
+        assert r["total_count"] == 0
+        assert _snapshot_tables(conn) == before
 
 
 class TestContractObligation:
@@ -1478,32 +1865,315 @@ class TestFunnelAnalysis:
 
 class TestPipelineVelocity:
     def test_pipeline_velocity(self, conn, env):
+        # Behavioural: two drafts sum to the reported pipeline value exactly as
+        # Decimal strings; renewed/terminated rows are excluded from both the
+        # counts and the value. No ledger is touched (SELECT only; gl_entry is
+        # never written by this action), so no two-leg balance assertion holds.
+        a = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Pipe A",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="100000.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(a)
+        b = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Pipe B",
+            contract_type="subscription", start_date=None, end_date=None,
+            total_value="25000.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(b)
+        c = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Pipe C",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="99999.99", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(c)
+        assert is_ok(call_action(MOD.renew_contract, conn, ns(
+            contract_id=c["id"], end_date="2026-12-31")))
+        d = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Pipe D",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="1.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(d)
+        assert is_ok(call_action(MOD.terminate_contract, conn, ns(
+            contract_id=d["id"])))
+        # 'active' is not reachable through any owner action (add makes draft,
+        # renew makes renewed, terminate makes terminated), so active stays 0.
+        quoted = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Quoted Terr",
+            region=None, parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(quoted)
+        assert is_ok(call_action(MOD.set_territory_quota, conn, ns(
+            territory_id=quoted["id"], company_id=env["company_id"],
+            period="2026-Q1", quota_amount="50000.00")))
+        unquoted = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Unquoted Terr",
+            region=None, parent_territory_id=None,
+            territory_type="industry", limit=50, offset=0))
+        assert is_ok(unquoted)
+        before = _snapshot_tables(conn)
+
         r = call_action(MOD.pipeline_velocity, conn, ns(
             company_id=env["company_id"],
         ))
         assert is_ok(r)
-        assert "draft_contracts" in r
-        assert "active_contracts" in r
+        assert r["draft_contracts"] == 2
+        assert r["active_contracts"] == 0
+        assert r["total_pipeline_value"] == "125000.00"
+        assert D(str(r["total_pipeline_value"])) == D("125000.00")
+        assert r["territories_with_quota"] == 1
+        # Independent read-back with the same predicates the action uses.
+        drafts = conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_contract "
+            "WHERE company_id = ? AND contract_status = 'draft'",
+            (env["company_id"],)).fetchone()["c"]
+        assert drafts == r["draft_contracts"] == 2
+        actives = conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_contract "
+            "WHERE company_id = ? AND contract_status = 'active'",
+            (env["company_id"],)).fetchone()["c"]
+        assert actives == r["active_contracts"] == 0
+        value_rows = conn.execute(
+            "SELECT total_value FROM crmadv_contract "
+            "WHERE company_id = ? AND contract_status IN ('draft','active')",
+            (env["company_id"],)).fetchall()
+        expected_value = sum((D(str(row["total_value"])) for row in value_rows), D("0"))
+        assert expected_value == D("125000.00")
+        assert D(str(r["total_pipeline_value"])) == expected_value
+        with_quota = conn.execute(
+            "SELECT COUNT(DISTINCT territory_id) AS c FROM crmadv_territory_quota "
+            "WHERE company_id = ?", (env["company_id"],)).fetchone()["c"]
+        assert with_quota == r["territories_with_quota"] == 1
+        # Read-only: the report wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_pipeline_velocity_refuses_without_company(self, conn, env):
+        a = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Pipe Refusal",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="10.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(a)
+        before = _snapshot_tables(conn)
+
+        missing = call_action(MOD.pipeline_velocity, conn, ns(company_id=None))
+        assert is_error(missing)
+        assert "--company-id is required" in _msg(missing)
+
+        unknown = call_action(MOD.pipeline_velocity, conn, ns(
+            company_id="does-not-exist"))
+        assert is_error(unknown)
+        assert "does-not-exist" in _msg(unknown)
+        assert "not found" in _msg(unknown)
+        # A refusal that half-writes is worse than no refusal: byte-identical.
+        assert _snapshot_tables(conn) == before
 
 
 class TestWinLossAnalysis:
     def test_win_loss(self, conn, env):
+        # Behavioural: one renewed (win) + one terminated (loss) decide 2 of 3;
+        # the draft is undecided and excluded from total_decided and the rate.
+        # No ledger is touched (SELECT only; gl_entry is never written by this
+        # action), so no two-leg balance assertion can hold.
+        draft = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Undecided Corp",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="10000.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(draft)
+        won = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Won Corp",
+            contract_type="subscription", start_date=None, end_date=None,
+            total_value="20000.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(won)
+        assert is_ok(call_action(MOD.renew_contract, conn, ns(
+            contract_id=won["id"], end_date="2026-12-31")))
+        lost = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Lost Corp",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="30000.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(lost)
+        assert is_ok(call_action(MOD.terminate_contract, conn, ns(
+            contract_id=lost["id"])))
+        # 'active' and 'expired' are not reachable through any owner action
+        # (add makes draft, renew makes renewed, terminate makes terminated).
+        before = _snapshot_tables(conn)
+
         r = call_action(MOD.win_loss_analysis, conn, ns(
             company_id=env["company_id"],
         ))
         assert is_ok(r)
-        assert "win_rate_pct" in r
+        assert r["active_contracts"] == 0
+        assert r["renewed_contracts"] == 1
+        assert r["terminated_contracts"] == 1
+        assert r["expired_contracts"] == 0
+        assert r["total_decided"] == 2
+        assert r["win_rate_pct"] == 50.0
+        # Independent read-back with the same predicates the action uses.
+        counts = {}
+        for status in ("active", "renewed", "terminated", "expired"):
+            counts[status] = conn.execute(
+                "SELECT COUNT(*) AS c FROM crmadv_contract "
+                "WHERE company_id = ? AND contract_status = ?",
+                (env["company_id"], status)).fetchone()["c"]
+        assert counts == {"active": 0, "renewed": 1, "terminated": 1, "expired": 0}
+        assert r["active_contracts"] == counts["active"]
+        assert r["renewed_contracts"] == counts["renewed"]
+        assert r["terminated_contracts"] == counts["terminated"]
+        assert r["expired_contracts"] == counts["expired"]
+        assert r["total_decided"] == sum(counts.values()) == 2
+        # The undecided draft is stored but decides nothing.
+        undecided = conn.execute(
+            "SELECT contract_status FROM crmadv_contract WHERE id = ?",
+            (draft["id"],)).fetchone()["contract_status"]
+        assert undecided == "draft"
+        # Read-only: the report wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_win_loss_refuses_without_company(self, conn, env):
+        won = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Won Refusal",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="10.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(won)
+        before = _snapshot_tables(conn)
+
+        missing = call_action(MOD.win_loss_analysis, conn, ns(company_id=None))
+        assert is_error(missing)
+        assert "--company-id is required" in _msg(missing)
+
+        unknown = call_action(MOD.win_loss_analysis, conn, ns(
+            company_id="does-not-exist"))
+        assert is_error(unknown)
+        assert "does-not-exist" in _msg(unknown)
+        assert "not found" in _msg(unknown)
+        # A refusal that half-writes is worse than no refusal: byte-identical.
+        assert _snapshot_tables(conn) == before
 
 
 class TestMarketingDashboard:
     def test_dashboard(self, conn, env):
+        # Behavioural: every dashboard number equals an independent COUNT over
+        # the rows the owner actions stored. No ledger is touched (SELECT only;
+        # gl_entry is never written by this action), so no balance assertion holds.
+        first = call_action(MOD.add_email_campaign, conn, ns(
+            company_id=env["company_id"], name="Dash One", subject="Hello",
+            template_id=None, recipient_list_id=None, scheduled_date=None,
+            limit=50, offset=0))
+        assert is_ok(first)
+        second = call_action(MOD.add_email_campaign, conn, ns(
+            company_id=env["company_id"], name="Dash Two", subject="Hi",
+            template_id=None, recipient_list_id=None, scheduled_date=None,
+            limit=50, offset=0))
+        assert is_ok(second)
+        # Zero-recipient send still flips the campaign to sent (no send seam
+        # is reached, so nothing is mocked here).
+        sent = call_action(MOD.send_campaign, conn, ns(
+            campaign_id=first["id"], db_path=None))
+        assert is_ok(sent)
+        assert sent["campaign_status"] == "sent"
+        active_wf = call_action(MOD.add_automation_workflow, conn, ns(
+            company_id=env["company_id"], name="Dash WF Active",
+            trigger_event="lead_created", conditions_json=None, actions_json=None))
+        assert is_ok(active_wf)
+        assert is_ok(call_action(MOD.activate_workflow, conn, ns(
+            workflow_id=active_wf["id"])))
+        idle_wf = call_action(MOD.add_automation_workflow, conn, ns(
+            company_id=env["company_id"], name="Dash WF Idle",
+            trigger_event=None, conditions_json=None, actions_json=None))
+        assert is_ok(idle_wf)
+        nurture = call_action(MOD.add_nurture_sequence, conn, ns(
+            company_id=env["company_id"], name="Dash Nurture",
+            description=None, steps_json=None))
+        assert is_ok(nurture)
+        # No owner action moves a nurture sequence to active (add makes draft),
+        # so active_nurture_sequences stays 0 while the row exists as draft.
+        terr = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Dash Terr",
+            region=None, parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(terr)
+        staying = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Dash Draft",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="10.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(staying)
+        counting = call_action(MOD.add_contract, conn, ns(
+            company_id=env["company_id"], customer_name="Dash Won",
+            contract_type="service", start_date=None, end_date=None,
+            total_value="20.00", annual_value=None, auto_renew=None,
+            renewal_terms=None))
+        assert is_ok(counting)
+        assert is_ok(call_action(MOD.renew_contract, conn, ns(
+            contract_id=counting["id"], end_date=None)))
+        before = _snapshot_tables(conn)
+
         r = call_action(MOD.marketing_dashboard, conn, ns(
             company_id=env["company_id"],
         ))
         assert is_ok(r)
-        assert "total_campaigns" in r
-        assert "active_territories" in r
-        assert "active_contracts" in r
+        assert r["total_campaigns"] == 2
+        assert r["sent_campaigns"] == 1
+        assert r["active_workflows"] == 1
+        assert r["active_nurture_sequences"] == 0
+        assert r["active_territories"] == 1
+        assert r["active_contracts"] == 1
+        # Independent read-back with the same predicates the action uses.
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_email_campaign WHERE company_id = ?",
+            (env["company_id"],)).fetchone()["c"] == r["total_campaigns"] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_email_campaign "
+            "WHERE company_id = ? AND campaign_status = 'sent'",
+            (env["company_id"],)).fetchone()["c"] == r["sent_campaigns"] == 1
+        assert conn.execute(
+            "SELECT campaign_status FROM crmadv_email_campaign WHERE id = ?",
+            (first["id"],)).fetchone()["campaign_status"] == "sent"
+        assert conn.execute(
+            "SELECT campaign_status FROM crmadv_email_campaign WHERE id = ?",
+            (second["id"],)).fetchone()["campaign_status"] == "draft"
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_automation_workflow "
+            "WHERE company_id = ? AND workflow_status = 'active'",
+            (env["company_id"],)).fetchone()["c"] == r["active_workflows"] == 1
+        assert conn.execute(
+            "SELECT sequence_status FROM crmadv_nurture_sequence WHERE id = ?",
+            (nurture["id"],)).fetchone()["sequence_status"] == "draft"
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_territory "
+            "WHERE company_id = ? AND territory_status = 'active'",
+            (env["company_id"],)).fetchone()["c"] == r["active_territories"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM crmadv_contract "
+            "WHERE company_id = ? AND contract_status IN ('active','renewed')",
+            (env["company_id"],)).fetchone()["c"] == r["active_contracts"] == 1
+        # Read-only: the dashboard wrote nothing anywhere.
+        assert _snapshot_tables(conn) == before
+
+    def test_dashboard_refuses_without_company(self, conn, env):
+        terr = call_action(MOD.add_territory, conn, ns(
+            company_id=env["company_id"], name="Dash Refusal Terr",
+            region=None, parent_territory_id=None,
+            territory_type="geographic", limit=50, offset=0))
+        assert is_ok(terr)
+        before = _snapshot_tables(conn)
+
+        missing = call_action(MOD.marketing_dashboard, conn, ns(company_id=None))
+        assert is_error(missing)
+        assert "--company-id is required" in _msg(missing)
+
+        unknown = call_action(MOD.marketing_dashboard, conn, ns(
+            company_id="does-not-exist"))
+        assert is_error(unknown)
+        assert "does-not-exist" in _msg(unknown)
+        assert "not found" in _msg(unknown)
+        # A refusal that half-writes is worse than no refusal: byte-identical.
+        assert _snapshot_tables(conn) == before
 
 
 class TestStatusAction:

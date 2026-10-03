@@ -35,6 +35,7 @@ if importlib.util.find_spec("erpclaw_lib") is None:
 from erpclaw_lib.db import get_connection
 from erpclaw_lib.query import (
     Q, P, Table, Field, Order, LiteralValue, insert_row, dynamic_update, now as sql_now,
+    update_row,
 )
 
 from variant_manager import (
@@ -356,7 +357,8 @@ def handle_dgm_run_variant(args):
         else:
             # No qualifying variant found
             conn.execute(
-                'UPDATE erpclaw_dgm_run SET status = ?, completed_at = datetime(\'now\') WHERE id = ?',
+                update_row("erpclaw_dgm_run",
+                           {"status": P(), "completed_at": sql_now()}, {"id": P()}),
                 ("no_improvement", run_id),
             )
             conn.commit()
@@ -367,7 +369,8 @@ def handle_dgm_run_variant(args):
         # an undetected stale 'running' DGM record is worse than a noisy log.
         try:
             conn.execute(
-                'UPDATE erpclaw_dgm_run SET status = ?, completed_at = datetime(\'now\') WHERE id = ?',
+                update_row("erpclaw_dgm_run",
+                           {"status": P(), "completed_at": sql_now()}, {"id": P()}),
                 ("failed", run_id),
             )
             conn.commit()
@@ -548,7 +551,8 @@ def handle_dgm_select_best(args):
         if not best_result:
             # No qualifying variant
             conn.execute(
-                'UPDATE erpclaw_dgm_run SET status = ?, completed_at = datetime(\'now\') WHERE id = ?',
+                update_row("erpclaw_dgm_run",
+                           {"status": P(), "completed_at": sql_now()}, {"id": P()}),
                 ("no_improvement", run_id),
             )
             conn.commit()

@@ -21,6 +21,8 @@ try:
 except ImportError:
     pass
 
+SKILL = "erpclaw-compliance"
+
 # Register naming prefixes
 ENTITY_PREFIXES.setdefault("policy", "POL-")
 
@@ -81,7 +83,7 @@ def add_policy(conn, args):
         requires_ack,
         args.company_id, now, now,
     ))
-    audit(conn, "policy", policy_id, "compliance-add-policy", args.company_id)
+    audit(conn, SKILL, "compliance-add-policy", "policy", policy_id)
     conn.commit()
     ok({"id": policy_id, "naming_series": naming, "title": title, "policy_status": "draft"})
 
@@ -128,7 +130,7 @@ def update_policy(conn, args):
     data["updated_at"] = sql_now()
     sql, params = dynamic_update("policy", data, {"id": policy_id})
     conn.execute(sql, params)
-    audit(conn, "policy", policy_id, "compliance-update-policy", None, {"updated_fields": changed})
+    audit(conn, SKILL, "compliance-update-policy", "policy", policy_id, new_values={"updated_fields": changed})
     conn.commit()
     ok({"id": policy_id, "updated_fields": changed})
 
@@ -214,7 +216,7 @@ def publish_policy(conn, args):
                      data={"status": P(), "effective_date": P(), "updated_at": P()},
                      where={"id": P()})
     conn.execute(sql, ("published", effective_date, now, policy_id))
-    audit(conn, "policy", policy_id, "compliance-publish-policy", None)
+    audit(conn, SKILL, "compliance-publish-policy", "policy", policy_id)
     conn.commit()
     ok({"id": policy_id, "policy_status": "published", "effective_date": effective_date})
 
@@ -237,7 +239,7 @@ def retire_policy(conn, args):
                      data={"status": P(), "updated_at": P()},
                      where={"id": P()})
     conn.execute(sql, ("retired", now, policy_id))
-    audit(conn, "policy", policy_id, "compliance-retire-policy", None)
+    audit(conn, SKILL, "compliance-retire-policy", "policy", policy_id)
     conn.commit()
     ok({"id": policy_id, "policy_status": "retired"})
 
@@ -273,7 +275,7 @@ def add_policy_acknowledgment(conn, args):
         getattr(args, "notes", None),
         args.company_id, now,
     ))
-    audit(conn, "policy_acknowledgment", ack_id, "compliance-add-policy-acknowledgment", args.company_id)
+    audit(conn, SKILL, "compliance-add-policy-acknowledgment", "policy_acknowledgment", ack_id)
     conn.commit()
     ok({"id": ack_id, "policy_id": policy_id, "employee_name": employee_name})
 

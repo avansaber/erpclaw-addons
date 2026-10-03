@@ -27,7 +27,7 @@ try:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query_helpers import resolve_company_id, resolve_account_by_name
+    from erpclaw_lib.query_helpers import resolve_company_id, resolve_scope_company, resolve_account_by_name
     # All bank-table WRITES live in this foundation lib (the tables are foundation-
     # owned; this module owns the action surface + parsers). Mirrors gl_posting /
     # cwip_posting. Reads (SELECT) stay here.
@@ -164,10 +164,10 @@ def import_bank_statement(conn, args):
 # ===========================================================================
 def list_bank_statements(conn, args):
     # Static, fully-parameterized SQL with NULL-guarded optional filters.
-    company_id = getattr(args, "company_id", None)
+    company_id = resolve_scope_company(conn, getattr(args, "company_id", None), getattr(args, "company_name", None))
     account_id = getattr(args, "bank_account_id", None)
-    flt = (company_id, company_id, account_id, account_id)
-    where = ("(? IS NULL OR company_id = ?) AND "
+    flt = (company_id, account_id, account_id)
+    where = ("company_id = ? AND "
              "(? IS NULL OR bank_account_id = ?)")
     total = conn.execute(
         "SELECT COUNT(*) FROM bank_statement WHERE " + where, flt).fetchone()[0]
@@ -258,16 +258,16 @@ def add_bank_match_rule(conn, args):
 # 6. list-bank-match-rules
 # ===========================================================================
 def list_bank_match_rules(conn, args):
-    company_id = getattr(args, "company_id", None)
+    company_id = resolve_scope_company(conn, getattr(args, "company_id", None), getattr(args, "company_name", None))
     raw_active = getattr(args, "is_active", None)
     active = None
     if raw_active is not None:
         active = 0 if str(raw_active) in ("0", "false", "False") else 1
     rows = conn.execute(
         "SELECT * FROM bank_match_rule WHERE "
-        "(? IS NULL OR company_id = ?) AND (? IS NULL OR is_active = ?) "
+        "company_id = ? AND (? IS NULL OR is_active = ?) "
         "ORDER BY priority ASC, created_at ASC",
-        (company_id, company_id, active, active)).fetchall()
+        (company_id, active, active)).fetchall()
     ok({"rows": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -445,7 +445,15 @@ def bank_reconciliation_summary(conn, args):
         "AND (? IS NULL OR period_end IS NULL OR period_end <= ?) "
         "ORDER BY period_end DESC, imported_at DESC LIMIT 1",
         (bank_account_id, as_of, as_of)).fetchone()
-    statement_balance = _to_dec(stmt["closing_balance"]) if stmt and stmt["closing_balance"] else Decimal("0")
+    closing = stmt["closing_balance"] if stmt else None
+    if closing is None or (isinstance(closing, str) and closing.strip() == ""):
+        statement_missing = True
+        statement_balance = None
+        difference = None
+    else:
+        statement_missing = False
+        statement_balance = _to_dec(closing)
+        difference = statement_balance - ledger_balance
 
     # Matched vs unmatched line totals across the account's statements.
     line_rows = conn.execute(
@@ -461,10 +469,11 @@ def bank_reconciliation_summary(conn, args):
         "bank_account_name": acct["name"],
         "as_of": as_of,
         "ledger_balance": str(ledger_balance),
-        "statement_balance": str(statement_balance),
+        "statement_balance": str(statement_balance) if statement_balance is not None else None,
         "reconciled_balance": str(reconciled),
         "unmatched_total": str(unmatched),
-        "difference": str(statement_balance - reconciled)})
+        "difference": str(difference) if difference is not None else None,
+        "statement_balance_missing": statement_missing})
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ try:
     import importlib.util
     if importlib.util.find_spec("erpclaw_lib") is None:
         sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
-    from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
+    from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name
     from erpclaw_lib.validation import check_input_lengths
@@ -37,6 +37,14 @@ except ImportError:
     import json as _json
     print(_json.dumps({"status": "error", "error": "ERPClaw foundation not installed. Install erpclaw first: clawhub install erpclaw", "suggestion": "clawhub install erpclaw"}))
     sys.exit(1)
+
+# The read-only message helper is newer than some installed foundations; an
+# older lib keeps the generic message instead of failing the import.
+try:
+    from erpclaw_lib.db import unexpected_error_message
+except ImportError:
+    def unexpected_error_message(exc):
+        return "An unexpected error occurred"
 
 REQUIRED_TABLES = ["company"]
 
@@ -1093,6 +1101,7 @@ def convert_opportunity_to_quotation(conn, args):
 
     # Pre-flight: check erpclaw base package (contains selling domain) is installed
     from erpclaw_lib.dependencies import check_subprocess_target, resolve_skill_script
+    from erpclaw_lib.cross_skill import child_interpreter
     from erpclaw_lib.args import SafeArgumentParser, check_unknown_args
     dep_err = check_subprocess_target(conn, "erpclaw", "quotation")
     if dep_err:
@@ -1101,7 +1110,7 @@ def convert_opportunity_to_quotation(conn, args):
 
     # Build subprocess command
     cmd = [
-        "python3", selling_script,
+        child_interpreter(), selling_script,
         "--action", "add-quotation",
         "--customer-id", opp["customer_id"],
         "--posting-date", datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -3657,13 +3666,14 @@ def _apply_saved_view_customer(conn, args, view):
     rows. UDF conditions read custom_field_value (a READ — allowed cross-module).
     """
     from erpclaw_lib.dependencies import check_subprocess_target, resolve_skill_script
+    from erpclaw_lib.cross_skill import child_interpreter
     dep_err = check_subprocess_target(conn, "erpclaw", "customer")
     if dep_err:
         err(dep_err["error"])
     selling_script = resolve_skill_script("erpclaw")
 
     company_id = _resolve_company_id(conn, args)
-    cmd = ["python3", selling_script, "--action", "list-customers",
+    cmd = [child_interpreter(), selling_script, "--action", "list-customers",
            "--company-id", company_id, "--limit", "10000", "--offset", "0"]
     if getattr(args, "db_path", None):
         cmd += ["--db-path", args.db_path]
@@ -4463,8 +4473,7 @@ def main():
     else:
         args.set_shared = None
 
-    db_path = args.db_path or DEFAULT_DB_PATH
-    ensure_db_exists(db_path)
+    db_path = getattr(args, "db_path", None)   # None unless --db-path was given
     conn = get_connection(db_path)
 
     # Dependency check
@@ -4480,7 +4489,7 @@ def main():
     except Exception as e:
         conn.rollback()
         sys.stderr.write(f"[erpclaw-crm] {e}\n")
-        err("An unexpected error occurred")
+        err(unexpected_error_message(e))
     finally:
         conn.close()
 
