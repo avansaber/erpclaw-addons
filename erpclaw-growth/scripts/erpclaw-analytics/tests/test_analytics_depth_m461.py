@@ -156,9 +156,12 @@ class TestAnalyzeQueryPerformanceDepth:
         # automatic indexes (envelope primary key and unique key, result
         # primary key, usage primary key). The intercompany_account_map
         # table adds one table and two automatic indexes (primary key and
-        # unique key).
-        assert r["total_tables"] == 260
-        assert r["total_indexes"] == 739
+        # unique key). The five authority session tables add five tables and
+        # seven indexes: one automatic primary-key index per table plus the
+        # ux_authority_credential_live and ux_authority_bootstrap_issued
+        # partial unique indexes.
+        assert r["total_tables"] == 265
+        assert r["total_indexes"] == 746
         assert r["full_scan_queries"] == []
         assert r["recommendations"] == []
         assert [e["query"] for e in r["query_plans"]] == [
@@ -181,8 +184,8 @@ class TestAnalyzeQueryPerformanceDepth:
         r = call_action(MOD.analyze_query_performance, conn, ns(
             company_id="m461-ghost", from_date="not-a-date"))
         assert is_ok(r), r
-        # 260 tables, matching the pin above.
-        assert r["total_tables"] == 260
+        # 265 tables, matching the pin above.
+        assert r["total_tables"] == 265
         assert _snapshot(conn) == before
 
 

@@ -114,7 +114,7 @@ def handle_record_repayment(conn, args):
             if fresh is None:
                 return err(f"Loan {loan_id} not found")
             fresh_status = dict(fresh)["status"]
-            if fresh_status != where_status:
+            if fresh_status not in ("disbursed", "partially_repaid"):
                 return err(f"Cannot record repayment for loan in status '{fresh_status}'")
             return err(f"Loan {loan_id} changed while this repayment was being recorded; nothing was written. Retry the action.")
 
@@ -341,6 +341,10 @@ def handle_write_off_loan(conn, args):
         where_status = ld["status"]
         where_outstanding = ld["outstanding_amount"]
 
+        if not loan_account_id:
+            conn.rollback()
+            return err(f"Cannot write off loan {loan_id}: it has no loan account to post the write-off to.")
+
         wo_id = str(uuid.uuid4())
         conn.execute(
             """INSERT INTO loan_write_off
@@ -377,37 +381,41 @@ def handle_write_off_loan(conn, args):
         # the receivable side (validation step 5).)
         if loan_account_id:
             cost_center_id = get_default_cost_center(conn, company_id)
-            insert_gl_entries(
-                conn,
-                [
-                    {
-                        "account_id": bad_debt_account_id,
-                        "debit": str(outstanding),
-                        "credit": "0",
-                        "cost_center_id": cost_center_id,
-                    },
-                    {
-                        "account_id": loan_account_id,
-                        "debit": "0",
-                        "credit": str(outstanding),
-                        "cost_center_id": cost_center_id,
-                        # loan_account is a 'receivable' type; step 5 requires party.
-                        # loan.applicant_type is one of customer/employee/supplier;
-                        # the GL validator accepts all three for receivable/payable.
-                        "party_type": ld["applicant_type"],
-                        "party_id": ld["applicant_id"],
-                    },
-                ],
-                # 'journal_entry' is the catch-all voucher_type per the gl_entry
-                # CHECK constraint — loan write-offs aren't a first-class voucher
-                # type in foundation. Semantic identity is preserved via voucher_id
-                # (points to loan_write_off record) + remarks ("Loan write-off: ...").
-                voucher_type="journal_entry",
-                voucher_id=wo_id,
-                posting_date=write_off_date,
-                company_id=company_id,
-                remarks=f"Loan write-off: {reason}",
-            )
+            try:
+                insert_gl_entries(
+                    conn,
+                    [
+                        {
+                            "account_id": bad_debt_account_id,
+                            "debit": str(outstanding),
+                            "credit": "0",
+                            "cost_center_id": cost_center_id,
+                        },
+                        {
+                            "account_id": loan_account_id,
+                            "debit": "0",
+                            "credit": str(outstanding),
+                            "cost_center_id": cost_center_id,
+                            # loan_account is a 'receivable' type; step 5 requires party.
+                            # loan.applicant_type is one of customer/employee/supplier;
+                            # the GL validator accepts all three for receivable/payable.
+                            "party_type": ld["applicant_type"],
+                            "party_id": ld["applicant_id"],
+                        },
+                    ],
+                    # 'journal_entry' is the catch-all voucher_type per the gl_entry
+                    # CHECK constraint — loan write-offs aren't a first-class voucher
+                    # type in foundation. Semantic identity is preserved via voucher_id
+                    # (points to loan_write_off record) + remarks ("Loan write-off: ...").
+                    voucher_type="journal_entry",
+                    voucher_id=wo_id,
+                    posting_date=write_off_date,
+                    company_id=company_id,
+                    remarks=f"Loan write-off: {reason}",
+                )
+            except Exception as e:
+                conn.rollback()
+                return err(f"GL posting failed, write-off rolled back: {e}")
 
         conn.commit()
         return ok({"id": wo_id, "loan_id": loan_id, "write_off_amount": str(outstanding)})

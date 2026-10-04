@@ -2714,50 +2714,111 @@ def cancel_work_order(conn, args):
 
     posting_date = args.posting_date or datetime.now().strftime("%Y-%m-%d")
 
-    # Reverse every voucher in the work order's family: every transfer and
-    # every completion, including the legacy first-event ids. Nothing to
-    # reverse is acceptable per voucher.
-    for voucher_id in _wo_family_voucher_ids(conn, args.work_order_id):
-        try:
-            reverse_sle_entries(
-                conn,
-                voucher_type="work_order",
-                voucher_id=voucher_id,
-                posting_date=posting_date,
+    try:
+        take_chain_heads(conn, [wo_dict["company_id"]])
+
+        wo = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+        if not wo:
+            conn.rollback()
+            err(f"Work Order {args.work_order_id} not found")
+
+        wo_dict = row_to_dict(wo)
+        if wo_dict["status"] in ("completed", "cancelled"):
+            conn.rollback()
+            err(
+                f"Cannot cancel Work Order with status '{wo_dict['status']}'. "
+                f"Completed and cancelled work orders cannot be cancelled."
             )
-        except (ValueError, NotImplementedError):
-            pass  # No SLE entries to reverse is acceptable
 
-        try:
-            reverse_gl_entries(
-                conn,
-                voucher_type="work_order",
-                voucher_id=voucher_id,
-                posting_date=posting_date,
+        # Every voucher in the work order's family: every transfer and every
+        # completion, including the legacy first-event ids, plus any voucher
+        # id that posted only ledger rows.
+        family_ids = _wo_family_voucher_ids(conn, args.work_order_id)
+        gl_t = Table("gl_entry")
+        wo_prefix = f"{args.work_order_id}:"
+        gl_fam_q = (Q.from_(gl_t).select(gl_t.voucher_id).distinct()
+                    .where(gl_t.voucher_type == ValueWrapper("work_order"))
+                    .where((gl_t.voucher_id == P())
+                           | (fn.Substring(gl_t.voucher_id, 1, len(wo_prefix)) == P())))
+        for gl_row in conn.execute(gl_fam_q.get_sql(), (args.work_order_id, wo_prefix)).fetchall():
+            gl_voucher_id = gl_row["voucher_id"]
+            if (gl_voucher_id == args.work_order_id
+                    or gl_voucher_id.startswith(wo_prefix)) and gl_voucher_id not in family_ids:
+                family_ids.append(gl_voucher_id)
+        family_ids = sorted(family_ids)
+
+        sle_t = Table("stock_ledger_entry")
+        sle_active_q = (Q.from_(sle_t).select(fn.Count("*"))
+                        .where(sle_t.voucher_type == P())
+                        .where(sle_t.voucher_id == P())
+                        .where(sle_t.is_cancelled == P()))
+        sle_active_sql = sle_active_q.get_sql()
+        gl_active_q = (Q.from_(gl_t).select(fn.Count("*"))
+                       .where(gl_t.voucher_type == P())
+                       .where(gl_t.voucher_id == P())
+                       .where(gl_t.is_cancelled == P()))
+        gl_active_sql = gl_active_q.get_sql()
+        for voucher_id in family_ids:
+            sle_active = conn.execute(sle_active_sql, ("work_order", voucher_id, 0)).fetchone()[0]
+            gl_active = conn.execute(gl_active_sql, ("work_order", voucher_id, 0)).fetchone()[0]
+            if not sle_active and not gl_active:
+                continue
+            try:
+                if sle_active:
+                    reverse_sle_entries(
+                        conn,
+                        voucher_type="work_order",
+                        voucher_id=voucher_id,
+                        posting_date=posting_date,
+                    )
+                if gl_active:
+                    reverse_gl_entries(
+                        conn,
+                        voucher_type="work_order",
+                        voucher_id=voucher_id,
+                        posting_date=posting_date,
+                    )
+            except (ValueError, NotImplementedError) as e:
+                conn.rollback()
+                err(f"Cannot cancel Work Order: {e}. Nothing was changed.")
+
+        # Set WO status to cancelled, but only if nobody else finished or
+        # cancelled it while this cancel waited on the chain head.
+        wo_cancel_q = (Q.update(wo_t)
+                       .set(wo_t.status, ValueWrapper("cancelled"))
+                       .set(wo_t.updated_at, now())
+                       .where(wo_t.id == P())
+                       .where(wo_t.status.notin([ValueWrapper("completed"),
+                                                 ValueWrapper("cancelled")])))
+        wo_cancel_cur = conn.execute(wo_cancel_q.get_sql(), (args.work_order_id,))
+        if wo_cancel_cur.rowcount == 0:
+            wo_fresh = conn.execute(wo_q.get_sql(), (args.work_order_id,)).fetchone()
+            if not wo_fresh:
+                conn.rollback()
+                err(f"Work Order {args.work_order_id} not found")
+            wo_fresh_dict = row_to_dict(wo_fresh)
+            conn.rollback()
+            err(
+                f"Cannot cancel Work Order with status '{wo_fresh_dict['status']}'. "
+                f"Completed and cancelled work orders cannot be cancelled."
             )
-        except ValueError:
-            pass  # No GL entries to reverse is acceptable
 
-    # Set WO status to cancelled
-    wo_cancel_q = (Q.update(wo_t)
-                   .set(wo_t.status, ValueWrapper("cancelled"))
-                   .set(wo_t.updated_at, now())
-                   .where(wo_t.id == P()))
-    conn.execute(wo_cancel_q.get_sql(), (args.work_order_id,))
+        # Cancel all open/in_process job cards for this WO
+        jc_t = Table("job_card")
+        jc_cancel_q = (Q.update(jc_t)
+                       .set(jc_t.status, ValueWrapper("cancelled"))
+                       .set(jc_t.updated_at, now())
+                       .where(jc_t.work_order_id == P())
+                       .where(jc_t.status.isin(["open", "in_process"])))
+        conn.execute(jc_cancel_q.get_sql(), (args.work_order_id,))
 
-    # Cancel all open/in_process job cards for this WO
-    jc_t = Table("job_card")
-    jc_cancel_q = (Q.update(jc_t)
-                   .set(jc_t.status, ValueWrapper("cancelled"))
-                   .set(jc_t.updated_at, now())
-                   .where(jc_t.work_order_id == P())
-                   .where(jc_t.status.isin(["open", "in_process"])))
-    conn.execute(jc_cancel_q.get_sql(), (args.work_order_id,))
-
-    audit(conn, "erpclaw-manufacturing", "cancel-work-order", "work_order", args.work_order_id,
-           old_values={"status": wo_dict["status"]},
-           new_values={"status": "cancelled"})
-    conn.commit()
+        audit(conn, "erpclaw-manufacturing", "cancel-work-order", "work_order", args.work_order_id,
+               old_values={"status": wo_dict["status"]},
+               new_values={"status": "cancelled"})
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     ok({
         "work_order_id": args.work_order_id,

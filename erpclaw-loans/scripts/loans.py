@@ -21,7 +21,7 @@ try:
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
-    from erpclaw_lib.gl_posting import insert_gl_entries
+    from erpclaw_lib.gl_posting import insert_gl_entries, take_chain_heads
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.query import Q, P, Table, Field, fn, Order, LiteralValue, insert_row, update_row, dynamic_update
@@ -68,6 +68,14 @@ def _validate_loan_application(conn, app_id):
     if not row:
         err(f"Loan application {app_id} not found")
     return row
+
+
+def _refuse_stale_application(conn, app_id):
+    conn.rollback()
+    row = conn.execute(Q.from_(Table("loan_application")).select(Field("status")).where(Field("id") == P()).get_sql(), (app_id,)).fetchone()
+    if row is None:
+        err(f"Loan application {app_id} not found")
+    err(f"Loan application {app_id} changed while this request was running (now '{row['status']}'); re-read it and try again.")
 
 
 def _validate_loan(conn, loan_id):
@@ -423,8 +431,11 @@ def handle_update_loan_application(conn, args):
         err("No fields to update")
 
     upd_data["updated_at"] = _now_iso()
-    sql, params = dynamic_update("loan_application", upd_data, {"id": app_id})
-    conn.execute(sql, params)
+    expected_status = app["status"]
+    sql, params = dynamic_update("loan_application", upd_data, {"id": app_id, "status": expected_status})
+    cur = conn.execute(sql, params)
+    if cur.rowcount == 0:
+        _refuse_stale_application(conn, app_id)
     audit(conn, "erpclaw-loans", "loan-update-loan-application", "loan_application", app_id,
           new_values={"updated_fields": changed})
     conn.commit()
@@ -498,10 +509,20 @@ def handle_approve_loan(conn, args):
         approved_str = app["requested_amount"]
 
     now = _now_iso()
-    sql = update_row("loan_application",
-        data={"status": P(), "approved_amount": P(), "updated_at": P()},
-        where={"id": P()})
-    conn.execute(sql, ("approved", approved_str, now, app_id))
+    expected_status = app["status"]
+    if approved_amount:
+        sql = update_row("loan_application",
+            data={"status": P(), "approved_amount": P(), "updated_at": P()},
+            where={"id": P(), "status": P()})
+        cur = conn.execute(sql, ("approved", approved_str, now, app_id, expected_status))
+    else:
+        expected_requested = app["requested_amount"]
+        sql = update_row("loan_application",
+            data={"status": P(), "approved_amount": P(), "updated_at": P()},
+            where={"id": P(), "status": P(), "requested_amount": P()})
+        cur = conn.execute(sql, ("approved", approved_str, now, app_id, expected_status, expected_requested))
+    if cur.rowcount == 0:
+        _refuse_stale_application(conn, app_id)
 
     audit(conn, "erpclaw-loans", "loan-approve-loan", "loan_application", app_id,
           old_values={"status": app["status"]},
@@ -529,10 +550,13 @@ def handle_reject_loan(conn, args):
         err("--reason is required for rejection")
 
     now = _now_iso()
+    expected_status = app["status"]
     sql = update_row("loan_application",
         data={"status": P(), "rejection_reason": P(), "updated_at": P()},
-        where={"id": P()})
-    conn.execute(sql, ("rejected", reason, now, app_id))
+        where={"id": P(), "status": P()})
+    cur = conn.execute(sql, ("rejected", reason, now, app_id, expected_status))
+    if cur.rowcount == 0:
+        _refuse_stale_application(conn, app_id)
 
     audit(conn, "erpclaw-loans", "loan-reject-loan", "loan_application", app_id,
           old_values={"status": app["status"]},
@@ -560,166 +584,186 @@ def handle_disburse_loan(conn, args):
             f"must be 'approved'."
         )
 
-    # Check not already disbursed
-    existing = conn.execute(Q.from_(Table("loan")).select(Field('id')).where(Field("loan_application_id") == P()).get_sql(), (loan_app_id,)).fetchone()
-    if existing:
-        err(
-            f"Loan already disbursed for application {loan_app_id} "
-            f"(loan: {existing['id']})"
+    try:
+        take_chain_heads(conn, [app["company_id"]])
+
+        app_row = conn.execute(Q.from_(Table("loan_application")).select(Table("loan_application").star).where(Field("id") == P()).get_sql(), (loan_app_id,)).fetchone()
+        if not app_row:
+            conn.rollback()
+            err(f"Loan application {loan_app_id} not found")
+        app = dict(app_row)
+
+        if app["status"] != "approved":
+            conn.rollback()
+            err(
+                f"Cannot disburse loan. Application status is '{app['status']}', "
+                f"must be 'approved'."
+            )
+
+        # Check not already disbursed (under the head)
+        existing = conn.execute(Q.from_(Table("loan")).select(Field('id')).where(Field("loan_application_id") == P()).get_sql(), (loan_app_id,)).fetchone()
+        if existing:
+            conn.rollback()
+            err(
+                f"Loan already disbursed for application {loan_app_id} "
+                f"(loan: {existing['id']})"
+            )
+
+        # Validate accounts
+        loan_account_id = getattr(args, "loan_account_id", None)
+        interest_income_account_id = getattr(args, "interest_income_account_id", None)
+        disbursement_account_id = getattr(args, "disbursement_account_id", None)
+        _validate_account(conn, loan_account_id, "loan-account-id")
+        _validate_account(conn, interest_income_account_id, "interest-income-account-id")
+        _validate_account(conn, disbursement_account_id, "disbursement-account-id")
+
+        disbursement_date = getattr(args, "disbursement_date", None) or _today_str()
+        company_id = app["company_id"]
+
+        loan_amount = app["approved_amount"] or app["requested_amount"]
+        loan_amount_dec = to_decimal(loan_amount)
+        loan_amount_str = str(round_currency(loan_amount_dec))
+
+        # Calculate maturity date
+        repayment_periods = int(app["repayment_periods"])
+        maturity_date = _add_months(disbursement_date, repayment_periods)
+
+        # Calculate total interest based on repayment method
+        interest_rate_dec = to_decimal(app["interest_rate"])
+        repayment_method = app["repayment_method"]
+        total_interest = _calculate_total_interest(
+            loan_amount_dec, interest_rate_dec, repayment_periods, repayment_method
         )
 
-    # Validate accounts
-    loan_account_id = getattr(args, "loan_account_id", None)
-    interest_income_account_id = getattr(args, "interest_income_account_id", None)
-    disbursement_account_id = getattr(args, "disbursement_account_id", None)
-    _validate_account(conn, loan_account_id, "loan-account-id")
-    _validate_account(conn, interest_income_account_id, "interest-income-account-id")
-    _validate_account(conn, disbursement_account_id, "disbursement-account-id")
+        # Create loan record
+        loan_id = str(uuid.uuid4())
+        naming = get_next_name(conn, "loan", company_id=company_id)
+        now = _now_iso()
 
-    disbursement_date = getattr(args, "disbursement_date", None) or _today_str()
-    company_id = app["company_id"]
-
-    loan_amount = app["approved_amount"] or app["requested_amount"]
-    loan_amount_dec = to_decimal(loan_amount)
-    loan_amount_str = str(round_currency(loan_amount_dec))
-
-    # Calculate maturity date
-    repayment_periods = int(app["repayment_periods"])
-    maturity_date = _add_months(disbursement_date, repayment_periods)
-
-    # Calculate total interest based on repayment method
-    interest_rate_dec = to_decimal(app["interest_rate"])
-    repayment_method = app["repayment_method"]
-    total_interest = _calculate_total_interest(
-        loan_amount_dec, interest_rate_dec, repayment_periods, repayment_method
-    )
-
-    # Create loan record
-    loan_id = str(uuid.uuid4())
-    naming = get_next_name(conn, "loan", company_id=company_id)
-    now = _now_iso()
-
-    sql, _ = insert_row("loan", {
-        "id": P(), "naming_series": P(), "loan_application_id": P(),
-        "applicant_type": P(), "applicant_id": P(), "applicant_name": P(),
-        "loan_type": P(), "loan_amount": P(), "disbursed_amount": P(),
-        "total_interest": P(), "total_repaid": P(), "outstanding_amount": P(),
-        "interest_rate": P(), "repayment_method": P(), "repayment_periods": P(),
-        "disbursement_date": P(), "maturity_date": P(),
-        "loan_account_id": P(), "interest_income_account_id": P(),
-        "disbursement_account_id": P(), "status": P(), "company_id": P(),
-        "created_at": P(), "updated_at": P(),
-    })
-    conn.execute(sql, (
-        loan_id, naming, loan_app_id,
-        app["applicant_type"], app["applicant_id"], app["applicant_name"],
-        app["loan_type"],
-        loan_amount_str,
-        loan_amount_str,  # disbursed_amount = full amount at disbursement
-        str(round_currency(total_interest)),
-        "0.00",  # total_repaid
-        loan_amount_str,  # outstanding_amount = loan_amount at disbursement
-        str(round_currency(interest_rate_dec)),
-        repayment_method,
-        repayment_periods,
-        disbursement_date,
-        maturity_date,
-        loan_account_id,
-        interest_income_account_id,
-        disbursement_account_id,
-        "disbursed",
-        company_id,
-        now, now,
-    ))
-
-    # Auto-generate repayment schedule
-    schedule = _generate_schedule(
-        loan_amount_dec, interest_rate_dec, repayment_periods,
-        repayment_method, disbursement_date
-    )
-    sched_sql, _ = insert_row("loan_repayment_schedule", {
-        "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
-        "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
-        "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
-    })
-    for item in schedule:
-        sched_id = str(uuid.uuid4())
-        conn.execute(sched_sql, (
-            sched_id, loan_id, item["installment_no"], item["due_date"],
-            item["principal_amount"], item["interest_amount"], item["total_amount"],
-            "0.00",  # paid_amount
-            item["total_amount"],  # outstanding = total initially
-            "pending",
-            None,  # payment_date
+        sql, _ = insert_row("loan", {
+            "id": P(), "naming_series": P(), "loan_application_id": P(),
+            "applicant_type": P(), "applicant_id": P(), "applicant_name": P(),
+            "loan_type": P(), "loan_amount": P(), "disbursed_amount": P(),
+            "total_interest": P(), "total_repaid": P(), "outstanding_amount": P(),
+            "interest_rate": P(), "repayment_method": P(), "repayment_periods": P(),
+            "disbursement_date": P(), "maturity_date": P(),
+            "loan_account_id": P(), "interest_income_account_id": P(),
+            "disbursement_account_id": P(), "status": P(), "company_id": P(),
+            "created_at": P(), "updated_at": P(),
+        })
+        conn.execute(sql, (
+            loan_id, naming, loan_app_id,
+            app["applicant_type"], app["applicant_id"], app["applicant_name"],
+            app["loan_type"],
+            loan_amount_str,
+            loan_amount_str,  # disbursed_amount = full amount at disbursement
+            str(round_currency(total_interest)),
+            "0.00",  # total_repaid
+            loan_amount_str,  # outstanding_amount = loan_amount at disbursement
+            str(round_currency(interest_rate_dec)),
+            repayment_method,
+            repayment_periods,
+            disbursement_date,
+            maturity_date,
+            loan_account_id,
+            interest_income_account_id,
+            disbursement_account_id,
+            "disbursed",
+            company_id,
+            now, now,
         ))
 
-    # Post GL entries: DR Loan Receivable / CR Bank (disbursement account).
-    #
-    # Posted LAST, and never swallowed. Everything above — the loan row, the
-    # schedule rows — is uncommitted at this point, so a GL failure rolls the
-    # whole disbursement back rather than leaving a loan on the books that the
-    # ledger has never heard of (M62 / F21-FINDING-4: this call used to sit in
-    # `except Exception: pass`, and the action returned ok with an empty
-    # gl_entry table).
-    #
-    # voucher_type is the registered 'journal_entry' catch-all; loan vouchers
-    # are not first-class types in foundation's voucher_type_registry, so the
-    # semantic identity rides on voucher_id (the loan) + remarks. Same choice,
-    # for the same reason, as the write-off path in repayments.py.
-    #
-    # The receivable leg carries the party because GL validation step 5 demands
-    # it for receivable accounts. No cost_center_id: both legs are balance-sheet
-    # (receivable + bank), so step 6 does not apply and adding one would enroll
-    # the posting in the step-12 budget check for no reason.
-    gl_entries = [
-        {
-            "account_id": loan_account_id,
-            "debit": loan_amount_str,
-            "credit": "0",
-            "party_type": app["applicant_type"],
-            "party_id": app["applicant_id"],
-        },
-        {
-            "account_id": disbursement_account_id,
-            "debit": "0",
-            "credit": loan_amount_str,
-        },
-    ]
-
-    try:
-        insert_gl_entries(
-            conn,
-            entries=gl_entries,
-            voucher_type="journal_entry",
-            voucher_id=loan_id,
-            posting_date=disbursement_date,
-            company_id=company_id,
-            remarks=f"Loan disbursement {naming}",
+        # Auto-generate repayment schedule
+        schedule = _generate_schedule(
+            loan_amount_dec, interest_rate_dec, repayment_periods,
+            repayment_method, disbursement_date
         )
-    except Exception as e:
-        # Single-transaction rule: any failure = full rollback. err() raises
-        # SystemExit, which the router's `except Exception` does not catch, so
-        # the rollback happens here rather than relying on process exit.
-        conn.rollback()
-        err(f"GL posting failed, disbursement rolled back: {e}")
+        sched_sql, _ = insert_row("loan_repayment_schedule", {
+            "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
+            "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
+            "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
+        })
+        for item in schedule:
+            sched_id = str(uuid.uuid4())
+            conn.execute(sched_sql, (
+                sched_id, loan_id, item["installment_no"], item["due_date"],
+                item["principal_amount"], item["interest_amount"], item["total_amount"],
+                "0.00",  # paid_amount
+                item["total_amount"],  # outstanding = total initially
+                "pending",
+                None,  # payment_date
+            ))
 
-    audit(conn, "erpclaw-loans", "loan-disburse-loan", "loan", loan_id,
-          new_values={
-              "loan_amount": loan_amount_str,
-              "disbursement_date": disbursement_date,
-          },
-          description=f"Disbursed loan {naming} from application {app['naming_series']}")
-    conn.commit()
-    ok({
-        "loan_id": loan_id,
-        "naming_series": naming,
-        "loan_application_id": loan_app_id,
-        "loan_amount": loan_amount_str,
-        "disbursement_date": disbursement_date,
-        "maturity_date": maturity_date,
-        "total_interest": str(round_currency(total_interest)),
-        "installments": len(schedule),
-    })
+        # Post GL entries: DR Loan Receivable / CR Bank (disbursement account).
+        #
+        # Posted LAST, and never swallowed. Everything above — the loan row, the
+        # schedule rows — is uncommitted at this point, so a GL failure rolls the
+        # whole disbursement back rather than leaving a loan on the books that the
+        # ledger has never heard of (M62 / F21-FINDING-4: this call used to sit in
+        # `except Exception: pass`, and the action returned ok with an empty
+        # gl_entry table).
+        #
+        # voucher_type is the registered 'journal_entry' catch-all; loan vouchers
+        # are not first-class types in foundation's voucher_type_registry, so the
+        # semantic identity rides on voucher_id (the loan) + remarks. Same choice,
+        # for the same reason, as the write-off path in repayments.py.
+        #
+        # The receivable leg carries the party because GL validation step 5 demands
+        # it for receivable accounts. No cost_center_id: both legs are balance-sheet
+        # (receivable + bank), so step 6 does not apply and adding one would enroll
+        # the posting in the step-12 budget check for no reason.
+        gl_entries = [
+            {
+                "account_id": loan_account_id,
+                "debit": loan_amount_str,
+                "credit": "0",
+                "party_type": app["applicant_type"],
+                "party_id": app["applicant_id"],
+            },
+            {
+                "account_id": disbursement_account_id,
+                "debit": "0",
+                "credit": loan_amount_str,
+            },
+        ]
+
+        try:
+            insert_gl_entries(
+                conn,
+                entries=gl_entries,
+                voucher_type="journal_entry",
+                voucher_id=loan_id,
+                posting_date=disbursement_date,
+                company_id=company_id,
+                remarks=f"Loan disbursement {naming}",
+            )
+        except Exception as e:
+            # Single-transaction rule: any failure = full rollback. err() raises
+            # SystemExit, which the router's `except Exception` does not catch, so
+            # the rollback happens here rather than relying on process exit.
+            conn.rollback()
+            err(f"GL posting failed, disbursement rolled back: {e}")
+
+        audit(conn, "erpclaw-loans", "loan-disburse-loan", "loan", loan_id,
+              new_values={
+                  "loan_amount": loan_amount_str,
+                  "disbursement_date": disbursement_date,
+              },
+              description=f"Disbursed loan {naming} from application {app['naming_series']}")
+        conn.commit()
+        ok({
+            "loan_id": loan_id,
+            "naming_series": naming,
+            "loan_application_id": loan_app_id,
+            "loan_amount": loan_amount_str,
+            "disbursement_date": disbursement_date,
+            "maturity_date": maturity_date,
+            "total_interest": str(round_currency(total_interest)),
+            "installments": len(schedule),
+        })
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -792,94 +836,122 @@ def handle_generate_repayment_schedule(conn, args):
     if loan["status"] not in ("draft", "disbursed"):
         err(f"Cannot generate schedule for loan in status '{loan['status']}'")
 
-    # Delete existing schedule entries that haven't been paid
-    rs = Table("loan_repayment_schedule")
-    conn.execute(
-        Q.from_(rs).delete()
-        .where(rs.loan_id == P())
-        .where(rs.status.isin(["pending", "overdue"])).get_sql(),
-        (loan_id,))
+    head_company_id = loan["company_id"]
+    try:
+        take_chain_heads(conn, [head_company_id])
+        loan_row = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+        if not loan_row:
+            conn.rollback()
+            return err(f"Loan {loan_id} not found")
+        loan = dict(loan_row)
 
-    # Check if any paid entries exist (partial regeneration)
-    paid_rows = conn.execute(
-        Q.from_(rs).select(fn.Max(rs.installment_no).as_("last_paid_installment"))
-        .where(rs.loan_id == P())
-        .where(rs.status.isin(["paid", "partially_paid"])).get_sql(),
-        (loan_id,)).fetchone()
+        if loan["status"] not in ("draft", "disbursed"):
+            conn.rollback()
+            return err(f"Cannot generate schedule for loan in status '{loan['status']}'")
 
-    principal = to_decimal(loan["loan_amount"])
-    annual_rate = to_decimal(loan["interest_rate"])
-    periods = int(loan["repayment_periods"])
-    method = loan["repayment_method"]
-    start_date = loan["disbursement_date"] or _today_str()
+        where_status = loan["status"]
+        where_outstanding = loan["outstanding_amount"]
 
-    # If there are paid installments, adjust for remaining
-    total_paid_principal = Decimal("0")
-    start_installment = 1
+        # Delete existing schedule entries that haven't been paid
+        rs = Table("loan_repayment_schedule")
+        conn.execute(
+            Q.from_(rs).delete()
+            .where(rs.loan_id == P())
+            .where(rs.status.isin(["pending", "overdue"])).get_sql(),
+            (loan_id,))
 
-    if paid_rows and paid_rows["last_paid_installment"]:
-        last_paid = int(paid_rows["last_paid_installment"])
-        start_installment = last_paid + 1
-
-        # Sum principal already paid
-        paid_principal_row = conn.execute(
-            Q.from_(rs).select(
-                LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
-            .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
+        # Check if any paid entries exist (partial regeneration)
+        paid_rows = conn.execute(
+            Q.from_(rs).select(fn.Max(rs.installment_no).as_("last_paid_installment"))
+            .where(rs.loan_id == P())
+            .where(rs.status.isin(["paid", "partially_paid"])).get_sql(),
             (loan_id,)).fetchone()
-        total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
-        principal = principal - total_paid_principal
-        periods = periods - last_paid
-        start_date = _add_months(loan["disbursement_date"] or _today_str(), last_paid)
 
-    if periods <= 0:
+        principal = to_decimal(loan["loan_amount"])
+        annual_rate = to_decimal(loan["interest_rate"])
+        periods = int(loan["repayment_periods"])
+        method = loan["repayment_method"]
+        start_date = loan["disbursement_date"] or _today_str()
+
+        # If there are paid installments, adjust for remaining
+        total_paid_principal = Decimal("0")
+        start_installment = 1
+
+        if paid_rows and paid_rows["last_paid_installment"]:
+            last_paid = int(paid_rows["last_paid_installment"])
+            start_installment = last_paid + 1
+
+            # Sum principal already paid
+            paid_principal_row = conn.execute(
+                Q.from_(rs).select(
+                    LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
+                .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
+                (loan_id,)).fetchone()
+            total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
+            principal = principal - total_paid_principal
+            periods = periods - last_paid
+            start_date = _add_months(loan["disbursement_date"] or _today_str(), last_paid)
+
+        if periods <= 0:
+            ok({
+                "loan_id": loan_id,
+                "message": "Loan fully repaid, no schedule to generate",
+                "installments": 0,
+            })
+            return
+
+        schedule = _generate_schedule(principal, annual_rate, periods, method, start_date)
+        now = _now_iso()
+
+        sched_sql, _ = insert_row("loan_repayment_schedule", {
+            "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
+            "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
+            "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
+        })
+        for item in schedule:
+            sched_id = str(uuid.uuid4())
+            adjusted_installment_no = item["installment_no"] + start_installment - 1
+            conn.execute(sched_sql, (
+                sched_id, loan_id, adjusted_installment_no, item["due_date"],
+                item["principal_amount"], item["interest_amount"], item["total_amount"],
+                "0.00", item["total_amount"],
+                "pending", None,
+            ))
+
+        # Recalculate total interest on the loan
+        total_interest_row = conn.execute(
+            Q.from_(rs).select(
+                LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
+            .where(rs.loan_id == P()).get_sql(),
+            (loan_id,)).fetchone()
+        total_interest_str = str(round_currency(to_decimal(str(total_interest_row["total_interest"]))))
+
+        sql = update_row("loan",
+            data={"total_interest": P(), "updated_at": P()},
+            where={"id": P(), "status": P(), "outstanding_amount": P()})
+        cur = conn.execute(sql, (total_interest_str, now, loan_id, where_status, where_outstanding))
+        if cur.rowcount == 0:
+            conn.rollback()
+            fresh = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+            if fresh is None:
+                return err(f"Loan {loan_id} not found")
+            fresh_loan = dict(fresh)
+            if fresh_loan["status"] not in ("draft", "disbursed"):
+                return err(f"Cannot generate schedule for loan in status '{fresh_loan['status']}'")
+            return err(f"Loan {loan_id} changed while this action was running; nothing was written. Retry the action.")
+
+        audit(conn, "erpclaw-loans", "loan-generate-repayment-schedule", "loan", loan_id,
+              new_values={"installments_generated": len(schedule)})
+        conn.commit()
         ok({
             "loan_id": loan_id,
-            "message": "Loan fully repaid, no schedule to generate",
-            "installments": 0,
+            "installments": len(schedule),
+            "total_interest": total_interest_str,
+            "schedule": schedule,
         })
-        return
-
-    schedule = _generate_schedule(principal, annual_rate, periods, method, start_date)
-    now = _now_iso()
-
-    sched_sql, _ = insert_row("loan_repayment_schedule", {
-        "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
-        "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
-        "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
-    })
-    for item in schedule:
-        sched_id = str(uuid.uuid4())
-        adjusted_installment_no = item["installment_no"] + start_installment - 1
-        conn.execute(sched_sql, (
-            sched_id, loan_id, adjusted_installment_no, item["due_date"],
-            item["principal_amount"], item["interest_amount"], item["total_amount"],
-            "0.00", item["total_amount"],
-            "pending", None,
-        ))
-
-    # Recalculate total interest on the loan
-    total_interest_row = conn.execute(
-        Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
-        .where(rs.loan_id == P()).get_sql(),
-        (loan_id,)).fetchone()
-    total_interest_str = str(round_currency(to_decimal(str(total_interest_row["total_interest"]))))
-
-    sql = update_row("loan",
-        data={"total_interest": P(), "updated_at": P()},
-        where={"id": P()})
-    conn.execute(sql, (total_interest_str, now, loan_id))
-
-    audit(conn, "erpclaw-loans", "loan-generate-repayment-schedule", "loan", loan_id,
-          new_values={"installments_generated": len(schedule)})
-    conn.commit()
-    ok({
-        "loan_id": loan_id,
-        "installments": len(schedule),
-        "total_interest": total_interest_str,
-        "schedule": schedule,
-    })
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -902,140 +974,194 @@ def handle_restructure_loan(conn, args):
     if not new_interest_rate and not new_repayment_periods:
         err("At least one of --new-interest-rate or --new-repayment-periods is required")
 
-    old_values = {
-        "interest_rate": loan["interest_rate"],
-        "repayment_periods": loan["repayment_periods"],
-    }
-
-    # Update loan terms
-    upd_data = {}
-
     if new_interest_rate:
         rate_dec = to_decimal(new_interest_rate)
         if rate_dec < Decimal("0"):
             err("--new-interest-rate cannot be negative")
-        upd_data["interest_rate"] = str(round_currency(rate_dec))
 
     if new_repayment_periods:
         periods_int = int(new_repayment_periods)
         if periods_int <= 0:
             err("--new-repayment-periods must be a positive integer")
-        upd_data["repayment_periods"] = periods_int
 
-    now = _now_iso()
-    upd_data["updated_at"] = now
-    sql, params = dynamic_update("loan", upd_data, {"id": loan_id})
-    conn.execute(sql, params)
+    head_company_id = loan["company_id"]
+    try:
+        take_chain_heads(conn, [head_company_id])
+        loan_row = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+        if not loan_row:
+            conn.rollback()
+            return err(f"Loan {loan_id} not found")
+        loan = dict(loan_row)
 
-    # Delete unpaid schedule entries
-    rs = Table("loan_repayment_schedule")
-    conn.execute(
-        Q.from_(rs).delete()
-        .where(rs.loan_id == P())
-        .where(rs.status.isin(["pending", "overdue"])).get_sql(),
-        (loan_id,))
+        if loan["status"] not in ("disbursed", "partially_repaid"):
+            conn.rollback()
+            return err(
+                f"Cannot restructure loan in status '{loan['status']}'. "
+                f"Must be disbursed or partially_repaid."
+            )
 
-    # Determine remaining principal
-    paid_principal_row = conn.execute(
-        Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
-        .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
-        (loan_id,)).fetchone()
-    total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
-    remaining_principal = to_decimal(loan["loan_amount"]) - total_paid_principal
+        where_status = loan["status"]
+        where_outstanding = loan["outstanding_amount"]
 
-    # Determine start installment
-    last_paid_row = conn.execute(
-        Q.from_(rs).select(fn.Max(rs.installment_no).as_("last_no"))
-        .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
-        (loan_id,)).fetchone()
-    last_paid_no = (
-        int(last_paid_row["last_no"])
-        if last_paid_row and last_paid_row["last_no"]
-        else 0
-    )
+        new_interest_rate = getattr(args, "new_interest_rate", None)
+        new_repayment_periods = getattr(args, "new_repayment_periods", None)
 
-    # Use updated loan values
-    effective_rate = (
-        to_decimal(new_interest_rate)
-        if new_interest_rate
-        else to_decimal(loan["interest_rate"])
-    )
-    effective_periods = (
-        int(new_repayment_periods)
-        if new_repayment_periods
-        else int(loan["repayment_periods"])
-    )
-    remaining_periods = effective_periods - last_paid_no
+        if not new_interest_rate and not new_repayment_periods:
+            conn.rollback()
+            return err("At least one of --new-interest-rate or --new-repayment-periods is required")
 
-    if remaining_periods <= 0:
-        err("New repayment periods must be greater than already-paid installments")
+        old_values = {
+            "interest_rate": loan["interest_rate"],
+            "repayment_periods": loan["repayment_periods"],
+        }
 
-    # Calculate start date for remaining schedule
-    base_date = loan["disbursement_date"] or _today_str()
-    start_date = _add_months(base_date, last_paid_no)
+        # Update loan terms
+        upd_data = {}
 
-    method = loan["repayment_method"]
-    schedule = _generate_schedule(
-        remaining_principal, effective_rate, remaining_periods, method, start_date
-    )
+        if new_interest_rate:
+            rate_dec = to_decimal(new_interest_rate)
+            if rate_dec < Decimal("0"):
+                conn.rollback()
+                return err("--new-interest-rate cannot be negative")
+            upd_data["interest_rate"] = str(round_currency(rate_dec))
 
-    sched_sql, _ = insert_row("loan_repayment_schedule", {
-        "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
-        "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
-        "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
-        "created_at": P(), "updated_at": P(),
-    })
-    for item in schedule:
-        sched_id = str(uuid.uuid4())
-        adjusted_no = item["installment_no"] + last_paid_no
-        conn.execute(sched_sql, (
-            sched_id, loan_id, adjusted_no, item["due_date"],
-            item["principal_amount"], item["interest_amount"], item["total_amount"],
-            "0.00", item["total_amount"],
-            "pending", None, now, now,
+        if new_repayment_periods:
+            periods_int = int(new_repayment_periods)
+            if periods_int <= 0:
+                conn.rollback()
+                return err("--new-repayment-periods must be a positive integer")
+            upd_data["repayment_periods"] = periods_int
+
+        now = _now_iso()
+        upd_data["updated_at"] = now
+        sql, params = dynamic_update("loan", upd_data, {"id": loan_id, "status": where_status, "outstanding_amount": where_outstanding})
+        cur = conn.execute(sql, params)
+        if cur.rowcount == 0:
+            conn.rollback()
+            fresh = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+            if fresh is None:
+                return err(f"Loan {loan_id} not found")
+            fresh_loan = dict(fresh)
+            if fresh_loan["status"] not in ("disbursed", "partially_repaid"):
+                return err(
+                    f"Cannot restructure loan in status '{fresh_loan['status']}'. "
+                    f"Must be disbursed or partially_repaid."
+                )
+            return err(f"Loan {loan_id} changed while this action was running; nothing was written. Retry the action.")
+
+        # Delete unpaid schedule entries
+        rs = Table("loan_repayment_schedule")
+        conn.execute(
+            Q.from_(rs).delete()
+            .where(rs.loan_id == P())
+            .where(rs.status.isin(["pending", "overdue"])).get_sql(),
+            (loan_id,))
+
+        # Determine remaining principal
+        paid_principal_row = conn.execute(
+            Q.from_(rs).select(
+                LiteralValue("COALESCE(SUM(CAST(\"principal_amount\" AS NUMERIC)),0)").as_("paid_principal"))
+            .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
+            (loan_id,)).fetchone()
+        total_paid_principal = to_decimal(str(paid_principal_row["paid_principal"]))
+        remaining_principal = to_decimal(loan["loan_amount"]) - total_paid_principal
+
+        # Determine start installment
+        last_paid_row = conn.execute(
+            Q.from_(rs).select(fn.Max(rs.installment_no).as_("last_no"))
+            .where(rs.loan_id == P()).where(rs.status == "paid").get_sql(),
+            (loan_id,)).fetchone()
+        last_paid_no = (
+            int(last_paid_row["last_no"])
+            if last_paid_row and last_paid_row["last_no"]
+            else 0
+        )
+
+        # Use updated loan values
+        effective_rate = (
+            to_decimal(new_interest_rate)
+            if new_interest_rate
+            else to_decimal(loan["interest_rate"])
+        )
+        effective_periods = (
+            int(new_repayment_periods)
+            if new_repayment_periods
+            else int(loan["repayment_periods"])
+        )
+        remaining_periods = effective_periods - last_paid_no
+
+        if remaining_periods <= 0:
+            conn.rollback()
+            return err("New repayment periods must be greater than already-paid installments")
+
+        # Calculate start date for remaining schedule
+        base_date = loan["disbursement_date"] or _today_str()
+        start_date = _add_months(base_date, last_paid_no)
+
+        method = loan["repayment_method"]
+        schedule = _generate_schedule(
+            remaining_principal, effective_rate, remaining_periods, method, start_date
+        )
+
+        sched_sql, _ = insert_row("loan_repayment_schedule", {
+            "id": P(), "loan_id": P(), "installment_no": P(), "due_date": P(),
+            "principal_amount": P(), "interest_amount": P(), "total_amount": P(),
+            "paid_amount": P(), "outstanding": P(), "status": P(), "payment_date": P(),
+            "created_at": P(), "updated_at": P(),
+        })
+        for item in schedule:
+            sched_id = str(uuid.uuid4())
+            adjusted_no = item["installment_no"] + last_paid_no
+            conn.execute(sched_sql, (
+                sched_id, loan_id, adjusted_no, item["due_date"],
+                item["principal_amount"], item["interest_amount"], item["total_amount"],
+                "0.00", item["total_amount"],
+                "pending", None, now, now,
+            ))
+
+        # Recalculate maturity date and total interest
+        new_maturity = _add_months(base_date, effective_periods)
+
+        total_interest_row = conn.execute(
+            Q.from_(rs).select(
+                LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
+            .where(rs.loan_id == P()).get_sql(),
+            (loan_id,)).fetchone()
+        total_interest_str = str(round_currency(
+            to_decimal(str(total_interest_row["total_interest"]))
         ))
 
-    # Recalculate maturity date and total interest
-    new_maturity = _add_months(base_date, effective_periods)
+        # Update outstanding amount, maturity, and total interest
+        sql = update_row("loan",
+            data={"maturity_date": P(), "total_interest": P(),
+                  "outstanding_amount": P(), "updated_at": P()},
+            where={"id": P()})
+        conn.execute(sql, (
+            new_maturity, total_interest_str,
+            str(round_currency(remaining_principal)), now, loan_id,
+        ))
 
-    total_interest_row = conn.execute(
-        Q.from_(rs).select(
-            LiteralValue("COALESCE(SUM(CAST(\"interest_amount\" AS NUMERIC)),0)").as_("total_interest"))
-        .where(rs.loan_id == P()).get_sql(),
-        (loan_id,)).fetchone()
-    total_interest_str = str(round_currency(
-        to_decimal(str(total_interest_row["total_interest"]))
-    ))
+        new_values = {}
+        if new_interest_rate:
+            new_values["interest_rate"] = str(round_currency(to_decimal(new_interest_rate)))
+        if new_repayment_periods:
+            new_values["repayment_periods"] = int(new_repayment_periods)
+        new_values["maturity_date"] = new_maturity
 
-    # Update outstanding amount, maturity, and total interest
-    sql = update_row("loan",
-        data={"maturity_date": P(), "total_interest": P(),
-              "outstanding_amount": P(), "updated_at": P()},
-        where={"id": P()})
-    conn.execute(sql, (
-        new_maturity, total_interest_str,
-        str(round_currency(remaining_principal)), now, loan_id,
-    ))
-
-    new_values = {}
-    if new_interest_rate:
-        new_values["interest_rate"] = str(round_currency(to_decimal(new_interest_rate)))
-    if new_repayment_periods:
-        new_values["repayment_periods"] = int(new_repayment_periods)
-    new_values["maturity_date"] = new_maturity
-
-    audit(conn, "erpclaw-loans", "loan-restructure-loan", "loan", loan_id,
-          old_values=old_values, new_values=new_values,
-          description="Restructured loan terms")
-    conn.commit()
-    ok({
-        "loan_id": loan_id,
-        "remaining_principal": str(round_currency(remaining_principal)),
-        "new_maturity_date": new_maturity,
-        "total_interest": total_interest_str,
-        "installments_regenerated": len(schedule),
-    })
+        audit(conn, "erpclaw-loans", "loan-restructure-loan", "loan", loan_id,
+              old_values=old_values, new_values=new_values,
+              description="Restructured loan terms")
+        conn.commit()
+        ok({
+            "loan_id": loan_id,
+            "remaining_principal": str(round_currency(remaining_principal)),
+            "new_maturity_date": new_maturity,
+            "total_interest": total_interest_str,
+            "installments_regenerated": len(schedule),
+        })
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1055,39 +1181,80 @@ def handle_close_loan(conn, args):
             f"Must be disbursed, partially_repaid, or repaid."
         )
 
-    # Check outstanding amount
-    outstanding = to_decimal(loan["outstanding_amount"])
-    if outstanding > Decimal("0"):
-        # Check if all schedule items are paid or waived
-        rs = Table("loan_repayment_schedule")
-        pending_rows = conn.execute(
-            Q.from_(rs).select(fn.Count("*"))
-            .where(rs.loan_id == P())
-            .where(rs.status.isin(["pending", "overdue", "partially_paid"])).get_sql(),
-            (loan_id,)).fetchone()
-        pending_count = pending_rows[0]
+    head_company_id = loan["company_id"]
+    try:
+        take_chain_heads(conn, [head_company_id])
+        loan_row = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+        if not loan_row:
+            conn.rollback()
+            return err(f"Loan {loan_id} not found")
+        loan = dict(loan_row)
 
-        if pending_count > 0:
-            err(
-                f"Cannot close loan with outstanding amount {outstanding} "
-                f"and {pending_count} unpaid installments. "
-                f"All installments must be paid or waived before closing."
+        if loan["status"] == "closed":
+            conn.rollback()
+            return err("Loan is already closed")
+
+        if loan["status"] not in ("disbursed", "partially_repaid", "repaid"):
+            conn.rollback()
+            return err(
+                f"Cannot close loan in status '{loan['status']}'. "
+                f"Must be disbursed, partially_repaid, or repaid."
             )
 
-    now = _now_iso()
-    sql = update_row("loan", data={"status": P(), "updated_at": P()}, where={"id": P()})
-    conn.execute(sql, ("closed", now, loan_id))
+        # Check outstanding amount
+        outstanding = to_decimal(loan["outstanding_amount"])
+        if outstanding > Decimal("0"):
+            # Check if all schedule items are paid or waived
+            rs = Table("loan_repayment_schedule")
+            pending_rows = conn.execute(
+                Q.from_(rs).select(fn.Count("*"))
+                .where(rs.loan_id == P())
+                .where(rs.status.isin(["pending", "overdue", "partially_paid"])).get_sql(),
+                (loan_id,)).fetchone()
+            pending_count = pending_rows[0]
 
-    audit(conn, "erpclaw-loans", "loan-close-loan", "loan", loan_id,
-          old_values={"status": loan["status"]},
-          new_values={"status": "closed"},
-          description=f"Closed loan {loan['naming_series']}")
-    conn.commit()
-    ok({
-        "loan_id": loan_id,
-        "loan_status": "closed",
-        "naming_series": loan["naming_series"],
-    })
+            if pending_count > 0:
+                conn.rollback()
+                return err(
+                    f"Cannot close loan with outstanding amount {outstanding} "
+                    f"and {pending_count} unpaid installments. "
+                    f"All installments must be paid or waived before closing."
+                )
+
+        where_status = loan["status"]
+        where_outstanding = loan["outstanding_amount"]
+
+        now = _now_iso()
+        sql = update_row("loan", data={"status": P(), "updated_at": P()}, where={"id": P(), "status": P(), "outstanding_amount": P()})
+        cur = conn.execute(sql, ("closed", now, loan_id, where_status, where_outstanding))
+        if cur.rowcount == 0:
+            conn.rollback()
+            fresh = conn.execute(Q.from_(Table("loan")).select(Table("loan").star).where(Field("id") == P()).get_sql(), (loan_id,)).fetchone()
+            if fresh is None:
+                return err(f"Loan {loan_id} not found")
+            fresh_loan = dict(fresh)
+            if fresh_loan["status"] == "closed":
+                return err("Loan is already closed")
+            if fresh_loan["status"] not in ("disbursed", "partially_repaid", "repaid"):
+                return err(
+                    f"Cannot close loan in status '{fresh_loan['status']}'. "
+                    f"Must be disbursed, partially_repaid, or repaid."
+                )
+            return err(f"Loan {loan_id} changed while this action was running; nothing was written. Retry the action.")
+
+        audit(conn, "erpclaw-loans", "loan-close-loan", "loan", loan_id,
+              old_values={"status": loan["status"]},
+              new_values={"status": "closed"},
+              description=f"Closed loan {loan['naming_series']}")
+        conn.commit()
+        ok({
+            "loan_id": loan_id,
+            "loan_status": "closed",
+            "naming_series": loan["naming_series"],
+        })
+    except SystemExit:
+        conn.rollback()
+        raise
 
 
 def handle_get_repayment_schedule(conn, args):

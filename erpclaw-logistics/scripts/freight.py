@@ -4,6 +4,7 @@ Actions for freight charges, carrier invoices, and freight allocation.
 Imported by db_query.py (unified router).
 """
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,23 @@ def _validate_company(conn, company_id):
 def _validate_enum(value, valid_values, field_name):
     if value and value not in valid_values:
         err(f"Invalid {field_name}: {value}. Must be one of: {', '.join(valid_values)}")
+
+
+_CARRIER_INVOICE_AMOUNT_RE = re.compile(r"^\d+(\.\d{1,2})?$")
+
+
+def _carrier_invoice_amount_problem(text):
+    if text is None:
+        return "amount is required"
+    s = text if isinstance(text, str) else str(text)
+    if not _CARRIER_INVOICE_AMOUNT_RE.match(s):
+        return "must be a positive amount with at most two decimal places"
+    try:
+        if Decimal(s) <= 0:
+            return "must be greater than zero"
+    except Exception:
+        return "invalid amount"
+    return None
 
 
 # ===========================================================================
@@ -161,17 +179,27 @@ def add_carrier_invoice(conn, args):
     carrier_id = getattr(args, "carrier_id", None)
     if not carrier_id:
         err("--carrier-id is required")
-    if not conn.execute(Q.from_(Table("logistics_carrier")).select(Field('id')).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone():
+    carrier_row = conn.execute(Q.from_(Table("logistics_carrier")).select(Table("logistics_carrier").star).where(Field("id") == P()).get_sql(), (carrier_id,)).fetchone()
+    if not carrier_row:
         err(f"Carrier {carrier_id} not found")
 
     company_id = getattr(args, "company_id", None)
     _validate_company(conn, company_id)
 
-    total_amount = getattr(args, "total_amount", None) or "0"
+    total_amount = getattr(args, "total_amount", None)
+    if total_amount is None or (isinstance(total_amount, str) and total_amount == ""):
+        err("--total-amount is required")
+    if not isinstance(total_amount, str):
+        total_amount = str(total_amount)
     try:
         Decimal(total_amount)
     except Exception:
         err(f"Invalid total-amount: {total_amount}")
+    if _carrier_invoice_amount_problem(total_amount) is not None:
+        err(f"total-amount must be a positive amount with at most two decimal places: {total_amount}")
+    carrier_data = row_to_dict(carrier_row)
+    if carrier_data.get("company_id") != company_id:
+        err(f"Carrier {carrier_id} belongs to another company")
 
     invoice_id = str(uuid.uuid4())
     conn.company_id = company_id
@@ -275,13 +303,22 @@ def verify_carrier_invoice(conn, args):
         )
 
     # Validate supplier still exists
-    if not conn.execute(Q.from_(Table("supplier")).select(Field('id')).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone():
+    supplier_row = conn.execute(Q.from_(Table("supplier")).select(Table("supplier").star).where(Field("id") == P()).get_sql(), (supplier_id,)).fetchone()
+    if not supplier_row:
         err(f"Supplier {supplier_id} linked to carrier no longer exists")
 
     # Build description for the PI line item
     inv_number = inv.get("invoice_number") or inv["id"][:8]
     total_amount = inv["total_amount"]
     company_id = inv["company_id"]
+
+    if _carrier_invoice_amount_problem(total_amount if isinstance(total_amount, str) else str(total_amount) if total_amount is not None else None) is not None:
+        err(f"Carrier invoice {inv_number} has total amount '{total_amount}'; only a positive amount with at most two decimal places can be verified.")
+    if carrier_data.get("company_id") != company_id:
+        err(f"Carrier invoice {inv_number} belongs to company {company_id}, but carrier {inv['carrier_id']} belongs to company {carrier_data.get('company_id')}.")
+    supplier_data = row_to_dict(supplier_row)
+    if supplier_data.get("company_id") != company_id:
+        err(f"Supplier {supplier_id} linked to carrier {inv['carrier_id']} belongs to another company than carrier invoice {inv_number}.")
 
     # Get db_path from connection (for cross_skill subprocess)
     db_path = getattr(args, "db_path", None)
@@ -292,11 +329,12 @@ def verify_carrier_invoice(conn, args):
     if linked_pi_id:
         t_pi = Table("purchase_invoice")
         pi_row = conn.execute(
-            Q.from_(t_pi).select(t_pi.status, t_pi.supplier_id).where(t_pi.id == P()).get_sql(),
+            Q.from_(t_pi).select(t_pi.status, t_pi.supplier_id, t_pi.company_id).where(t_pi.id == P()).get_sql(),
             (linked_pi_id,),
         ).fetchone()
         pi_status = pi_row["status"] if pi_row is not None else None
         pi_supplier_id = pi_row["supplier_id"] if pi_row is not None else None
+        pi_company_id = pi_row["company_id"] if pi_row is not None else None
         if pi_row is None or pi_status == "cancelled":
             err(
                 f"Carrier invoice {inv_number} is linked to purchase invoice {linked_pi_id} "
@@ -306,6 +344,11 @@ def verify_carrier_invoice(conn, args):
             err(
                 f"Carrier invoice {inv_number} is linked to purchase invoice {linked_pi_id} "
                 f"of supplier {pi_supplier_id}, not the carrier's supplier {supplier_id}."
+            )
+        if pi_company_id != company_id:
+            err(
+                f"Carrier invoice {inv_number} is linked to purchase invoice {linked_pi_id} "
+                f"of another company."
             )
         _ts = _now_iso()
         sql = update_row("logistics_carrier_invoice",

@@ -7,7 +7,7 @@ Imported by db_query.py (unified router).
 """
 import os
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 try:
     import importlib.util
@@ -98,65 +98,69 @@ def fee_report(conn, args):
         err("--stripe-account-id is required")
     validate_stripe_account(conn, stripe_account_id)
 
-    # Try fee_detail table first (more granular). Amounts are TEXT, so rows
-    # are read per-row and grouped/summed in Python with Decimal.
-    fd = Table("stripe_fee_detail")
+    # Per-transaction grouping: a transaction with one or more detail rows
+    # contributes those rows (source "fee_detail"); otherwise it contributes
+    # its own fee grouped by type (source "balance_transaction", skipped when
+    # numerically zero). Amounts are TEXT, so rows are read per-row and
+    # grouped/summed in Python with Decimal.
     bt = Table("stripe_balance_transaction")
-    rows = conn.execute(
+    fd = Table("stripe_fee_detail")
+    transactions = conn.execute(
+        Q.from_(bt).select(
+            bt.id, bt.type, bt.fee
+        ).where(
+            bt.stripe_account_id == P()
+        ).get_sql(),
+        (stripe_account_id,)
+    ).fetchall()
+    details = conn.execute(
         Q.from_(fd).join(bt).on(
             fd.balance_transaction_id == bt.id
         ).select(
-            fd.fee_type, fd.amount
+            fd.balance_transaction_id, fd.fee_type, fd.amount
         ).where(
             bt.stripe_account_id == P()
         ).get_sql(),
         (stripe_account_id,)
     ).fetchall()
 
-    fee_types = []
-    grand_total = Decimal("0")
+    details_by_transaction = {}
+    for d in details:
+        details_by_transaction.setdefault(
+            d["balance_transaction_id"], []).append(d)
 
-    if rows:
-        groups = {}
-        for r in rows:
-            amt = to_decimal(str(r["amount"])) if r["amount"] is not None else Decimal("0")
-            entry = groups.setdefault(r["fee_type"], {"count": 0, "total": Decimal("0")})
-            entry["count"] += 1
-            entry["total"] += amt
-        for fee_type, entry in sorted(groups.items(), key=lambda kv: (-kv[1]["total"], kv[0])):
-            grand_total += entry["total"]
-            fee_types.append({
-                "fee_type": fee_type,
-                "count": entry["count"],
-                "total": str(round_currency(entry["total"])),
-            })
-    else:
-        # Fallback: aggregate from balance_transaction.fee grouped by type.
-        # A row counts only when its fee is numerically non-zero.
-        t = Table("stripe_balance_transaction")
-        fallback = conn.execute(
-            Q.from_(t).select(
-                t.type, t.fee
-            ).where(
-                t.stripe_account_id == P()
-            ).get_sql(),
-            (stripe_account_id,)
-        ).fetchall()
-        groups = {}
-        for r in fallback:
-            amt = to_decimal(str(r["fee"])) if r["fee"] is not None else Decimal("0")
+    groups = {}
+    for t in transactions:
+        lines = details_by_transaction.get(t["id"])
+        if lines:
+            for d in lines:
+                amt = to_decimal(str(d["amount"])) if d["amount"] is not None else Decimal("0")
+                key = ("fee_detail", d["fee_type"])
+                entry = groups.setdefault(key, {"count": 0, "total": Decimal("0")})
+                entry["count"] += 1
+                entry["total"] += amt
+        else:
+            amt = to_decimal(str(t["fee"])) if t["fee"] is not None else Decimal("0")
             if amt == 0:
                 continue
-            entry = groups.setdefault(r["type"], {"count": 0, "total": Decimal("0")})
+            key = ("balance_transaction", t["type"])
+            entry = groups.setdefault(key, {"count": 0, "total": Decimal("0")})
             entry["count"] += 1
             entry["total"] += amt
-        for fee_type, entry in sorted(groups.items(), key=lambda kv: (-kv[1]["total"], kv[0])):
-            grand_total += entry["total"]
-            fee_types.append({
-                "fee_type": fee_type,
-                "count": entry["count"],
-                "total": str(round_currency(entry["total"])),
-            })
+
+    fee_types = []
+    grand_total = Decimal("0")
+    for key, entry in sorted(
+        groups.items(), key=lambda kv: (-kv[1]["total"], kv[0][1], kv[0][0])
+    ):
+        source, fee_type = key
+        grand_total += entry["total"]
+        fee_types.append({
+            "fee_type": fee_type,
+            "source": source,
+            "count": entry["count"],
+            "total": str(round_currency(entry["total"])),
+        })
 
     ok({
         "report": "fees",
@@ -316,7 +320,19 @@ def customer_revenue_report(conn, args):
 def mrr_report(conn, args):
     """Monthly Recurring Revenue from active subscriptions.
 
-    Calculates MRR by normalizing all subscription plan amounts to monthly.
+    Active-only revenue: trialing subscriptions are an informational count,
+    never revenue. Annual normalizes as amount / 12 (exact Decimal);
+    monthly is amount as-is. Day (x30) and week (x4.333) multipliers are
+    preserved pre-existing approximations, not exact calendar math.
+    Contributions sum unrounded as Decimal, grouped by case-normalized
+    currency and by currency/interval; displayed totals round only after
+    grouping. mrr_by_currency is authoritative with currencies sorted and
+    per-currency interval breakdowns. A single active currency keeps a
+    string total_mrr and names currency; mixed active currencies return
+    total_mrr null and currency null; no active rows give total_mrr "0.00",
+    currency null and an empty currency list. Unknown, empty or missing
+    active interval, blank active currency, and non-finite or negative
+    active amounts refuse with an ordinary error; nothing is assumed.
     """
     stripe_account_id = getattr(args, "stripe_account_id", None)
     if not stripe_account_id:
@@ -324,57 +340,126 @@ def mrr_report(conn, args):
     validate_stripe_account(conn, stripe_account_id)
 
     rows = conn.execute(
-        """SELECT plan_interval, plan_amount, status
+        """SELECT plan_interval, plan_amount, currency, status
            FROM stripe_subscription
            WHERE stripe_account_id = ? AND status IN ('active', 'trialing')""",
         (stripe_account_id,)
     ).fetchall()
 
-    # Normalize to monthly
-    interval_multipliers = {
-        "day": Decimal("30"),        # daily -> monthly = x30
-        "week": Decimal("4.333"),    # weekly -> monthly = x4.333
-        "month": Decimal("1"),       # already monthly
-        "year": Decimal("0.08333"),  # yearly -> monthly = /12
-    }
+    allowed_intervals = ("day", "week", "month", "year")
 
-    total_mrr = Decimal("0")
     active_count = 0
     trialing_count = 0
-    by_interval = {}
+    per_currency = {}
 
     for r in rows:
-        plan_amount = to_decimal(r["plan_amount"])
-        interval = r["plan_interval"] or "month"
-        multiplier = interval_multipliers.get(interval, Decimal("1"))
-        monthly = round_currency(plan_amount * multiplier)
-        total_mrr += monthly
-
-        if r["status"] == "active":
-            active_count += 1
-        elif r["status"] == "trialing":
+        if r["status"] == "trialing":
             trialing_count += 1
+            continue
+        if r["status"] != "active":
+            continue
+        active_count += 1
 
-        if interval not in by_interval:
-            by_interval[interval] = {"count": 0, "mrr": Decimal("0")}
-        by_interval[interval]["count"] += 1
-        by_interval[interval]["mrr"] += monthly
+        raw_interval = r["plan_interval"]
+        interval = raw_interval.strip() if isinstance(raw_interval, str) else None
+        if not interval or interval not in allowed_intervals:
+            err(
+                "Stripe MRR: unknown plan_interval %r for active subscription;"
+                " expected one of day/week/month/year" % (raw_interval,)
+            )
 
-    interval_breakdown = []
-    for k, v in by_interval.items():
-        interval_breakdown.append({
-            "interval": k,
-            "subscription_count": v["count"],
-            "mrr_contribution": str(round_currency(v["mrr"])),
+        raw_currency = r["currency"]
+        if not isinstance(raw_currency, str) or not raw_currency.strip():
+            err("Stripe MRR: blank currency for active subscription;"
+                " cannot assume USD")
+        currency = raw_currency.strip().upper()
+
+        raw_amount = r["plan_amount"]
+        if raw_amount is None or (isinstance(raw_amount, str)
+                                  and not raw_amount.strip()):
+            err("Stripe MRR: missing plan_amount for active subscription")
+        try:
+            amount = to_decimal(raw_amount)
+        except (TypeError, ValueError, InvalidOperation):
+            err("Stripe MRR: invalid plan_amount %r for active subscription"
+                % (raw_amount,))
+        if not amount.is_finite():
+            err("Stripe MRR: non-finite plan_amount %r for active subscription"
+                % (raw_amount,))
+        if amount < Decimal("0"):
+            err("Stripe MRR: negative plan_amount %r for active subscription"
+                % (raw_amount,))
+
+        if interval == "month":
+            monthly = amount
+        elif interval == "year":
+            monthly = amount / Decimal("12")
+        elif interval == "day":
+            monthly = amount * Decimal("30")
+        else:
+            monthly = amount * Decimal("4.333")
+
+        entry = per_currency.setdefault(
+            currency, {"total": Decimal("0"), "count": 0, "by_interval": {}})
+        entry["total"] += monthly
+        entry["count"] += 1
+        bucket = entry["by_interval"].setdefault(
+            interval, {"count": 0, "total": Decimal("0")})
+        bucket["count"] += 1
+        bucket["total"] += monthly
+
+    mrr_by_currency = []
+    for currency in sorted(per_currency):
+        entry = per_currency[currency]
+        breakdown = []
+        for interval in sorted(entry["by_interval"]):
+            bucket = entry["by_interval"][interval]
+            breakdown.append({
+                "interval": interval,
+                "subscription_count": bucket["count"],
+                "mrr_contribution": str(round_currency(bucket["total"])),
+            })
+        rounded = str(round_currency(entry["total"]))
+        mrr_by_currency.append({
+            "currency": currency,
+            "mrr": rounded,
+            "total_mrr": rounded,
+            "subscription_count": entry["count"],
+            "interval_breakdown": breakdown,
         })
 
+    if not mrr_by_currency:
+        ok({
+            "report": "mrr",
+            "total_mrr": "0.00",
+            "currency": None,
+            "active_subscriptions": active_count,
+            "trialing_subscriptions": trialing_count,
+            "total_subscriptions": active_count + trialing_count,
+            "mrr_by_currency": [],
+            "interval_breakdown": [],
+        })
+    if len(mrr_by_currency) == 1:
+        sole = mrr_by_currency[0]
+        ok({
+            "report": "mrr",
+            "total_mrr": sole["mrr"],
+            "currency": sole["currency"],
+            "active_subscriptions": active_count,
+            "trialing_subscriptions": trialing_count,
+            "total_subscriptions": active_count + trialing_count,
+            "mrr_by_currency": mrr_by_currency,
+            "interval_breakdown": sole["interval_breakdown"],
+        })
     ok({
         "report": "mrr",
-        "total_mrr": str(round_currency(total_mrr)),
+        "total_mrr": None,
+        "currency": None,
         "active_subscriptions": active_count,
         "trialing_subscriptions": trialing_count,
         "total_subscriptions": active_count + trialing_count,
-        "interval_breakdown": interval_breakdown,
+        "mrr_by_currency": mrr_by_currency,
+        "interval_breakdown": [],
     })
 
 

@@ -72,9 +72,9 @@ def test_fallback_excludes_zero_fees_and_orders_numerically(conn, db_path):
     ))
     assert is_ok(result)
     assert result["fee_types"] == [
-        {"fee_type": "refund", "count": 2, "total": "10.00"},
-        {"fee_type": "charge", "count": 1, "total": "9.00"},
-        {"fee_type": "adjustment", "count": 1, "total": "-1.50"},
+        {"fee_type": "refund", "source": "balance_transaction", "count": 2, "total": "10.00"},
+        {"fee_type": "charge", "source": "balance_transaction", "count": 1, "total": "9.00"},
+        {"fee_type": "adjustment", "source": "balance_transaction", "count": 1, "total": "-1.50"},
     ]
     assert result["grand_total"] == "17.50"
     assert _snapshot_balance_transactions(conn) == before
@@ -98,8 +98,8 @@ def test_fallback_ties_order_by_type_name(conn, db_path):
     ))
     assert is_ok(result)
     assert result["fee_types"] == [
-        {"fee_type": "charge", "count": 1, "total": "2.00"},
-        {"fee_type": "refund", "count": 1, "total": "2.00"},
+        {"fee_type": "charge", "source": "balance_transaction", "count": 1, "total": "2.00"},
+        {"fee_type": "refund", "source": "balance_transaction", "count": 1, "total": "2.00"},
     ]
     assert result["grand_total"] == "4.00"
 
@@ -131,8 +131,8 @@ def test_fee_detail_branch_orders_numerically(conn, db_path):
     ))
     assert is_ok(result)
     assert result["fee_types"] == [
-        {"fee_type": "application_fee", "count": 2, "total": "10.00"},
-        {"fee_type": "stripe_fee", "count": 1, "total": "9.00"},
-        {"fee_type": "tax", "count": 1, "total": "0.00"},
+        {"fee_type": "application_fee", "source": "fee_detail", "count": 2, "total": "10.00"},
+        {"fee_type": "stripe_fee", "source": "fee_detail", "count": 1, "total": "9.00"},
+        {"fee_type": "tax", "source": "fee_detail", "count": 1, "total": "0.00"},
     ]
     assert result["grand_total"] == "19.00"

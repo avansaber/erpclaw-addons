@@ -13,10 +13,12 @@ totals are literal. SQLite legs use the ``conn``/``env``/``mod`` fixtures from
 module-local ``pg_book`` fixture below.
 """
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import time
+import uuid
 from decimal import Decimal
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,8 +39,11 @@ _lgv_spec.loader.exec_module(_lgv)
 _PAY_TESTS = os.path.normpath(os.path.join(
     _TESTS_DIR, "..", "..", "..", "..", "erpclaw", "scripts",
     "erpclaw-payments", "tests"))
-if _PAY_TESTS not in sys.path:
-    sys.path.insert(0, _PAY_TESTS)
+_pay_helpers_spec = importlib.util.spec_from_file_location(
+    "payments_helpers", os.path.join(_PAY_TESTS, "payments_helpers.py"))
+_pay_helpers = importlib.util.module_from_spec(_pay_helpers_spec)
+sys.modules["payments_helpers"] = _pay_helpers
+_pay_helpers_spec.loader.exec_module(_pay_helpers)
 _proofs_spec = importlib.util.spec_from_file_location(
     "loan_lock_proofs_src",
     os.path.join(_PAY_TESTS, "test_chain_lock_proofs.py"))
@@ -49,10 +54,8 @@ _cas_spec = importlib.util.spec_from_file_location(
         _PAY_TESTS, "test_payment_edit_and_allocation_compare_and_set.py"))
 _cas = importlib.util.module_from_spec(_cas_spec)
 _cas_spec.loader.exec_module(_cas)
-_pay_helpers_spec = importlib.util.spec_from_file_location(
-    "payments_helpers_pg", os.path.join(_PAY_TESTS, "payments_helpers.py"))
-_pay_helpers = importlib.util.module_from_spec(_pay_helpers_spec)
-_pay_helpers_spec.loader.exec_module(_pay_helpers)
+if _PAY_TESTS in sys.path:
+    sys.path.remove(_PAY_TESTS)
 
 _LOANS_INIT_PATH = os.path.normpath(
     os.path.join(_TESTS_DIR, "..", "..", "init_db.py"))
@@ -143,21 +146,27 @@ def pg_book():
     os.environ["ERPCLAW_DB_URL"] = pg_url
     os.environ.pop("ERPCLAW_DB_PATH", None)
     conn = None
+    redacted = "<pg-url-redacted>"
+
+    def _fail(step, exc):
+        detail = str(exc).replace(pg_url, redacted)
+        pytest.fail(f"{step} failed: {type(exc).__name__}: {detail}")
+
     try:
         try:
             _pay_helpers.init_all_tables(None)
-        except Exception:
-            pytest.skip("PostgreSQL foundation build failed")
+        except Exception as exc:
+            _fail("PostgreSQL foundation build", exc)
         try:
             _loans_init.create_loans_tables(
                 os.environ["ERPCLAW_PG_TEST_URL"])
-        except Exception:
-            pytest.skip("PostgreSQL loans-table build failed")
+        except Exception as exc:
+            _fail("PostgreSQL loans-table build", exc)
         conn = _get_connection()
         try:
             env = _build_env_pg(conn)
-        except Exception:
-            pytest.skip("PostgreSQL book build failed")
+        except Exception as exc:
+            _fail("PostgreSQL book build", exc)
         mod = _loans_helpers.load_db_query()
         yield (conn, env, mod)
     finally:
@@ -390,55 +399,60 @@ def test_4_head_first_pg(pg_book):
     holder = _get_connection()
     proc = None
     try:
-        _take(holder, [env["company_id"]])
-        penv = _proc_env(ERPCLAW_PG_LOCK_TIMEOUT="10s")
-        proc = subprocess.Popen(
-            [sys.executable, _LOANS_SCRIPT,
-             "--action", "loan-record-repayment",
-             "--loan-id", loan_id,
-             "--principal-amount", "1000.00",
-             "--repayment-date", "2026-07-01"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env=penv)
-        time.sleep(1)
-        assert proc.poll() is None, "repayment must wait at the head"
-        third = _get_connection()
         try:
-            third.execute("SET LOCAL lock_timeout = '500ms'")
-            cur = third.execute(
-                "UPDATE loan SET updated_at = updated_at WHERE id = ?",
-                (loan_id,))
-            assert cur.rowcount == 1
+            _take(holder, [env["company_id"]])
+            penv = _proc_env(ERPCLAW_PG_LOCK_TIMEOUT="10s")
+            proc = subprocess.Popen(
+                [sys.executable, _LOANS_SCRIPT,
+                 "--action", "loan-record-repayment",
+                 "--loan-id", loan_id,
+                 "--principal-amount", "1000.00",
+                 "--repayment-date", "2026-07-01"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=penv)
+            time.sleep(1)
+            assert proc.poll() is None, "repayment must wait at the head"
+            third = _get_connection()
+            try:
+                third.execute("SET LOCAL lock_timeout = '500ms'")
+                cur = third.execute(
+                    "UPDATE loan SET updated_at = updated_at WHERE id = ?",
+                    (loan_id,))
+                assert cur.rowcount == 1
+            finally:
+                third.rollback()
+                third.close()
         finally:
-            third.rollback()
-            third.close()
+            try:
+                holder.rollback()
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+        assert proc is not None
+        try:
+            out, err = proc.communicate(timeout=12)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        assert proc.returncode == 0, (out, err)
     finally:
         try:
-            holder.rollback()
+            if proc is not None and proc.poll() is None:
+                proc.kill()
         except Exception:  # noqa: BLE001, S110 - best effort
             pass
-    assert proc is not None
-    try:
-        out, err = proc.communicate(timeout=12)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-    assert proc.returncode == 0, (out, err)
-    holder.close()
+        try:
+            holder.close()
+        except Exception:  # noqa: BLE001, S110 - best effort
+            pass
 
 
 def test_5_no_lost_repayment_pg(pg_book):
-    conn, env, mod = pg_book
-    loan_id = _new_loan(conn, env, mod)
-    company_id = env["company_id"]
+    conn, _env0, mod = pg_book
+    spawn_gaps = []
     for _ in range(5):
-        before = conn.execute(
-            "SELECT total_repaid, outstanding_amount FROM loan WHERE id = ?",
-            (loan_id,)).fetchone()
-        sched_before = _paid_sum(conn, loan_id)
-        rep_before = conn.execute(
-            "SELECT COUNT(*) FROM loan_repayment WHERE loan_id = ?",
-            (loan_id,)).fetchone()[0]
+        env = _build_env_pg(conn)
+        loan_id = _new_loan(conn, env, mod)
+        company_id = env["company_id"]
         penv = _proc_env()
         args = [sys.executable, _LOANS_SCRIPT,
                 "--action", "loan-record-repayment",
@@ -449,12 +463,11 @@ def test_5_no_lost_repayment_pg(pg_book):
         p1 = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=penv)
-        t1 = time.time()
         p2 = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=penv)
         t2 = time.time()
-        assert (t2 - t1) <= 0.05, "both repayments start within 50 ms"
+        spawn_gaps.append(t2 - t0)
         try:
             out1, err1 = p1.communicate(timeout=15)
             out2, err2 = p2.communicate(timeout=15)
@@ -469,14 +482,25 @@ def test_5_no_lost_repayment_pg(pg_book):
         after = conn.execute(
             "SELECT total_repaid, outstanding_amount FROM loan WHERE id = ?",
             (loan_id,)).fetchone()
-        assert D(after["total_repaid"]) == D(before["total_repaid"]) + D("2000.00")
-        assert D(after["outstanding_amount"]) == D(before["outstanding_amount"]) - D("2000.00")
-        assert _paid_sum(conn, loan_id) == sched_before + D("2000.00")
-        assert conn.execute(
-            "SELECT COUNT(*) FROM loan_repayment WHERE loan_id = ?",
-            (loan_id,)).fetchone()[0] == rep_before + 2
+        assert D(after["total_repaid"]) == D("2000.00")
+        assert D(after["outstanding_amount"]) == D("10000.00")
+        assert _paid_sum(conn, loan_id) == D("2000.00")
+        rep_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM loan_repayment WHERE loan_id = ?",
+            (loan_id,)).fetchall()]
+        assert len(rep_ids) == 2
+        for rid in rep_ids:
+            grows = conn.execute(
+                "SELECT debit, credit FROM gl_entry WHERE voucher_id = ? "
+                "AND is_cancelled = 0", (rid,)).fetchall()
+            assert len(grows) == 2
+            assert D(grows[0]["debit"]) + D(grows[1]["debit"]) == D("1000.00")
+            assert D(grows[0]["credit"]) + D(grows[1]["credit"]) == D("1000.00")
+            assert max(D(grows[0]["debit"]), D(grows[1]["debit"])) == D("1000.00")
+            assert max(D(grows[0]["credit"]), D(grows[1]["credit"])) == D("1000.00")
         _assert_chain_intact(conn, company_id)
         _assert_contiguous(conn, company_id)
+    assert len(spawn_gaps) == 5, f"spawn_gaps={spawn_gaps}"
 
 
 def test_6_final_compare_and_set_pg(pg_book, monkeypatch):
@@ -606,3 +630,763 @@ def test_8b_changed_while_writeoff(conn, env, mod, db_path, monkeypatch):
             "SELECT COUNT(*) FROM loan_write_off").fetchone()[0] == 0
     finally:
         fresh.close()
+
+
+# ── m834b: disbursing a loan takes the company ledger chain head first ──
+#
+# `handle_disburse_loan` checked "already disbursed" with a plain read, then
+# took the `loan` naming row and posted. Two disbursements of one approved
+# application that both read before either commits each create a loan and each
+# post: the money goes out twice. With the head first, the second waits, then
+# re-reads under the head and is refused with the existing message.
+
+
+def _loans_module():
+    return sys.modules["loans"]
+
+
+def _disburse_head_wrapper(monkeypatch, loans_mod, app_id, planted_id, env):
+    real = getattr(loans_mod, "take_chain_heads", None)
+    if real is None:
+        def real(conn, company_ids):  # base has no head take: no-op
+            return None
+
+    def _wrap(conn, company_ids):
+        real(conn, company_ids)
+        app_row = dict(conn.execute(
+            "SELECT * FROM loan_application WHERE id = ?",
+            (app_id,)).fetchone())
+        conn.execute(
+            "INSERT INTO loan (id, naming_series, loan_application_id, "
+            "applicant_type, applicant_id, applicant_name, loan_type, "
+            "loan_amount, disbursed_amount, total_interest, total_repaid, "
+            "outstanding_amount, interest_rate, repayment_method, "
+            "repayment_periods, disbursement_date, maturity_date, "
+            "loan_account_id, interest_income_account_id, "
+            "disbursement_account_id, status, company_id, created_at, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (planted_id, "PLANTED-001", app_id,
+             app_row["applicant_type"], app_row["applicant_id"],
+             app_row["applicant_name"], app_row["loan_type"],
+             "12000.00", "12000.00", "0.00", "0.00", "12000.00", "0.00",
+             app_row["repayment_method"], app_row["repayment_periods"],
+             "2026-06-01", "2027-06-01",
+             env["loan_account_id"], env["interest_income_account_id"],
+             env["disbursement_account_id"], "disbursed",
+             app_row["company_id"],
+             "2026-06-01T00:00:00Z", "2026-06-01T00:00:00Z"),
+        )
+        conn.commit()
+        real(conn, company_ids)
+
+    monkeypatch.setattr(loans_mod, "take_chain_heads", _wrap, raising=False)
+
+
+def test_9a_disburse_sees_planted_loan_sqlite(conn, env, mod, monkeypatch):
+    loans_mod = _loans_module()
+    app_id = _lgv._approved_application(
+        conn, env, mod, amount="12000", rate="0", periods=12)
+    planted = "11111111-2222-3333-4444-555555555555"
+    calls = _gl_counter(monkeypatch, loans_mod)
+    _disburse_head_wrapper(monkeypatch, loans_mod, app_id, planted, env)
+    res = _lgv._disburse(conn, env, mod, app_id)
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan already disbursed for application {app_id} (loan: {planted})")
+    assert calls == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan WHERE loan_application_id = ?",
+        (app_id,)).fetchone()[0] == 1
+
+
+def test_9a_disburse_sees_planted_loan_pg(pg_book, monkeypatch):
+    conn, env, mod = pg_book
+    loans_mod = _loans_module()
+    app_id = _lgv._approved_application(
+        conn, env, mod, amount="12000", rate="0", periods=12)
+    planted = "11111111-2222-3333-4444-555555555555"
+    calls = _gl_counter(monkeypatch, loans_mod)
+    _disburse_head_wrapper(monkeypatch, loans_mod, app_id, planted, env)
+    res = _lgv._disburse(conn, env, mod, app_id)
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan already disbursed for application {app_id} (loan: {planted})")
+    assert calls == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan WHERE loan_application_id = ?",
+        (app_id,)).fetchone()[0] == 1
+
+
+def test_9b_disburse_head_before_first_write(conn, env, mod):
+    app_id = _lgv._approved_application(
+        conn, env, mod, amount="12000", rate="0", periods=12)
+    proxy = _RecordingProxy(conn)
+    res = _lgv._disburse(proxy, env, mod, app_id)
+    assert is_ok(res), res
+    writes = [s for s in proxy.statements
+              if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))]
+    assert writes, "expected writes, got none"
+    assert writes[0].lstrip().upper().startswith("INSERT"), writes[0]
+    assert "gl_chain_head" in writes[0], writes[0]
+    for i, w in enumerate(writes):
+        if any(t in w for t in ("naming_series", "loan",
+                                "loan_repayment_schedule", "gl_entry")):
+            assert i > 0, (i, w)
+
+
+def test_9c_disburse_happy_path_unchanged(conn, env, mod):
+    app_id = _lgv._approved_application(conn, env, mod, amount="50000",
+                                        periods=12)
+    res = _lgv._disburse(conn, env, mod, app_id)
+    assert is_ok(res), res
+    assert res["loan_application_id"] == app_id
+    assert res["loan_amount"] == "50000.00"
+    assert res["disbursement_date"] == _lgv.DISBURSE_DATE
+    assert res["installments"] == 12
+
+    loan = _lgv._loan(conn, res["loan_id"])
+    assert D(loan["loan_amount"]) == D("50000.00")
+    assert D(loan["disbursed_amount"]) == D("50000.00")
+    assert D(loan["outstanding_amount"]) == D("50000.00")
+    assert loan["status"] == "disbursed"
+
+    rows = conn.execute(
+        "SELECT principal_amount, interest_amount, total_amount, status "
+        "FROM loan_repayment_schedule WHERE loan_id = ?",
+        (res["loan_id"],)).fetchall()
+    assert len(rows) == 12
+    assert sum((D(r["principal_amount"]) for r in rows), D("0")) == D("50000.00")
+    assert sum((D(r["total_amount"]) for r in rows), D("0")) == \
+        D("50000.00") + D(loan["total_interest"])
+    assert all(r["status"] == "pending" for r in rows)
+
+    gl = _lgv._gl(conn, res["loan_id"])
+    assert len(gl) == 2, "DR loan receivable / CR bank"
+    assert gl[0]["account_id"] == env["loan_account_id"]
+    assert D(gl[0]["debit"]) == D("50000.00")
+    assert D(gl[0]["credit"]) == D("0")
+    assert gl[0]["party_type"] == "customer"
+    assert gl[0]["party_id"] == env["customer_id"]
+    assert gl[1]["account_id"] == env["disbursement_account_id"]
+    assert D(gl[1]["credit"]) == D("50000.00")
+    assert D(gl[1]["debit"]) == D("0")
+
+    assert _lgv._count(conn, "gl_entry") == 2
+    assert _lgv._sum(conn, "SELECT debit FROM gl_entry WHERE is_cancelled = 0") == \
+        D("50000.00")
+    assert _lgv._sum(conn, "SELECT credit FROM gl_entry WHERE is_cancelled = 0") == \
+        D("50000.00")
+
+
+def test_9d_disbursed_once_pg(pg_book):
+    conn, env, mod = pg_book
+    company_id = env["company_id"]
+    for _ in range(5):
+        app_id = _lgv._approved_application(
+            conn, env, mod, amount="12000", rate="0", periods=12)
+        args = [sys.executable, _LOANS_SCRIPT,
+                "--action", "loan-disburse-loan",
+                "--loan-application-id", app_id,
+                "--loan-account-id", env["loan_account_id"],
+                "--interest-income-account-id",
+                env["interest_income_account_id"],
+                "--disbursement-account-id", env["disbursement_account_id"],
+                "--disbursement-date", _lgv.DISBURSE_DATE]
+        penv = _proc_env()
+        t0 = time.time()
+        p1 = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=penv)
+        t1 = time.time()
+        p2 = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=penv)
+        t2 = time.time()
+        assert (t2 - t1) <= 0.05, "both disbursements start within 50 ms"
+        try:
+            out1, err1 = p1.communicate(timeout=15)
+            out2, err2 = p2.communicate(timeout=15)
+        finally:
+            for p in (p1, p2):
+                if p.poll() is None:
+                    p.kill()
+        assert "deadlock" not in (out1 + err1).lower(), (out1, err1)
+        assert "deadlock" not in (out2 + err2).lower(), (out2, err2)
+        assert sorted([p1.returncode, p2.returncode]) == [0, 1], (out1, err1,
+                                                                  out2, err2)
+        if p1.returncode == 0:
+            winner_out, loser_out = out1, out2
+        else:
+            winner_out, loser_out = out2, out1
+        winner = json.loads(winner_out.strip())
+        assert winner.get("status") == "ok", winner
+        winner_loan = winner["loan_id"]
+        loser = json.loads(loser_out.strip())
+        assert loser.get("status") == "error", loser
+        assert _msg(loser) == (
+            f"Loan already disbursed for application {app_id} "
+            f"(loan: {winner_loan})")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM loan WHERE loan_application_id = ?",
+            (app_id,)).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM gl_entry WHERE voucher_id = ?",
+            (winner_loan,)).fetchone()[0] == 2
+        _assert_chain_intact(conn, company_id)
+        _assert_contiguous(conn, company_id)
+
+
+def test_9e_disburse_refusal_rolls_back_head(conn, env, mod):
+    first_app = _lgv._approved_application(
+        conn, env, mod, amount="12000", rate="0", periods=12)
+    assert is_ok(_lgv._disburse(conn, env, mod, first_app))
+    conn.execute("UPDATE gl_chain_head SET updated_at = ? WHERE company_id = ?",
+                 ("2000-01-01 00:00:00", env["company_id"]))
+    conn.commit()
+    second_app = _lgv._approved_application(
+        conn, env, mod, amount="12000", rate="0", periods=12)
+    bogus = str(uuid.uuid4())
+    res = call_action(mod.loan_disburse_loan, conn, ns(
+        loan_application_id=second_app,
+        loan_account_id=env["loan_account_id"],
+        interest_income_account_id=bogus,
+        disbursement_account_id=env["disbursement_account_id"],
+        disbursement_date=_lgv.DISBURSE_DATE))
+    assert is_error(res), res
+    assert _msg(res) == f"Account {bogus} not found (--interest-income-account-id)"
+    assert conn.execute(
+        "SELECT updated_at FROM gl_chain_head WHERE company_id = ?",
+        (env["company_id"],)).fetchone()["updated_at"] == "2000-01-01 00:00:00"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan WHERE loan_application_id = ?",
+        (second_app,)).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# m834c: generate / restructure / close take the chain head first (appended).
+#
+# Every writer of an existing loan or its schedule takes the company's chain
+# head before its first write and compare-and-sets the loan row. Money is
+# Decimal over TEXT; all totals below are literal for a rate-0 12000/12 loan.
+# ---------------------------------------------------------------------------
+# NOTE: _loans_module() is defined above (m834b disbursement section) and is
+# reused by the tests below; it is not redefined here.
+
+
+def _m834c_snap_loan(conn, loan_id):
+    return dict(conn.execute(
+        "SELECT * FROM loan WHERE id = ?", (loan_id,)).fetchone())
+
+
+def _m834c_snap_sched(conn, loan_id):
+    return [tuple(r) for r in conn.execute(
+        "SELECT installment_no, principal_amount, interest_amount, "
+        "total_amount, paid_amount, outstanding, status "
+        "FROM loan_repayment_schedule WHERE loan_id = ? "
+        "ORDER BY installment_no", (loan_id,)).fetchall()]
+
+
+def _m834c_wrap_head_with_plant(monkeypatch, loans_mod, plant):
+    real = getattr(loans_mod, "take_chain_heads", None)
+    if real is None:
+        def real(conn, company_ids):  # base has no head take: no-op
+            return None
+
+    def _wrap(conn, company_ids):
+        real(conn, company_ids)
+        plant(conn)
+        conn.commit()
+        real(conn, company_ids)
+
+    monkeypatch.setattr(loans_mod, "take_chain_heads", _wrap, raising=False)
+
+
+def _m834c_pypika_set_loan_status(conn, loan_id, status):
+    from erpclaw_lib.query import Field, P, Q, Table  # noqa: E402
+    t = Table("loan")
+    sql = Q.update(t).set(Field("status"), P()).where(
+        Field("id") == P()).get_sql()
+    conn.execute(sql, (status, loan_id))
+
+
+def _m834c_repay_all(conn, mod, loan_id):
+    res = _lgv._repay(conn, mod, loan_id, principal="12000.00")
+    assert is_ok(res), res
+    return res
+
+
+# --- 1. stale under the head, per action -----------------------------------
+
+def test_m834c_1a_generate_stale_sqlite(conn, env, mod, db_path, monkeypatch):
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+
+    def _plant(c):
+        _m834c_pypika_set_loan_status(c, loan_id, "written_off")
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(
+        mod.loan_generate_repayment_schedule, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        "Cannot generate schedule for loan in status 'written_off'")
+    fresh = get_conn(db_path)
+    try:
+        post_loan = _m834c_snap_loan(fresh, loan_id)
+        assert post_loan["status"] == "written_off"
+        for key, val in pre_loan.items():
+            if key == "status":
+                continue
+            assert post_loan[key] == val, key
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+def test_m834c_1a_generate_stale_pg(pg_book, monkeypatch):
+    from erpclaw_lib.db import get_connection as _get_connection  # noqa: E402
+    conn, env, mod = pg_book
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+
+    def _plant(c):
+        _m834c_pypika_set_loan_status(c, loan_id, "written_off")
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(
+        mod.loan_generate_repayment_schedule, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        "Cannot generate schedule for loan in status 'written_off'")
+    fresh = _get_connection()
+    try:
+        post_loan = _m834c_snap_loan(fresh, loan_id)
+        assert post_loan["status"] == "written_off"
+        for key, val in pre_loan.items():
+            if key == "status":
+                continue
+            assert post_loan[key] == val, key
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+def test_m834c_1b_restructure_sees_repayment_sqlite(
+        conn, env, mod, monkeypatch):
+    from erpclaw_lib.query import Field, P, Q, Table  # noqa: E402
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+
+    def _plant(c):
+        rs = Table("loan_repayment_schedule")
+        sql = Q.update(rs).set(Field("paid_amount"), P()).set(
+            Field("outstanding"), P()).set(Field("status"), P()).where(
+            Field("loan_id") == P()).where(
+            Field("installment_no") == P()).get_sql()
+        c.execute(sql, ("1000.00", "0.00", "paid", loan_id, 1))
+        t = Table("loan")
+        sql2 = Q.update(t).set(Field("total_repaid"), P()).set(
+            Field("outstanding_amount"), P()).set(Field("status"), P()).where(
+            Field("id") == P()).get_sql()
+        c.execute(sql2, ("1000.00", "11000.00", "partially_repaid", loan_id))
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(mod.loan_restructure_loan, conn, ns(
+        loan_id=loan_id, new_interest_rate=None, new_repayment_periods=24))
+    assert is_ok(res), res
+    assert res["remaining_principal"] == "11000.00"
+    assert res["installments_regenerated"] == 23
+    row = conn.execute(
+        "SELECT outstanding_amount FROM loan WHERE id = ?",
+        (loan_id,)).fetchone()
+    assert row["outstanding_amount"] == "11000.00"
+
+
+def test_m834c_1b_restructure_sees_repayment_pg(pg_book, monkeypatch):
+    from erpclaw_lib.query import Field, P, Q, Table  # noqa: E402
+    conn, env, mod = pg_book
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+
+    def _plant(c):
+        rs = Table("loan_repayment_schedule")
+        sql = Q.update(rs).set(Field("paid_amount"), P()).set(
+            Field("outstanding"), P()).set(Field("status"), P()).where(
+            Field("loan_id") == P()).where(
+            Field("installment_no") == P()).get_sql()
+        c.execute(sql, ("1000.00", "0.00", "paid", loan_id, 1))
+        t = Table("loan")
+        sql2 = Q.update(t).set(Field("total_repaid"), P()).set(
+            Field("outstanding_amount"), P()).set(Field("status"), P()).where(
+            Field("id") == P()).get_sql()
+        c.execute(sql2, ("1000.00", "11000.00", "partially_repaid", loan_id))
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(mod.loan_restructure_loan, conn, ns(
+        loan_id=loan_id, new_interest_rate=None, new_repayment_periods=24))
+    assert is_ok(res), res
+    assert res["remaining_principal"] == "11000.00"
+    assert res["installments_regenerated"] == 23
+    row = conn.execute(
+        "SELECT outstanding_amount FROM loan WHERE id = ?",
+        (loan_id,)).fetchone()
+    assert row["outstanding_amount"] == "11000.00"
+
+
+def test_m834c_1c_close_stale_sqlite(conn, env, mod, db_path, monkeypatch):
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+
+    def _plant(c):
+        _m834c_pypika_set_loan_status(c, loan_id, "written_off")
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(mod.loan_close_loan, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        "Cannot close loan in status 'written_off'. "
+        "Must be disbursed, partially_repaid, or repaid.")
+    fresh = get_conn(db_path)
+    try:
+        post_loan = _m834c_snap_loan(fresh, loan_id)
+        assert post_loan["status"] == "written_off"
+        for key, val in pre_loan.items():
+            if key == "status":
+                continue
+            assert post_loan[key] == val, key
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+def test_m834c_1c_close_stale_pg(pg_book, monkeypatch):
+    from erpclaw_lib.db import get_connection as _get_connection  # noqa: E402
+    conn, env, mod = pg_book
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+
+    def _plant(c):
+        _m834c_pypika_set_loan_status(c, loan_id, "written_off")
+
+    _m834c_wrap_head_with_plant(monkeypatch, loans_mod, _plant)
+    res = call_action(mod.loan_close_loan, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        "Cannot close loan in status 'written_off'. "
+        "Must be disbursed, partially_repaid, or repaid.")
+    fresh = _get_connection()
+    try:
+        post_loan = _m834c_snap_loan(fresh, loan_id)
+        assert post_loan["status"] == "written_off"
+        for key, val in pre_loan.items():
+            if key == "status":
+                continue
+            assert post_loan[key] == val, key
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+# --- 2. head before the first write, per action ----------------------------
+
+def test_m834c_2a_generate_head_first(conn, env, mod):
+    loan_id = _new_loan(conn, env, mod)
+    proxy = _RecordingProxy(conn)
+    res = call_action(
+        mod.loan_generate_repayment_schedule, proxy, ns(loan_id=loan_id))
+    assert is_ok(res), res
+    _assert_head_before_first_write(proxy)
+
+
+def test_m834c_2b_restructure_head_first(conn, env, mod):
+    loan_id = _new_loan(conn, env, mod)
+    proxy = _RecordingProxy(conn)
+    res = call_action(mod.loan_restructure_loan, proxy, ns(
+        loan_id=loan_id, new_interest_rate=None, new_repayment_periods=24))
+    assert is_ok(res), res
+    _assert_head_before_first_write(proxy)
+
+
+def test_m834c_2c_close_head_first(conn, env, mod):
+    loan_id = _new_loan(conn, env, mod)
+    _m834c_repay_all(conn, mod, loan_id)
+    proxy = _RecordingProxy(conn)
+    res = call_action(mod.loan_close_loan, proxy, ns(loan_id=loan_id))
+    assert is_ok(res), res
+    _assert_head_before_first_write(proxy)
+
+
+# --- 3. compare-and-set miss, per action -----------------------------------
+
+def test_m834c_3a_generate_cas_miss(conn, env, mod, db_path, monkeypatch):
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+    real = loans_mod.update_row
+    state = {"n": 0}
+
+    def _wrap(*args, **kwargs):
+        if state["n"] == 0:
+            state["n"] += 1
+            conn.execute(
+                "UPDATE loan SET outstanding_amount = '11999.00' "
+                "WHERE id = ?", (loan_id,))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loans_mod, "update_row", _wrap)
+    res = call_action(
+        mod.loan_generate_repayment_schedule, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan {loan_id} changed while this action was running; "
+        "nothing was written. Retry the action.")
+    fresh = get_conn(db_path)
+    try:
+        assert _m834c_snap_loan(fresh, loan_id) == pre_loan
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+def test_m834c_3b_restructure_cas_miss(conn, env, mod, db_path, monkeypatch):
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+    real = loans_mod.dynamic_update
+    state = {"n": 0}
+
+    def _wrap(table, data, where):
+        if state["n"] == 0:
+            state["n"] += 1
+            conn.execute(
+                "UPDATE loan SET outstanding_amount = '11999.00' "
+                "WHERE id = ?", (loan_id,))
+        return real(table, data, where)
+
+    monkeypatch.setattr(loans_mod, "dynamic_update", _wrap)
+    res = call_action(mod.loan_restructure_loan, conn, ns(
+        loan_id=loan_id, new_interest_rate=None, new_repayment_periods=24))
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan {loan_id} changed while this action was running; "
+        "nothing was written. Retry the action.")
+    fresh = get_conn(db_path)
+    try:
+        assert _m834c_snap_loan(fresh, loan_id) == pre_loan
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+def test_m834c_3c_close_cas_miss(conn, env, mod, db_path, monkeypatch):
+    loans_mod = _loans_module()
+    loan_id = _new_loan(conn, env, mod)
+    _m834c_repay_all(conn, mod, loan_id)
+    pre_loan = _m834c_snap_loan(conn, loan_id)
+    pre_sched = _m834c_snap_sched(conn, loan_id)
+    real = loans_mod.update_row
+    state = {"n": 0}
+
+    def _wrap(*args, **kwargs):
+        if state["n"] == 0:
+            state["n"] += 1
+            conn.execute(
+                "UPDATE loan SET outstanding_amount = '11999.00' "
+                "WHERE id = ?", (loan_id,))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loans_mod, "update_row", _wrap)
+    res = call_action(mod.loan_close_loan, conn, ns(loan_id=loan_id))
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan {loan_id} changed while this action was running; "
+        "nothing was written. Retry the action.")
+    fresh = get_conn(db_path)
+    try:
+        assert _m834c_snap_loan(fresh, loan_id) == pre_loan
+        assert _m834c_snap_sched(fresh, loan_id) == pre_sched
+    finally:
+        fresh.close()
+
+
+# --- 4. repayment miss rule (PostgreSQL leg) --------------------------------
+# SQLite note: this case is unreachable through head-taking writers on SQLite,
+# where the plant would run on the action's own connection and the miss path's
+# conn.rollback() would undo it, so only the PostgreSQL leg below bites.
+
+def test_m834c_4_repayment_changed_while_pg(pg_book, monkeypatch):
+    """Accepted-status CAS miss reports changed-while, not the status message.
+
+    SQLite note: unreachable through head-taking writers on SQLite (the plant
+    runs on the action's own connection and the miss path's rollback undoes
+    it); PostgreSQL-only by design.
+    """
+    from erpclaw_lib.db import get_connection as _get_connection  # noqa: E402
+    conn, env, mod = pg_book
+    repayments = _repayments_module()
+    loan_id = _new_loan(conn, env, mod)
+    real = repayments.dynamic_update
+    state = {"n": 0}
+
+    def _wrap(table, data, where):
+        if state["n"] == 0:
+            state["n"] += 1
+            other = _get_connection()
+            try:
+                other.execute(
+                    "UPDATE loan SET status = 'partially_repaid' WHERE id = ?",
+                    (loan_id,))
+                other.commit()
+            finally:
+                other.close()
+        return real(table, data, where)
+
+    monkeypatch.setattr(repayments, "dynamic_update", _wrap)
+    res = _lgv._repay(conn, mod, loan_id, principal="1000.00")
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Loan {loan_id} changed while this repayment was being recorded; "
+        "nothing was written. Retry the action.")
+
+
+# --- 5. write-off with no loan account --------------------------------------
+
+def test_m834c_5_writeoff_without_loan_account(conn, env, mod, db_path):
+    from erpclaw_lib.query import dynamic_update as _dyn  # noqa: E402
+    loan_id = _new_loan(conn, env, mod)
+    conn.execute(
+        "UPDATE gl_chain_head SET updated_at = ? WHERE company_id = ?",
+        ("2000-01-01 00:00:00", env["company_id"]))
+    conn.commit()
+    pre_heads = [dict(r) for r in conn.execute(
+        "SELECT * FROM gl_chain_head ORDER BY company_id").fetchall()]
+    sql, params = _dyn("loan", {"loan_account_id": None}, {"id": loan_id})
+    conn.execute(sql, params)
+    conn.commit()
+    res = call_action(mod.loan_write_off_loan, conn, ns(
+        loan_id=loan_id, bad_debt_account_id=env["bad_debt_account_id"],
+        reason="no account", write_off_date="2026-09-30"))
+    assert is_error(res), res
+    assert _msg(res) == (
+        f"Cannot write off loan {loan_id}: it has no loan account "
+        "to post the write-off to.")
+    row = conn.execute(
+        "SELECT status FROM loan WHERE id = ?", (loan_id,)).fetchone()
+    assert row["status"] == "disbursed"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan_write_off").fetchone()[0] == 0
+    fresh = get_conn(db_path)
+    try:
+        post_heads = [dict(r) for r in fresh.execute(
+            "SELECT * FROM gl_chain_head ORDER BY company_id").fetchall()]
+        assert post_heads == pre_heads
+        head = fresh.execute(
+            "SELECT updated_at FROM gl_chain_head WHERE company_id = ?",
+            (env["company_id"],)).fetchone()
+        assert head["updated_at"] == "2000-01-01 00:00:00"
+    finally:
+        fresh.close()
+
+
+# --- 6. no lost repayment under restructure (PostgreSQL only) ---------------
+
+def test_m834c_6_no_lost_repayment_under_restructure_pg(pg_book):
+    conn, _env0, mod = pg_book
+    spawn_gaps = []
+    for _ in range(5):
+        env = _build_env_pg(conn)
+        app_id = _lgv._approved_application(
+            conn, env, mod, amount="12000", rate="0", periods=12)
+        loan_id = _lgv._disburse(conn, env, mod, app_id)["loan_id"]
+        company_id = env["company_id"]
+        penv = _proc_env()
+        repay_args = [sys.executable, _LOANS_SCRIPT,
+                      "--action", "loan-record-repayment",
+                      "--loan-id", loan_id,
+                      "--principal-amount", "1000.00",
+                      "--repayment-date", "2026-07-01"]
+        restructure_args = [sys.executable, _LOANS_SCRIPT,
+                            "--action", "loan-restructure-loan",
+                            "--loan-id", loan_id,
+                            "--new-repayment-periods", "24"]
+        t0 = time.time()
+        p1 = subprocess.Popen(
+            repay_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=penv)
+        p2 = subprocess.Popen(
+            restructure_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=penv)
+        t2 = time.time()
+        spawn_gaps.append(t2 - t0)
+        try:
+            out1, err1 = p1.communicate(timeout=15)
+            out2, err2 = p2.communicate(timeout=15)
+        finally:
+            for p in (p1, p2):
+                if p.poll() is None:
+                    p.kill()
+        assert p1.returncode == 0, (out1, err1)
+        assert p2.returncode == 0, (out2, err2)
+        assert "deadlock" not in (out1 + err1).lower(), (out1, err1)
+        assert "deadlock" not in (out2 + err2).lower(), (out2, err2)
+        loan = conn.execute(
+            "SELECT outstanding_amount, total_repaid FROM loan WHERE id = ?",
+            (loan_id,)).fetchone()
+        assert loan["outstanding_amount"] == "11000.00"
+        assert D(loan["total_repaid"]) == D("1000.00")
+        assert _paid_sum(conn, loan_id) == D("1000.00")
+        open_sum = sum((D(r[0]) for r in conn.execute(
+            "SELECT outstanding FROM loan_repayment_schedule WHERE loan_id = ? "
+            "AND status IN ('pending', 'overdue', 'partially_paid')",
+            (loan_id,)).fetchall()), D("0"))
+        assert open_sum == D("11000.00")
+        rep_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM loan_repayment WHERE loan_id = ?",
+            (loan_id,)).fetchall()]
+        assert len(rep_ids) == 1
+        grows = conn.execute(
+            "SELECT debit, credit FROM gl_entry WHERE voucher_id = ? "
+            "AND is_cancelled = 0", (rep_ids[0],)).fetchall()
+        assert len(grows) == 2
+        assert D(grows[0]["debit"]) + D(grows[1]["debit"]) == D("1000.00")
+        assert D(grows[0]["credit"]) + D(grows[1]["credit"]) == D("1000.00")
+        assert max(D(grows[0]["debit"]), D(grows[1]["debit"])) == D("1000.00")
+        assert max(D(grows[0]["credit"]), D(grows[1]["credit"])) == D("1000.00")
+        _assert_chain_intact(conn, company_id)
+        _assert_contiguous(conn, company_id)
+    assert len(spawn_gaps) == 5, f"spawn_gaps={spawn_gaps}"
+
+
+# --- 8. write-off GL failure -------------------------------------------------
+
+def test_m834c_8_writeoff_gl_failure_rolls_back(conn, env, mod, monkeypatch):
+    repayments = _repayments_module()
+    loan_id = _new_loan(conn, env, mod)
+
+    def _boom(*args, **kwargs):
+        raise ValueError("planted")
+
+    monkeypatch.setattr(repayments, "insert_gl_entries", _boom)
+    res = call_action(mod.loan_write_off_loan, conn, ns(
+        loan_id=loan_id, bad_debt_account_id=env["bad_debt_account_id"],
+        reason="gl boom", write_off_date="2026-09-30"))
+    assert is_error(res), res
+    assert _msg(res) == "GL posting failed, write-off rolled back: planted"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan_write_off").fetchone()[0] == 0
+    row = conn.execute(
+        "SELECT status, outstanding_amount FROM loan WHERE id = ?",
+        (loan_id,)).fetchone()
+    assert row["status"] == "disbursed"
+    assert D(row["outstanding_amount"]) == D("12000.00")

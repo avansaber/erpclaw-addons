@@ -169,7 +169,7 @@ python3 {baseDir}/scripts/db_query.py --action stripe-test-connection --stripe-a
 | `stripe-reconciliation-report` | Reconciliation report |
 | `stripe-reconciliation-summary` | Reconciliation summary |
 | `stripe-customer-revenue-report` | Revenue by customer |
-| `stripe-mrr-report` | Monthly recurring revenue |
+| `stripe-mrr-report` | Monthly recurring revenue (active-only; trialing is an informational count, never revenue; annual is amount / 12 exact Decimal, monthly is amount as-is, day x30 and week x4.333 are kept approximations; unrounded Decimal sums grouped by upper-cased currency with per-currency interval breakdowns in authoritative mrr_by_currency; single active currency keeps string total_mrr and names currency, mixed active currencies return total_mrr null and currency null, no active rows give total_mrr 0.00 with currency null and an empty list; unknown/empty/missing active interval, blank active currency, or non-finite/negative active amounts return an ordinary error) |
 | `stripe-connect-payout-report` | Connect payout report |
 | `stripe-connect-revenue-report` | Connect revenue report |
 

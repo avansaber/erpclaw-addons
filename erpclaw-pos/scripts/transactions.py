@@ -23,6 +23,7 @@ from erpclaw_lib.db import DEFAULT_DB_PATH
 from erpclaw_lib.db import get_dialect
 from erpclaw_lib.db import integrity_error_types
 from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row, dynamic_update, now
+from erpclaw_lib.vendor.pypika.terms import ValueWrapper
 
 SKILL = "erpclaw-pos"
 
@@ -865,6 +866,22 @@ def void_transaction(conn, args):
     invoice_id = txn["sales_invoice_id"]
     if not invoice_id:
         err(f"Transaction {txn_id} has no sales invoice (submitted before POS posted to the ledger); correct it in selling")
+
+    _si = Table("sales_invoice")
+    _cnq = (Q.from_(_si)
+            .select(_si.id, _si.naming_series, _si.status)
+            .where(_si.return_against == P())
+            .where(_si.is_return == ValueWrapper(1))
+            .where(_si.status.notin([
+                ValueWrapper("draft"), ValueWrapper("cancelled")]))
+            .orderby(_si.posting_date)
+            .orderby(_si.id))
+    _cn_rows = conn.execute(_cnq.get_sql(), (invoice_id,)).fetchall()
+    if _cn_rows:
+        _cn_ref = _cn_rows[0]["naming_series"] or _cn_rows[0]["id"]
+        err(f"Cannot void: sales invoice {invoice_id} "
+            f"has credit note {_cn_ref} ('{_cn_rows[0]['status']}'); "
+            f"cancel the credit note first")
 
     own_rows = conn.execute(Q.from_(Table("pos_payment")).select(Field('payment_entry_id')).where(Field("pos_transaction_id") == P()).get_sql(), (txn_id,)).fetchall()
     own_ids = {r["payment_entry_id"] for r in own_rows if r["payment_entry_id"]}
