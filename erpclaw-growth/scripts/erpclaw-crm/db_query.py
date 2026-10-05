@@ -4247,6 +4247,228 @@ def export_crm_companies(conn, args):
 
 
 # ---------------------------------------------------------------------------
+# Local CRM wedge v1: crm-account-brief (read-only deterministic brief)
+# ---------------------------------------------------------------------------
+
+WEDGE_POSITIONING = "local_crm_wedge"
+WEDGE_LIMITATIONS = [
+    "no HubSpot connection",
+    "no model-generated summary",
+    "no outbound action",
+]
+
+
+def _brief_money(value, label):
+    """Parse a TEXT money/probability value as Decimal without float.
+
+    Refuses malformed values with an error (no writes; caller is read-only).
+    """
+    try:
+        return to_decimal(value if value is not None else "0")
+    except (ValueError, TypeError, InvalidOperation):
+        err(f"Invalid monetary value for {label}: {value!r}")
+
+
+def crm_account_brief(conn, args):
+    """Return a deterministic read-only brief for one company-scoped CRM company.
+
+    Required: --company-id plus --crm-company-id or --opportunity-id.
+    With --opportunity-id, the brief resolves through that opportunity's linked
+    CRM company (the opportunity must be company-scoped and linked).
+
+    Returns the CRM company, its contacts (direct + role-linked), open
+    opportunities (stage not won/lost), recent activities on those
+    opportunities, open tasks linked to the account, exact Decimal money
+    totals (expected revenue, weighted pipeline value), the earliest open
+    next-follow-up date, a stable positioning marker, and explicit
+    limitations. Read-only: performs no writes and emits no audit row.
+    All queries use PyPika with bound parameters.
+    """
+    company_id = _resolve_company_id(conn, args)
+
+    crm_company_id = getattr(args, "crm_company_id", None) or None
+    opportunity_id = (
+        getattr(args, "opportunity_id", None)
+        or getattr(args, "opportunity", None)
+        or None
+    )
+    if not crm_company_id and not opportunity_id:
+        err("--crm-company-id or --opportunity-id is required")
+
+    if opportunity_id:
+        t_opp = _t_opportunity
+        q_opp = (
+            Q.from_(t_opp).select(t_opp.star)
+            .where((t_opp.id == P()) & (t_opp.company_id == P()))
+        )
+        opp_row = conn.execute(q_opp.get_sql(), (opportunity_id, company_id)).fetchone()
+        if not opp_row:
+            err(
+                f"Opportunity {opportunity_id} not found",
+                suggestion="Use 'list opportunities' to see available opportunities.",
+            )
+        linked_company = opp_row["crm_company_id"]
+        if crm_company_id:
+            if linked_company and linked_company != crm_company_id:
+                err(
+                    f"Opportunity {opportunity_id} does not belong "
+                    f"to CRM company {crm_company_id}"
+                )
+        else:
+            if not linked_company:
+                err(f"Opportunity {opportunity_id} is not linked to a CRM company")
+            crm_company_id = linked_company
+
+    company = _validate_crm_company_exists(conn, crm_company_id, company_id)
+    company_dict = row_to_dict(company)
+
+    t_contact = _t_crm_contact
+    q_direct = (
+        Q.from_(t_contact).select(t_contact.star)
+        .where((t_contact.company_id == P()) & (t_contact.crm_company_id == P()))
+    )
+    direct_rows = conn.execute(q_direct.get_sql(), (company_id, crm_company_id)).fetchall()
+
+    t_role = _t_crm_contact_role
+    role_sub = (
+        Q.from_(t_role).select(t_role.crm_contact_id)
+        .where((t_role.crm_company_id == P()) & (t_role.company_id == P()))
+    )
+    q_role = (
+        Q.from_(t_contact).select(t_contact.star)
+        .where((t_contact.company_id == P()) & (t_contact.id.isin(role_sub)))
+    )
+    role_rows = conn.execute(
+        q_role.get_sql(), (company_id, crm_company_id, company_id)
+    ).fetchall()
+
+    seen = {}
+    for row in list(direct_rows) + list(role_rows):
+        item = row_to_dict(row)
+        seen[item["id"]] = item
+    contact_dicts = sorted(seen.values(), key=lambda c: (c.get("name") or "", c["id"]))
+    contact_ids = [c["id"] for c in contact_dicts]
+
+    t_o = _t_opportunity
+    q_all_opps = (
+        Q.from_(t_o).select(t_o.star)
+        .where((t_o.company_id == P()) & (t_o.crm_company_id == P()))
+    )
+    all_opp_rows = conn.execute(q_all_opps.get_sql(), (company_id, crm_company_id)).fetchall()
+    all_opp_ids = [r["id"] for r in all_opp_rows]
+
+    q_open = (
+        Q.from_(t_o).select(t_o.star)
+        .where(
+            (t_o.company_id == P())
+            & (t_o.crm_company_id == P())
+            & (t_o.stage.notin([ValueWrapper("won"), ValueWrapper("lost")]))
+        )
+    )
+    open_rows = conn.execute(q_open.get_sql(), (company_id, crm_company_id)).fetchall()
+    opp_dicts = sorted(
+        [row_to_dict(r) for r in open_rows],
+        key=lambda o: (o.get("opportunity_name") or "", o["id"]),
+    )
+
+    expected_total = Decimal("0")
+    weighted_total = Decimal("0")
+    follow_ups = []
+    for opp in opp_dicts:
+        revenue = _brief_money(
+            opp.get("expected_revenue"), f"opportunity {opp['id']} expected_revenue"
+        )
+        probability = _brief_money(
+            opp.get("probability"), f"opportunity {opp['id']} probability"
+        )
+        expected_total += revenue
+        weighted_total += revenue * probability / Decimal("100")
+        follow_up = opp.get("next_follow_up_date")
+        if follow_up:
+            follow_ups.append(follow_up)
+    expected_total = str(
+        expected_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+    weighted_total = str(
+        weighted_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+    next_follow_up = min(follow_ups) if follow_ups else None
+
+    t_act = _t_activity
+    opp_sub = (
+        Q.from_(t_o).select(t_o.id)
+        .where((t_o.company_id == P()) & (t_o.crm_company_id == P()))
+    )
+    q_acts = Q.from_(t_act).select(t_act.star).where(t_act.opportunity_id.isin(opp_sub))
+    act_rows = conn.execute(q_acts.get_sql(), (company_id, crm_company_id)).fetchall()
+    activity_dicts = [row_to_dict(r) for r in act_rows]
+    activity_dicts.sort(key=lambda a: a["id"])
+    activity_dicts.sort(key=lambda a: a.get("activity_date") or "", reverse=True)
+
+    t_task = _t_crm_task
+    t_link = _t_crm_task_link
+    q_tasks = (
+        Q.from_(t_task).select(t_task.star)
+        .where(
+            (t_task.company_id == P())
+            & (t_task.status.notin([ValueWrapper("done"), ValueWrapper("cancelled")]))
+        )
+    )
+    open_task_rows = conn.execute(q_tasks.get_sql(), (company_id,)).fetchall()
+    q_links = (
+        Q.from_(t_link).select(
+            t_link.crm_task_id, t_link.linked_entity_type, t_link.linked_entity_id
+        )
+        .where(t_link.company_id == P())
+    )
+    link_rows = conn.execute(q_links.get_sql(), (company_id,)).fetchall()
+    wanted = set()
+    wanted.add(("crm_company", crm_company_id))
+    for oid in all_opp_ids:
+        wanted.add(("opportunity", oid))
+    for cid in contact_ids:
+        wanted.add(("crm_contact", cid))
+    wanted_task_ids = {
+        r["crm_task_id"]
+        for r in link_rows
+        if (r["linked_entity_type"], r["linked_entity_id"]) in wanted
+    }
+    task_dicts = [
+        row_to_dict(r) for r in open_task_rows if r["id"] in wanted_task_ids
+    ]
+    task_dicts.sort(
+        key=lambda t: (
+            t.get("due_date") is None,
+            t.get("due_date") or "",
+            t.get("subject") or "",
+            t["id"],
+        )
+    )
+
+    ok(
+        {
+            "crm_company": company_dict,
+            "contacts": contact_dicts,
+            "opportunities": opp_dicts,
+            "open_opportunities": opp_dicts,
+            "activities": activity_dicts,
+            "recent_activities": activity_dicts,
+            "tasks": task_dicts,
+            "open_tasks": task_dicts,
+            "expected_revenue": expected_total,
+            "total_expected_revenue": expected_total,
+            "weighted_pipeline_value": weighted_total,
+            "weighted_value": weighted_total,
+            "total_weighted_revenue": weighted_total,
+            "next_follow_up_date": next_follow_up,
+            "positioning": WEDGE_POSITIONING,
+            "limitations": list(WEDGE_LIMITATIONS),
+        }
+    )
+
+
+
+# ---------------------------------------------------------------------------
 # ACTIONS registry
 # ---------------------------------------------------------------------------
 
@@ -4318,6 +4540,8 @@ ACTIONS = {
     "export-opportunities": export_opportunities,
     "export-crm-contacts": export_crm_contacts,
     "export-crm-companies": export_crm_companies,
+    # Local CRM wedge v1 (read-only account brief)
+    "crm-account-brief": crm_account_brief,
 }
 
 

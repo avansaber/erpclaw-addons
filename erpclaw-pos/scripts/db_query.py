@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """erpclaw-pos — db_query.py (unified router)
 
-Point of Sale skill for ERPClaw. Routes all 29 actions across 4 domain
+Point of Sale skill for ERPClaw. Routes all 30 actions across 4 domain
 modules: profiles, sessions, transactions, reports.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
@@ -110,7 +110,10 @@ def main():
     # -- Reports --
     parser.add_argument("--from-date")
     parser.add_argument("--to-date")
+    parser.add_argument("--start-date")
+    parser.add_argument("--end-date")
     parser.add_argument("--date")
+    parser.add_argument("--location-id")
 
     # -- Shared --
     parser.add_argument("--search")

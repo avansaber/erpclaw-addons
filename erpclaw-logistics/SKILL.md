@@ -99,6 +99,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 --action logistics-freight-cost-analysis-report --company-id {id}
 --action logistics-on-time-delivery-report --company-id {id}
 --action logistics-delivery-exception-report --company-id {id}
+--action logistics-trace-inventory --company-id {id} --direction forward --serial-number {serial}
 ```
 
 ## Actions Reference
@@ -138,4 +139,5 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `logistics-freight-cost-analysis-report` | Freight cost breakdown report |
 | `logistics-on-time-delivery-report` | On-time delivery metrics |
 | `logistics-delivery-exception-report` | Delivery exceptions summary |
+| `logistics-trace-inventory` | Trace serial or batch lineage forward or backward |
 | `status` | Skill health check |

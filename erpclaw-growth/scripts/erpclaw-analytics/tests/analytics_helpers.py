@@ -100,8 +100,9 @@ class _DecimalAbs:
 
 class _ConnWrapper:
     """Wrap a sqlite3.Connection so conn.company_id is accessible."""
-    def __init__(self, conn):
+    def __init__(self, conn, db_path):
         self._conn = conn
+        self.db_path = db_path
         self.company_id = None
 
     def __getattr__(self, name):
@@ -122,7 +123,7 @@ def get_conn(db_path: str):
     setup_pragmas(raw)
     raw.create_aggregate("decimal_sum", 1, _DecimalSum)
     raw.create_function("decimal_abs", 1, _decimal_abs)
-    return _ConnWrapper(raw)
+    return _ConnWrapper(raw, db_path)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

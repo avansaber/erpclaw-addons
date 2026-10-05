@@ -2,7 +2,7 @@
 """ERPClaw Logistics -- db_query.py (unified router)
 
 Transportation & logistics management: shipments, carriers, routes, freight.
-All 33 actions are routed through this single entry point.
+All 34 actions are routed through this single entry point.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -40,6 +40,7 @@ from carriers import ACTIONS as CARRIER_ACTIONS  # noqa: E402
 from routes import ACTIONS as ROUTE_ACTIONS  # noqa: E402
 from freight import ACTIONS as FREIGHT_ACTIONS  # noqa: E402
 from reports import ACTIONS as REPORT_ACTIONS  # noqa: E402
+from traceability import ACTIONS as TRACEABILITY_ACTIONS  # noqa: E402
 
 # Merge all actions
 ACTIONS = {}
@@ -48,6 +49,7 @@ ACTIONS.update(CARRIER_ACTIONS)
 ACTIONS.update(ROUTE_ACTIONS)
 ACTIONS.update(FREIGHT_ACTIONS)
 ACTIONS.update(REPORT_ACTIONS)
+ACTIONS.update(TRACEABILITY_ACTIONS)
 
 SKILL = "erpclaw-logistics"
 REQUIRED_TABLES = [
@@ -149,6 +151,11 @@ def main():
     parser.add_argument("--event-type")
     parser.add_argument("--event-timestamp")
     parser.add_argument("--location")
+
+    # Inventory traceability fields
+    parser.add_argument("--direction")
+    parser.add_argument("--serial-number")
+    parser.add_argument("--batch-number")
 
     # Filters
     parser.add_argument("--search")

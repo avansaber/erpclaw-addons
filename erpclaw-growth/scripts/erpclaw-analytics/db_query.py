@@ -434,6 +434,7 @@ ACTION_REQUIREMENTS = {
     "company-scorecard": [],
     "metric-trend": [],
     "period-comparison": [],
+    "imported-commerce-insights": [],
 }
 
 
@@ -2438,6 +2439,450 @@ def action_analyze_query_performance(conn, args):
 
 
 # ===========================================================================
+# ACTION: imported-commerce-insights (v1)
+# ===========================================================================
+# Deterministic local report over already imported Stripe, Shopify and bank
+# rows. Reads only existing local tables; a missing optional provider table
+# yields an explicit unavailable source, never an install failure. Never
+# connects to a provider, calls a model, moves money, or sends data over a
+# network. All reads are company-scoped with optional inclusive from/to
+# date bounds. All money stays Decimal; malformed stored money refuses.
+
+ICI_LARGE_AMOUNT_THRESHOLD = Decimal("1000.00")
+ICI_LARGE_REFUND_THRESHOLD = Decimal("100.00")
+ICI_HIGH_FEE_RATE = Decimal("0.05")
+ICI_LARGE_BANK_FLOW = Decimal("1000.00")
+ICI_LIMITATION = (
+    "Local read-only report over already imported Stripe, Shopify and bank "
+    "rows; does not connect to providers, call a hosted analyst, move money "
+    "or send data over a network."
+)
+
+
+def _ici_has_column(conn, table_name, column_name):
+    if not table_exists(conn, table_name):
+        return False
+    tbl = Table(table_name)
+    probe = Q.from_(tbl).select("*").limit(1)
+    cursor = conn.execute(probe.get_sql(), ())
+    names = [d[0] for d in (cursor.description or [])]
+    return column_name in names
+
+
+def _ici_pick_date(conn, table_name, candidates):
+    for cand in candidates:
+        if _ici_has_column(conn, table_name, cand):
+            return cand
+    return None
+
+
+def _ici_money(value, table_name, row_id, column_name):
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        err(f"Malformed stored amount in {table_name}.{column_name} id={row_id}: empty value")
+    try:
+        result = to_decimal(str(value))
+    except Exception:
+        err(f"Malformed stored amount in {table_name}.{column_name} id={row_id}: {value!r}")
+    if isinstance(result, float):
+        err(f"Malformed stored amount in {table_name}.{column_name} id={row_id}: float not allowed")
+    return result
+
+
+def _ici_fetch_simple(conn, table_name, amount_col, date_candidates,
+                      company_id, from_date, to_date):
+    if not table_exists(conn, table_name):
+        return (False, [], Decimal("0"))
+    if not _ici_has_column(conn, table_name, "id"):
+        return (False, [], Decimal("0"))
+    if not _ici_has_column(conn, table_name, "company_id"):
+        return (False, [], Decimal("0"))
+    if not _ici_has_column(conn, table_name, amount_col):
+        return (False, [], Decimal("0"))
+    date_col = _ici_pick_date(conn, table_name, date_candidates)
+    tbl = Table(table_name)
+    id_f = getattr(tbl, "id")
+    amt_f = getattr(tbl, amount_col)
+    co_f = getattr(tbl, "company_id")
+    if date_col is not None:
+        dt_f = getattr(tbl, date_col)
+        query = Q.from_(tbl).select(id_f, amt_f, dt_f)
+    else:
+        dt_f = None
+        query = Q.from_(tbl).select(id_f, amt_f)
+    query = query.where(co_f == P())
+    params = [company_id]
+    if dt_f is not None and from_date:
+        query = query.where(dt_f >= P())
+        params.append(from_date)
+    if dt_f is not None and to_date:
+        query = query.where(dt_f <= P())
+        params.append(to_date)
+    query = query.orderby(id_f, order=Order.asc)
+    rows = conn.execute(query.get_sql(), tuple(params)).fetchall()
+    out = []
+    total = Decimal("0")
+    for row in rows:
+        rid = row["id"]
+        amount = _ici_money(row[amount_col], table_name, rid, amount_col)
+        total += amount
+        entry = {"id": rid, "amount": amount}
+        if date_col is not None:
+            entry["date"] = row[date_col]
+        out.append(entry)
+    return (True, out, total)
+
+
+def _ici_fetch_balance(conn, company_id, from_date, to_date):
+    table_name = "stripe_balance_transaction"
+    if not table_exists(conn, table_name):
+        return (False, [], Decimal("0"), Decimal("0"))
+    for col in ("id", "company_id", "amount", "fee"):
+        if not _ici_has_column(conn, table_name, col):
+            return (False, [], Decimal("0"), Decimal("0"))
+    date_col = _ici_pick_date(conn, table_name, ["created_stripe", "created_at"])
+    tbl = Table(table_name)
+    id_f = getattr(tbl, "id")
+    amt_f = getattr(tbl, "amount")
+    fee_f = getattr(tbl, "fee")
+    co_f = getattr(tbl, "company_id")
+    if date_col is not None:
+        dt_f = getattr(tbl, date_col)
+        query = Q.from_(tbl).select(id_f, amt_f, fee_f, dt_f)
+    else:
+        dt_f = None
+        query = Q.from_(tbl).select(id_f, amt_f, fee_f)
+    query = query.where(co_f == P())
+    params = [company_id]
+    if dt_f is not None and from_date:
+        query = query.where(dt_f >= P())
+        params.append(from_date)
+    if dt_f is not None and to_date:
+        query = query.where(dt_f <= P())
+        params.append(to_date)
+    query = query.orderby(id_f, order=Order.asc)
+    rows = conn.execute(query.get_sql(), tuple(params)).fetchall()
+    out = []
+    amount_total = Decimal("0")
+    fee_total = Decimal("0")
+    for row in rows:
+        rid = row["id"]
+        amount = _ici_money(row["amount"], table_name, rid, "amount")
+        raw_fee = row["fee"]
+        if raw_fee is None:
+            fee = Decimal("0")
+        else:
+            fee = _ici_money(raw_fee, table_name, rid, "fee")
+        amount_total += amount
+        fee_total += fee
+        entry = {"id": rid, "amount": amount, "fee": fee}
+        if date_col is not None:
+            entry["date"] = row[date_col]
+        out.append(entry)
+    return (True, out, amount_total, fee_total)
+
+
+def _ici_fetch_bank(conn, company_id, from_date, to_date):
+    line_table = "bank_statement_line"
+    if not table_exists(conn, line_table):
+        return (False, [], Decimal("0"), Decimal("0"))
+    if not _ici_has_column(conn, line_table, "id"):
+        return (False, [], Decimal("0"), Decimal("0"))
+    if not _ici_has_column(conn, line_table, "amount"):
+        return (False, [], Decimal("0"), Decimal("0"))
+    date_col = _ici_pick_date(conn, line_table, ["txn_date", "value_date", "created_at"])
+    if _ici_has_column(conn, line_table, "company_id"):
+        tbl = Table(line_table)
+        id_f = getattr(tbl, "id")
+        amt_f = getattr(tbl, "amount")
+        co_f = getattr(tbl, "company_id")
+        if date_col is not None:
+            dt_f = getattr(tbl, date_col)
+            query = Q.from_(tbl).select(id_f, amt_f, dt_f)
+        else:
+            dt_f = None
+            query = Q.from_(tbl).select(id_f, amt_f)
+        query = query.where(co_f == P())
+        params = [company_id]
+        if dt_f is not None and from_date:
+            query = query.where(dt_f >= P())
+            params.append(from_date)
+        if dt_f is not None and to_date:
+            query = query.where(dt_f <= P())
+            params.append(to_date)
+        query = query.orderby(id_f, order=Order.asc)
+        rows = conn.execute(query.get_sql(), tuple(params)).fetchall()
+    elif (table_exists(conn, "bank_statement")
+            and _ici_has_column(conn, "bank_statement", "company_id")
+            and _ici_has_column(conn, line_table, "bank_statement_id")
+            and _ici_has_column(conn, "bank_statement", "id")):
+        line = Table(line_table)
+        stmt = Table("bank_statement")
+        line_id = getattr(line, "id")
+        line_amt = getattr(line, "amount")
+        line_fk = getattr(line, "bank_statement_id")
+        stmt_id = getattr(stmt, "id")
+        stmt_co = getattr(stmt, "company_id")
+        if date_col is not None:
+            line_dt = getattr(line, date_col)
+            query = Q.from_(line).join(stmt).on(line_fk == stmt_id).select(line_id, line_amt, line_dt)
+        else:
+            line_dt = None
+            query = Q.from_(line).join(stmt).on(line_fk == stmt_id).select(line_id, line_amt)
+        query = query.where(stmt_co == P())
+        params = [company_id]
+        if line_dt is not None and from_date:
+            query = query.where(line_dt >= P())
+            params.append(from_date)
+        if line_dt is not None and to_date:
+            query = query.where(line_dt <= P())
+            params.append(to_date)
+        query = query.orderby(line_id, order=Order.asc)
+        rows = conn.execute(query.get_sql(), tuple(params)).fetchall()
+    else:
+        return (False, [], Decimal("0"), Decimal("0"))
+    out = []
+    inflow = Decimal("0")
+    outflow = Decimal("0")
+    for row in rows:
+        rid = row["id"]
+        amount = _ici_money(row["amount"], line_table, rid, "amount")
+        if amount > 0:
+            inflow += amount
+        elif amount < 0:
+            outflow += amount
+        entry = {"id": rid, "amount": amount}
+        if date_col is not None:
+            entry["date"] = row[date_col]
+        out.append(entry)
+    return (True, out, inflow, outflow)
+
+
+def action_imported_commerce_insights(conn, args):
+    _require_company(args)
+    company_id = args.company_id
+    from_date = getattr(args, "from_date", None)
+    to_date = getattr(args, "to_date", None)
+
+    ch_ok, ch_rows, ch_total = _ici_fetch_simple(
+        conn, "stripe_charge", "amount",
+        ["created_stripe", "created_at"], company_id, from_date, to_date)
+    rf_ok, rf_rows, rf_total = _ici_fetch_simple(
+        conn, "stripe_refund", "amount",
+        ["created_stripe", "created_at"], company_id, from_date, to_date)
+    po_ok, po_rows, po_total = _ici_fetch_simple(
+        conn, "stripe_payout", "amount",
+        ["created_stripe", "created_at"], company_id, from_date, to_date)
+    bal_ok, bal_rows, _bal_amt, bal_fee = _ici_fetch_balance(
+        conn, company_id, from_date, to_date)
+
+    so_ok, so_rows, so_total = _ici_fetch_simple(
+        conn, "shopify_order", "total_amount",
+        ["order_date", "created_at"], company_id, from_date, to_date)
+    sr_ok, sr_rows, sr_total = _ici_fetch_simple(
+        conn, "shopify_refund", "refund_amount",
+        ["refund_date", "created_at"], company_id, from_date, to_date)
+    sp_ok, sp_rows, sp_total = _ici_fetch_simple(
+        conn, "shopify_payout", "net_amount",
+        ["issued_at", "created_at"], company_id, from_date, to_date)
+
+    bk_ok, bk_rows, bk_in, bk_out = _ici_fetch_bank(
+        conn, company_id, from_date, to_date)
+
+    stripe_tables = {
+        "stripe_charge": "available" if ch_ok else "unavailable",
+        "stripe_refund": "available" if rf_ok else "unavailable",
+        "stripe_payout": "available" if po_ok else "unavailable",
+        "stripe_balance_transaction": "available" if bal_ok else "unavailable",
+    }
+    shopify_tables = {
+        "shopify_order": "available" if so_ok else "unavailable",
+        "shopify_refund": "available" if sr_ok else "unavailable",
+        "shopify_payout": "available" if sp_ok else "unavailable",
+    }
+    stripe_available = any((ch_ok, rf_ok, po_ok, bal_ok))
+    shopify_available = any((so_ok, sr_ok, sp_ok))
+
+    def _unavailable_source(provider, tables, reason):
+        return {
+            "status": "unavailable",
+            "reason": reason,
+            "tables": tables,
+            "counts": {},
+            "totals": {},
+        }
+
+    if stripe_available:
+        stripe_source = {
+            "status": "available",
+            "tables": stripe_tables,
+            "counts": {
+                "charges": len(ch_rows),
+                "refunds": len(rf_rows),
+                "payouts": len(po_rows),
+                "balance_transactions": len(bal_rows),
+            },
+            "totals": {
+                "revenue": _s(ch_total),
+                "refunds": _s(rf_total),
+                "payouts": _s(po_total),
+                "fees": _s(bal_fee),
+            },
+        }
+    else:
+        stripe_source = _unavailable_source(
+            "stripe", stripe_tables,
+            "Stripe imported tables are not present for this database.")
+    if shopify_available:
+        shopify_source = {
+            "status": "available",
+            "tables": shopify_tables,
+            "counts": {
+                "orders": len(so_rows),
+                "refunds": len(sr_rows),
+                "payouts": len(sp_rows),
+            },
+            "totals": {
+                "revenue": _s(so_total),
+                "refunds": _s(sr_total),
+                "payouts": _s(sp_total),
+            },
+        }
+    else:
+        shopify_source = _unavailable_source(
+            "shopify", shopify_tables,
+            "Shopify imported tables are not present for this database.")
+    if bk_ok:
+        bank_source = {
+            "status": "available",
+            "tables": {"bank_statement_line": "available"},
+            "counts": {
+                "lines": len(bk_rows),
+                "inflows": sum(1 for r in bk_rows if r["amount"] > 0),
+                "outflows": sum(1 for r in bk_rows if r["amount"] < 0),
+            },
+            "totals": {
+                "inflows": _s(bk_in),
+                "outflows": _s(bk_out),
+                "net": _s(bk_in + bk_out),
+            },
+        }
+    else:
+        bank_source = _unavailable_source(
+            "bank", {"bank_statement_line": "unavailable"},
+            "Bank imported tables are not present for this database.")
+
+    findings = []
+    for row in ch_rows:
+        if row["amount"] >= ICI_LARGE_AMOUNT_THRESHOLD:
+            findings.append({
+                "finding": "large_stripe_charge",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_AMOUNT_THRESHOLD),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+    for row in rf_rows:
+        if row["amount"] >= ICI_LARGE_REFUND_THRESHOLD:
+            findings.append({
+                "finding": "large_stripe_refund",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_REFUND_THRESHOLD),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+    for row in bal_rows:
+        if row["amount"] != 0 and row["amount"] > 0:
+            rate = row["fee"] / row["amount"]
+            if rate > ICI_HIGH_FEE_RATE:
+                findings.append({
+                    "finding": "high_stripe_fee",
+                    "severity": "warning",
+                    "threshold": str(ICI_HIGH_FEE_RATE),
+                    "ids": [row["id"]],
+                    "fee": _s(row["fee"]),
+                    "amount": _s(row["amount"]),
+                    "fee_rate": str(rate.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)),
+                })
+    for row in so_rows:
+        if row["amount"] >= ICI_LARGE_AMOUNT_THRESHOLD:
+            findings.append({
+                "finding": "large_shopify_order",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_AMOUNT_THRESHOLD),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+    for row in sr_rows:
+        if row["amount"] >= ICI_LARGE_REFUND_THRESHOLD:
+            findings.append({
+                "finding": "large_shopify_refund",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_REFUND_THRESHOLD),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+    for row in bk_rows:
+        if row["amount"] >= ICI_LARGE_BANK_FLOW:
+            findings.append({
+                "finding": "large_bank_inflow",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_BANK_FLOW),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+        elif row["amount"] <= -ICI_LARGE_BANK_FLOW:
+            findings.append({
+                "finding": "large_bank_outflow",
+                "severity": "info",
+                "threshold": _s(ICI_LARGE_BANK_FLOW),
+                "ids": [row["id"]],
+                "amount": _s(row["amount"]),
+            })
+    findings.sort(key=lambda f: (f["finding"], f["ids"]))
+
+    ok({
+        "company_id": company_id,
+        "period": {"from_date": from_date, "to_date": to_date},
+        "limitation": ICI_LIMITATION,
+        "sources": {
+            "stripe": stripe_source,
+            "shopify": shopify_source,
+            "bank": bank_source,
+        },
+        "totals": {
+            "stripe_revenue": _s(ch_total) if ch_ok else "0.00",
+            "stripe_fees": _s(bal_fee) if bal_ok else "0.00",
+            "stripe_refunds": _s(rf_total) if rf_ok else "0.00",
+            "stripe_payouts": _s(po_total) if po_ok else "0.00",
+            "shopify_revenue": _s(so_total) if so_ok else "0.00",
+            "shopify_refunds": _s(sr_total) if sr_ok else "0.00",
+            "shopify_payouts": _s(sp_total) if sp_ok else "0.00",
+            "bank_inflows": _s(bk_in) if bk_ok else "0.00",
+            "bank_outflows": _s(bk_out) if bk_ok else "0.00",
+            "bank_net": _s(bk_in + bk_out) if bk_ok else "0.00",
+        },
+        "counts": {
+            "stripe_charges": len(ch_rows) if ch_ok else 0,
+            "stripe_refunds": len(rf_rows) if rf_ok else 0,
+            "stripe_payouts": len(po_rows) if po_ok else 0,
+            "stripe_balance_transactions": len(bal_rows) if bal_ok else 0,
+            "shopify_orders": len(so_rows) if so_ok else 0,
+            "shopify_refunds": len(sr_rows) if sr_ok else 0,
+            "shopify_payouts": len(sp_rows) if sp_ok else 0,
+            "bank_lines": len(bk_rows) if bk_ok else 0,
+        },
+        "thresholds": {
+            "large_amount": _s(ICI_LARGE_AMOUNT_THRESHOLD),
+            "large_refund": _s(ICI_LARGE_REFUND_THRESHOLD),
+            "high_fee_rate": str(ICI_HIGH_FEE_RATE),
+            "large_bank_flow": _s(ICI_LARGE_BANK_FLOW),
+        },
+        "findings": findings,
+    })
+
+
+
+# ===========================================================================
 # Action dispatch
 # ===========================================================================
 
@@ -2477,6 +2922,7 @@ ACTIONS = {
     "company-scorecard": action_company_scorecard,
     "metric-trend": action_metric_trend,
     "period-comparison": action_period_comparison,
+    "imported-commerce-insights": action_imported_commerce_insights,
 }
 
 

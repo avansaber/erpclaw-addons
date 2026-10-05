@@ -1,7 +1,7 @@
 ---
 name: erpclaw-compliance
 version: 1.0.0
-description: Compliance, audit, risk, and policy management for ERPClaw. 38 actions across 4 domains -- audit plans and findings, risk register with heat-map scoring, internal controls and compliance calendar, policy lifecycle with employee acknowledgment tracking.
+description: "Compliance, audit, risk, and policy management for ERPClaw. 40 actions across 5 domains: audit plans and findings, risk register with heat-map scoring, internal controls and compliance calendar, policy lifecycle with employee acknowledgment tracking."
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -102,7 +102,7 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `compliance-risk-matrix-report` | `--company-id` | |
 | `compliance-close-risk` | `--risk-id` | |
 
-### Controls & Calendar (12 actions)
+### Controls & Calendar (13 actions)
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
 | `compliance-add-control-test` | `--company-id --control-name --control-type` | `--control-description --frequency --test-procedure --test-date --tester --evidence --next-test-date --notes` |
@@ -117,6 +117,7 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `compliance-complete-calendar-item` | `--calendar-item-id` | |
 | `compliance-overdue-items-report` | `--company-id` | |
 | `compliance-dashboard` | `--company-id` | |
+| `compliance-attestation-report` | `--company-id --framework` | `--as-of-date` |
 
 ### Policy (10 actions)
 | Action | Required Flags | Optional Flags |
@@ -132,11 +133,16 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 | `compliance-policy-compliance-report` | `--company-id` | |
 | `status` | | |
 
+### Screening (1 action)
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `compliance-screen-exclusion` | `--company-id --party-type --party-id --candidate-identifier --list-source --list-version --excluded-identifiers --evidence-reference` | |
+
 ## Technical Details (Tier 3)
 
-**Tables owned (8):** audit_plan, audit_finding, risk_register, risk_assessment, control_test, compliance_calendar, policy, policy_acknowledgment
+**Tables owned (9):** audit_plan, audit_finding, risk_register, risk_assessment, control_test, compliance_calendar, policy, policy_acknowledgment, compliance_exclusion_screening
 
-**Script:** `scripts/db_query.py` routes to 4 domain modules: audit.py, risk.py, controls.py, policy.py
+**Script:** `scripts/db_query.py` routes to 5 domain modules: audit.py, risk.py, controls.py, policy.py, screening.py
 
 **Data conventions:** IDs = TEXT (UUID4), Dates = TEXT (ISO 8601), Booleans = INTEGER (0/1)
 

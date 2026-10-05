@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """ERPClaw Compliance schema extension -- adds compliance tables to the shared database.
 
-8 tables: audit_plan, audit_finding, risk_register, risk_assessment,
-control_test, compliance_calendar, policy, policy_acknowledgment.
+9 tables: audit_plan, audit_finding, risk_register, risk_assessment,
+control_test, compliance_calendar, policy, policy_acknowledgment,
+compliance_exclusion_screening.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
@@ -337,6 +338,37 @@ POLICY_ACKNOWLEDGMENT = Table(
 Index("idx_policy_ack_policy", POLICY_ACKNOWLEDGMENT.c.policy_id)
 Index("idx_policy_ack_company", POLICY_ACKNOWLEDGMENT.c.company_id)
 Index("idx_policy_ack_employee", POLICY_ACKNOWLEDGMENT.c.employee_id)
+
+# ---------------------------------------------------------------------------
+# 9. compliance_exclusion_screening
+# ---------------------------------------------------------------------------
+COMPLIANCE_EXCLUSION_SCREENING = Table(
+    "compliance_exclusion_screening", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("company_id", Text,
+           ForeignKey("company.id", ondelete="RESTRICT"), nullable=False),
+    Column("party_type", Text, nullable=False),
+    Column("party_id", Text, nullable=False),
+    Column("candidate_identifier", Text, nullable=False),
+    Column("list_source", Text, nullable=False),
+    Column("list_version", Text, nullable=False),
+    Column("screened_at", Text, nullable=False),
+    Column("match_status", Text, nullable=False),
+    Column("matched_identifier", Text),
+    Column("evidence_reference", Text, nullable=False),
+    Column("created_at", Text, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "match_status IN ('clear','matched')",
+        name="ck_compliance_exclusion_screening_match_status"),
+)
+
+Index("idx_compliance_exclusion_screening_company",
+      COMPLIANCE_EXCLUSION_SCREENING.c.company_id)
+Index("idx_compliance_exclusion_screening_party",
+      COMPLIANCE_EXCLUSION_SCREENING.c.party_type,
+      COMPLIANCE_EXCLUSION_SCREENING.c.party_id)
+Index("idx_compliance_exclusion_screening_status",
+      COMPLIANCE_EXCLUSION_SCREENING.c.match_status)
 
 
 

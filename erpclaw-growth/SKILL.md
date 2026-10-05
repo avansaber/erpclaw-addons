@@ -3,7 +3,7 @@ name: erpclaw-growth
 version: 2.10.0
 description: >
   CRM pipeline, advanced marketing, territory management, contract lifecycle, cross-module analytics, and AI-powered business analysis for ERPClaw.
-  137 actions across 4 domains: lead management, lead sources, opportunity pipeline, saved views, global search, CSV import/export, email campaigns,
+  138 actions across 4 domains: lead management, lead sources, opportunity pipeline, saved views, global search, CSV import/export, email campaigns,
   territories, contracts, automation, KPI dashboards, anomaly detection, cash flow forecasting, and relationship scoring.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
@@ -104,7 +104,6 @@ Stage values: `new`, `contacted`, `qualified`, `proposal_sent`, `negotiation`, `
 Terminal states (won/lost) are frozen — no further updates allowed.
 
 ### CRM — Campaigns & Activities (4 actions)
-
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
 | `add-campaign` | `--name` | `--campaign-type`, `--budget`, `--start-date`, `--end-date`, `--description`, `--lead-id` |
@@ -113,17 +112,18 @@ Terminal states (won/lost) are frozen — no further updates allowed.
 | `list-activities` | | `--lead-id`, `--opportunity-id`, `--activity-type`, `--limit`, `--offset` |
 
 ### CRM — Reports (2 actions)
-
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
 | `pipeline-report` | | `--stage`, `--from-date`, `--to-date` (Wave 1B F3: dual-path — groups by custom pipeline + stage when `pipeline_stage_id` set, else legacy stage text) |
 
+### CRM: Account Brief (1 action)
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `crm-account-brief` | `--company-id` plus `--crm-company-id` or `--opportunity-id` | Read-only local account brief with contacts, open opportunities, recent activities, open tasks, exact Decimal totals, next follow-up date, deterministic sorting, and explicit local-only limitations. Missing or cross-company targets refuse. |
 ### CRM — Contacts & Companies (12 actions)
-
 Separate Contact (person) + Company (org) entities; full flags/rules in `scripts/erpclaw-crm/references/crm_contacts.md`. Contacts: `add-crm-contact`, `update-crm-contact`, `get-crm-contact`, `list-crm-contacts`, `remove-crm-contact`. Companies: `add-crm-company`, `update-crm-company`, `get-crm-company`, `list-crm-companies`. Association + lifecycle: `link-contact-to-company`, `merge-crm-contacts` (single-txn FK reassign), `promote-contact-to-customer` (cross-skill add-customer, rollback on failure). `email`/`domain` are UNIQUE case-insensitively per company; `--revenue` is TEXT Decimal.
 
 ### CRM — Tasks (8 actions)
-
 First-class tasks (status/priority/due-date lifecycle) tied to any CRM entity; full flags/rules in `scripts/erpclaw-crm/references/crm_tasks.md`. Lifecycle: `add-crm-task` (collision-safe name; `--link-to "<type>:<id>"` repeatable, runtime existence-checked, atomic), `update-crm-task`, `get-crm-task`, `list-crm-tasks` (`--status`/`--priority`/`--overdue`/`--due-within-days`/`--linked-to`), `complete-crm-task` (rejects on already-done), `cancel-crm-task`. Links: `link-task-to-entity`, `unlink-task-from-entity` (entity types: lead/opportunity/customer/crm_contact/crm_company). `crm_activity` is not replaced.
 
 ### CRM — Pipeline Stages (6 actions)
@@ -215,7 +215,7 @@ Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules
 | `win-loss-analysis` | `--company-id` | `--start-date`, `--end-date` |
 | `marketing-dashboard` | `--company-id` | `--start-date`, `--end-date` |
 
-### Analytics (25 actions)
+### Analytics (26 actions)
 
 | Action | Required Flags | Optional Flags |
 |--------|---------------|----------------|
@@ -244,6 +244,7 @@ Persisted, named filters over one CRM entity (filter-JSON DSL); full flags/rules
 | `metric-trend` | `--company-id`, `--metric` | `--from-date`, `--to-date`, `--periodicity` |
 | `period-comparison` | `--company-id`, `--periods` (JSON) | `--metrics` (JSON) |
 | `analyze-query-performance` | `--company-id` | |
+| `imported-commerce-insights` | `--company-id` | `--from-date`, `--to-date` (local imported Stripe/Shopify/bank rows only; no provider connection, no model call, no money movement) |
 
 ### AI Engine (21 actions)
 
@@ -277,13 +278,13 @@ Confirm before: `convert-opportunity-to-quotation`, `evaluate-business-rules`, `
 
 ### Graceful Degradation & Response Formatting
 
-Analytics degrade gracefully when optional modules are missing; AI and CRM actions work independently. Currency: `$X,XXX.XX` (negatives in parentheses). Ratios: 2dp. Percentages: 1dp with %. Dates: `Mon DD, YYYY`. Use markdown tables for tabular output.
+Analytics degrade gracefully when optional modules are missing; AI and CRM actions work independently. `imported-commerce-insights` is a local read-only report over already imported Stripe, Shopify, and bank rows only. It never connects to providers, calls a hosted analyst, moves money, or sends data over a network. Currency: `$X,XXX.XX` (negatives in parentheses). Ratios: 2dp. Percentages: 1dp with %. Dates: `Mon DD, YYYY`. Use markdown tables for tabular output.
 
 ## Technical Details (Tier 3)
 
 ### Architecture
 - **Router**: `scripts/db_query.py` dispatches to 4 domain scripts (crm, analytics, ai-engine, crm-adv)
-- **Domains**: crm (46 actions), analytics (25 actions), ai-engine (22 actions), crm-adv (52 actions)
+- **Domains**: crm (46 actions), analytics (26 actions), ai-engine (22 actions), crm-adv (52 actions)
 - **Database**: Single SQLite at `~/.openclaw/erpclaw/data.sqlite` (shared with erpclaw)
 
 ### Tables Owned (39)

@@ -1211,3 +1211,403 @@ class TestStatus:
         assert "risk" in result["domains"]
         assert "controls" in result["domains"]
         assert "policy" in result["domains"]
+
+
+# =============================================================================
+# Exclusion Screening v1 (floor-o042)
+# =============================================================================
+import json as _json_screening
+
+
+def _screening_rows(conn, **filters):
+    t = Table("compliance_exclusion_screening")
+    q = Q.from_(t).select(t.star)
+    params = []
+    for col, val in filters.items():
+        q = q.where(Field(col) == P())
+        params.append(val)
+    return conn.execute(q.get_sql(), params).fetchall()
+
+
+def _screening_count(conn):
+    t = Table("compliance_exclusion_screening")
+    return conn.execute(Q.from_(t).select(t.star).get_sql()).fetchall().__len__()
+
+
+def _audit_count(conn):
+    t = Table("audit_log")
+    return conn.execute(Q.from_(t).select(t.star).get_sql()).fetchall().__len__()
+
+
+def _valid_screening_kwargs(company_id, **overrides):
+    kwargs = dict(
+        company_id=company_id,
+        party_type="supplier",
+        party_id="SUP-001",
+        candidate_identifier=" abc-123 ",
+        list_source="SAM",
+        list_version="2026-10-01",
+        excluded_identifiers=_json_screening.dumps(["ABC-123", "XYZ-999"]),
+        evidence_reference="EV-001",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+class TestScreenExclusionMatch:
+    def test_match_blocks_payment(self, conn, env):
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"])
+        ))
+        assert is_ok(result), result
+        assert result["match_status"] == "matched"
+        assert result["payment_blocked"] is True
+        assert result["candidate_identifier"] == "ABC-123"
+        assert result["matched_identifier"] == "ABC-123"
+        assert result["list_source"] == "SAM"
+        assert result["list_version"] == "2026-10-01"
+        assert "id" in result
+
+    def test_stored_match_row(self, conn, env):
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"])
+        ))
+        assert is_ok(result), result
+        rows = _screening_rows(conn, id=result["id"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["company_id"] == env["company_id"]
+        assert row["party_type"] == "supplier"
+        assert row["party_id"] == "SUP-001"
+        assert row["candidate_identifier"] == "ABC-123"
+        assert row["list_source"] == "SAM"
+        assert row["list_version"] == "2026-10-01"
+        assert row["match_status"] == "matched"
+        assert row["matched_identifier"] == "ABC-123"
+        assert row["evidence_reference"] == "EV-001"
+
+
+class TestScreenExclusionClear:
+    def test_clear_does_not_block(self, conn, env):
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(
+                env["company_id"],
+                candidate_identifier="CLEAN-001",
+            )
+        ))
+        assert is_ok(result), result
+        assert result["match_status"] == "clear"
+        assert result["payment_blocked"] is False
+        assert result["candidate_identifier"] == "CLEAN-001"
+        assert "matched_identifier" not in result or result.get("matched_identifier") in (None, "")
+
+    def test_stored_clear_row(self, conn, env):
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(
+                env["company_id"],
+                candidate_identifier="CLEAN-001",
+            )
+        ))
+        assert is_ok(result), result
+        rows = _screening_rows(conn, id=result["id"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["company_id"] == env["company_id"]
+        assert row["party_type"] == "supplier"
+        assert row["party_id"] == "SUP-001"
+        assert row["list_source"] == "SAM"
+        assert row["list_version"] == "2026-10-01"
+        assert row["evidence_reference"] == "EV-001"
+        assert row["match_status"] == "clear"
+
+
+class TestScreenExclusionRefusals:
+    def test_invalid_json_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"], excluded_identifiers="not-json{")
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+    def test_empty_list_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"], excluded_identifiers="[]")
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+    def test_non_string_member_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(
+                env["company_id"],
+                excluded_identifiers=_json_screening.dumps(["ABC-123", 123]),
+            )
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+    def test_invalid_party_type_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"], party_type="vendor")
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+    def test_missing_evidence_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"], evidence_reference=None)
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+    def test_empty_candidate_refuses(self, conn, env):
+        before_screen = _screening_count(conn)
+        before_audit = _audit_count(conn)
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(env["company_id"], candidate_identifier="   ")
+        ))
+        assert is_error(result)
+        assert _screening_count(conn) == before_screen
+        assert _audit_count(conn) == before_audit
+
+
+class TestScreenExclusionCompanyIsolation:
+    def test_other_company_rows_do_not_match(self, conn, env):
+        other_company = seed_company(conn, name="Other Co", abbr="OC2")
+        seed_naming_series(conn, other_company)
+        other = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(other_company)
+        ))
+        assert is_ok(other), other
+        assert other["match_status"] == "matched"
+        result = call_action(mod.compliance_screen_exclusion, conn, ns(
+            **_valid_screening_kwargs(
+                env["company_id"],
+                candidate_identifier="CLEAN-001",
+            )
+        ))
+        assert is_ok(result), result
+        assert result["match_status"] == "clear"
+        assert result["payment_blocked"] is False
+# =============================================================================
+# Compliance attestation v1 (floor-o063)
+# =============================================================================
+
+def _att_audit_count(conn):
+    t = Table("policy_acknowledgment")
+    return conn.execute(Q.from_(Table("audit_log")).select(Field("id")).get_sql()).fetchall().__len__()
+
+
+def _att_make_control(conn, company_id, name, result="effective", evidence="EV-001", tester="Tester One"):
+    created = call_action(mod.compliance_add_control_test, conn, ns(
+        company_id=company_id,
+        control_name=name,
+        control_type="preventive",
+    ))
+    assert is_ok(created), created
+    kwargs = dict(control_test_id=created["id"], test_result=result, tester=tester)
+    if evidence is not None:
+        kwargs["evidence"] = evidence
+    executed = call_action(mod.compliance_execute_control_test, conn, ns(**kwargs))
+    assert is_ok(executed), executed
+    return created["id"]
+
+
+def _att_make_policy(conn, company_id, title, requires_ack="1"):
+    created = call_action(mod.compliance_add_policy, conn, ns(
+        company_id=company_id,
+        title=title,
+        policy_type="general",
+        requires_acknowledgment=requires_ack,
+    ))
+    assert is_ok(created), created
+    published = call_action(mod.compliance_publish_policy, conn, ns(
+        policy_id=created["id"],
+    ))
+    assert is_ok(published), published
+    return created["id"]
+
+
+def _att_ack(conn, company_id, policy_id, employee_id, employee_name):
+    acked = call_action(mod.compliance_add_policy_acknowledgment, conn, ns(
+        policy_id=policy_id,
+        company_id=company_id,
+        employee_name=employee_name,
+        employee_id=employee_id,
+    ))
+    assert is_ok(acked), acked
+    return acked["id"]
+
+
+class TestAttestationEvidenceComplete:
+    def test_passed_control_with_evidence_and_ack_returns_complete(self, conn, env):
+        cid = env["company_id"]
+        eid = env["employee_id"]
+        _att_make_control(conn, cid, "Access Review", result="effective", evidence="EV-ACCESS-1")
+        pid = _att_make_policy(conn, cid, "Access Policy")
+        _att_ack(conn, cid, pid, eid, "Jane Auditor")
+        before = _att_audit_count(conn)
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="general",
+        ))
+        assert is_ok(result), result
+        assert result["readiness"] == "evidence_complete"
+        assert result["gap_codes"] == []
+        assert result["controls_by_result"].get("effective", 0) >= 1
+        assert result["controls_missing_evidence"] == 0
+        assert result["active_policies"] >= 1
+        assert result["acknowledgment_gaps"] == 0
+        assert result["acknowledgments_recorded"] >= 1
+        names = [r["control_name"] for r in result["evidence"]]
+        assert "Access Review" in names
+        row = [r for r in result["evidence"] if r["control_name"] == "Access Review"][0]
+        assert row["control_test_id"]
+        assert row["test_result"] == "effective"
+        assert row["test_date"]
+        assert row["tester"] == "Tester One"
+        assert row["evidence_reference"] == "EV-ACCESS-1"
+        assert "notes" not in row
+        assert "remediation_plan" not in row
+        disc = result["disclaimer"]
+        assert "records-readiness" in disc
+        assert "not legal" in disc.lower() or "not legal certification" in disc.lower()
+        assert "external auditor opinion" in disc
+        assert _att_audit_count(conn) == before
+
+
+class TestAttestationGaps:
+    def test_missing_evidence_and_ack_return_gaps(self, conn, env):
+        cid = env["company_id"]
+        _att_make_control(conn, cid, "Gap Control", result="effective", evidence=None)
+        _att_make_policy(conn, cid, "Gap Policy")
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="hipaa",
+        ))
+        assert is_ok(result), result
+        assert result["readiness"] == "gaps_present"
+        codes = result["gap_codes"]
+        assert any("evidence" in c for c in codes)
+        assert any("acknowledg" in c for c in codes)
+        assert result["controls_missing_evidence"] >= 1
+        assert result["acknowledgment_gaps"] >= 1
+        first = result["gap_codes"]
+        second = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="hipaa",
+        ))
+        assert is_ok(second), second
+        assert second["gap_codes"] == first
+
+    def test_failed_control_cannot_be_complete(self, conn, env):
+        cid = env["company_id"]
+        eid = env["employee_id"]
+        _att_make_control(conn, cid, "Failed Control", result="ineffective", evidence="EV-FAIL-1")
+        pid = _att_make_policy(conn, cid, "Acked Policy")
+        _att_ack(conn, cid, pid, eid, "Jane Auditor")
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="ferpa",
+        ))
+        assert is_ok(result), result
+        assert result["readiness"] == "gaps_present"
+        assert any("ineffective" in c or "failed" in c for c in result["gap_codes"])
+        rows = [r for r in result["evidence"] if r["control_name"] == "Failed Control"]
+        assert len(rows) == 1
+        assert rows[0]["test_result"] == "ineffective"
+
+
+class TestAttestationIsolation:
+    def test_other_company_excluded(self, conn, env):
+        cid = env["company_id"]
+        eid = env["employee_id"]
+        _att_make_control(conn, cid, "Own Control", result="effective", evidence="EV-OWN-1")
+        pid = _att_make_policy(conn, cid, "Own Policy")
+        _att_ack(conn, cid, pid, eid, "Jane Auditor")
+        other = seed_company(conn, name="Other Co", abbr="OCA")
+        seed_naming_series(conn, other)
+        other_emp = seed_employee(conn, other, "Other", "Person")
+        _att_make_control(conn, other, "Other Control", result="effective", evidence="EV-OTHER-1")
+        other_pid = _att_make_policy(conn, other, "Other Policy")
+        _att_ack(conn, other, other_pid, other_emp, "Other Person")
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="general",
+        ))
+        assert is_ok(result), result
+        names = [r["control_name"] for r in result["evidence"]]
+        assert "Own Control" in names
+        assert "Other Control" not in names
+        assert result["readiness"] == "evidence_complete"
+
+
+class TestAttestationRefusals:
+    def test_missing_company_refuses_without_writes(self, conn, env):
+        before = _att_audit_count(conn)
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=None, framework="general",
+        ))
+        assert is_error(result)
+        assert _att_audit_count(conn) == before
+
+    def test_unknown_company_refuses_without_writes(self, conn, env):
+        before = _att_audit_count(conn)
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id="no-such-company", framework="general",
+        ))
+        assert is_error(result)
+        assert _att_audit_count(conn) == before
+
+    def test_invalid_framework_refuses_without_writes(self, conn, env):
+        before = _att_audit_count(conn)
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=env["company_id"], framework="sox",
+        ))
+        assert is_error(result)
+        assert _att_audit_count(conn) == before
+
+    def test_malformed_date_refuses_without_writes(self, conn, env):
+        before = _att_audit_count(conn)
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=env["company_id"], framework="general", as_of_date="not-a-date",
+        ))
+        assert is_error(result)
+        assert _att_audit_count(conn) == before
+
+    def test_as_of_date_echoed(self, conn, env):
+        result = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=env["company_id"], framework="general", as_of_date="2026-09-01",
+        ))
+        assert is_ok(result), result
+        assert result["as_of_date"] == "2026-09-01"
+
+
+class TestAttestationIdempotent:
+    def test_two_calls_identical_and_read_only(self, conn, env):
+        cid = env["company_id"]
+        eid = env["employee_id"]
+        _att_make_control(conn, cid, "Stable Control", result="effective", evidence="EV-STABLE-1")
+        pid = _att_make_policy(conn, cid, "Stable Policy")
+        _att_ack(conn, cid, pid, eid, "Jane Auditor")
+        before = _att_audit_count(conn)
+        first = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="general", as_of_date="2026-09-15",
+        ))
+        second = call_action(mod.compliance_attestation_report, conn, ns(
+            company_id=cid, framework="general", as_of_date="2026-09-15",
+        ))
+        assert is_ok(first), first
+        assert is_ok(second), second
+        assert first == second
+        assert _att_audit_count(conn) == before

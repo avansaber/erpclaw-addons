@@ -218,6 +218,54 @@ company (ADR-0015); a named-but-missing account hard-errors and never falls
 through to another account. Re-importing a file is idempotent (duplicate lines
 skipped via the `external_id` UNIQUE). The `integration-bank-reconciliation-summary` reports `difference` as the statement balance minus the ledger balance, returning null `statement_balance`/`difference` with `statement_balance_missing: true` when the statement carries no closing balance.
 
+### QuickBooks Trial Balance Import: Staging Only (v1) (2 actions)
+Local-only staging for a caller-supplied trial balance (`--records-json` array,
+never a file path). Owns `integration_quickbooks_batch`,
+`integration_quickbooks_line`. Never calls QuickBooks, stores no credentials,
+and never posts staged rows to the general ledger (`posted: false` always). Status is `verified` only when debit total equals credit total, otherwise
+`out_of_balance`. Retrieval is company-scoped: a foreign-company batch reads as not found. Zero network calls: no external API calls, no telemetry, no cloud dependencies.
+
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `integration-import-quickbooks-trial-balance` | `--company-id --source-label --as-of-date --records-json` | |
+| `integration-get-quickbooks-import` | `--batch-id --company-id` | |
+
+Each record needs `account_name` plus exact decimal `debit`/`credit` strings (nonnegative, at most one side positive); amounts are stored as two-place TEXT via Decimal, never float.
+
+### Offline Bank Feed Import: Staging Only (v1) (1 action)
+Local-only staging for a caller-supplied bank-feed CSV export from NetSuite
+or Xero (`--file` local path, never a remote fetch). Owns
+`integration_offline_bank_batch`, `integration_offline_bank_line`. Never
+signs in remotely, calls neither provider, and never writes staged rows to
+the general ledger (`posted: false` always). Every row is validated before
+anything is written, so a refused file leaves no batch, line, or audit rows.
+
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `integration-import-offline-bank-feed` / `integration-import-bank-feed` | `--company-id --provider --account-ref --file` | `--csv-path` (alias for `--file`) |
+
+`--provider`: `netsuite` | `xero`. Explicit provider column mapping
+(headers match case-insensitively):
+
+| Canonical field | NetSuite header | Xero header |
+|-----------------|-----------------|-------------|
+| date | Date | Date |
+| description | Description | Description |
+| external ID | Transaction ID | Reference |
+| exact amount | Amount | Amount |
+
+Amounts are signed exact decimals stored as two-place TEXT via Decimal, never
+float. `debit_total` is the absolute sum of negative (money-out) amounts and
+`credit_total` the sum of positive (money-in) amounts. Lines carry the
+1-based file order in `sequence` and always read back in that order.
+Re-importing an identical provider plus account plus external ID skips the
+duplicate line (counted as `skipped_duplicate_count`) instead of staging it
+twice; a fully-duplicate file returns the existing batch receipt. Refusals
+(unknown provider, unsafe path, missing company, missing required columns,
+duplicate external IDs inside the file, malformed dates, invalid Decimal
+money) write nothing. Zero network calls: no external API calls, no
+telemetry, no cloud dependencies.
+
 ### Quick Command Reference
 | User Says | Action |
 |-----------|--------|
@@ -225,6 +273,7 @@ skipped via the `external_id` UNIQUE). The `integration-bank-reconciliation-summ
 | "Auto-match the statement" | `integration-auto-match-bank-statement` |
 | "Show unmatched bank lines" | `integration-unmatched-bank-lines` |
 | "Reconcile the bank account" | `integration-bank-reconciliation-summary` |
+| "Import my offline NetSuite/Xero bank feed" | `integration-import-offline-bank-feed` with `--provider --account-ref --file` |
 | "Connect to Shopify" | `integration-add-connector` with `--platform shopify` |
 | "Set up API key" | `integration-add-connector-credential` |
 | "Map fields" | `integration-add-field-mapping` |
@@ -240,9 +289,9 @@ skipped via the `external_id` UNIQUE). The `integration-bank-reconciliation-summ
 
 ## Technical Details (Tier 3)
 
-**Tables owned (20):** integration_connector, integration_credential, integration_webhook, integration_sync, integration_sync_schedule, integration_field_mapping, integration_entity_map, integration_transform_rule, integration_sync_error, connv2_booking_connector, connv2_booking_sync_log, connv2_delivery_connector, connv2_delivery_order, connv2_realestate_connector, connv2_realestate_lead, connv2_financial_connector, connv2_productivity_connector, bank_statement, bank_statement_line, bank_match_rule (M2 — defined in the foundation schema, written only here)
+**Tables owned (24):** integration_connector, integration_credential, integration_webhook, integration_sync, integration_sync_schedule, integration_field_mapping, integration_entity_map, integration_transform_rule, integration_sync_error, connv2_booking_connector, connv2_booking_sync_log, connv2_delivery_connector, connv2_delivery_order, connv2_realestate_connector, connv2_realestate_lead, connv2_financial_connector, connv2_productivity_connector, bank_statement, bank_statement_line, bank_match_rule (M2, defined in the foundation schema and written only here), integration_quickbooks_batch, integration_quickbooks_line (QuickBooks trial balance staging v1), integration_offline_bank_batch, integration_offline_bank_line (offline NetSuite/Xero bank feed staging v1)
 
-**Script:** `scripts/db_query.py` routes to 10 domain modules: connectors.py, sync.py, mappings.py, booking.py, delivery.py, realestate.py, financial.py, productivity.py, connv2_reports.py, bank.py (+ `parsers/` for ofx/camt053/mt940/bai2)
+**Script:** `scripts/db_query.py` routes to 12 domain modules: connectors.py, sync.py, mappings.py, booking.py, delivery.py, realestate.py, financial.py, productivity.py, connv2_reports.py, bank.py, quickbooks.py, offline_bank_feed.py (+ `parsers/` for ofx/camt053/mt940/bai2)
 
 **Data conventions:** Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601), Booleans = INTEGER (0/1)
 

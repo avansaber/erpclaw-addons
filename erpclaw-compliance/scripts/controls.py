@@ -36,6 +36,13 @@ VALID_DEFICIENCY_TYPES = ("significant", "material_weakness", "control_deficienc
 VALID_COMPLIANCE_TYPES = ("filing", "certification", "renewal", "inspection", "report", "training", "other")
 VALID_RECURRENCES = ("none", "monthly", "quarterly", "semi_annual", "annual")
 VALID_CALENDAR_STATUSES = ("upcoming", "in_progress", "completed", "overdue", "waived")
+VALID_FRAMEWORKS = ("hipaa", "ferpa", "general")
+ATTESTATION_DISCLAIMER = (
+    "This is a records-readiness report based on recorded control tests, "
+    "policies, acknowledgments, and evidence references. It is not legal "
+    "certification of HIPAA, FERPA, or any compliance posture, "
+    "nor an external auditor opinion."
+)
 
 
 def _validate_company(conn, company_id):
@@ -527,6 +534,160 @@ def compliance_dashboard(conn, args):
 
 
 # ---------------------------------------------------------------------------
+# 13. attestation-report (read-only)
+# ---------------------------------------------------------------------------
+def compliance_attestation_report(conn, args):
+    company_id = getattr(args, "company_id", None)
+    framework = getattr(args, "framework", None)
+    as_of_raw = getattr(args, "as_of_date", None)
+    _validate_company(conn, company_id)
+    if not framework:
+        err("--framework is required")
+    if framework not in VALID_FRAMEWORKS:
+        err("Invalid framework: %s. Must be one of: %s" % (framework, ", ".join(VALID_FRAMEWORKS)))
+    if as_of_raw is None or (isinstance(as_of_raw, str) and as_of_raw.strip() == ""):
+        as_of_date = _today_iso()
+    else:
+        try:
+            as_of_date = date.fromisoformat(str(as_of_raw).strip()).isoformat()
+        except ValueError:
+            try:
+                as_of_date = datetime.fromisoformat(str(as_of_raw).strip()).date().isoformat()
+            except ValueError:
+                err("Invalid --as-of-date: %s. Use YYYY-MM-DD" % (as_of_raw,))
+    ct = Table("control_test")
+    q = Q.from_(ct).select(ct.id, ct.control_name, ct.test_result, ct.test_date, ct.tester, ct.evidence).where(ct.company_id == P()).orderby(ct.control_name).orderby(ct.id)
+    control_rows = conn.execute(q.get_sql(), (company_id,)).fetchall()
+    pol = Table("policy")
+    qp = Q.from_(pol).select(pol.id, pol.title, pol.requires_acknowledgment).where(pol.company_id == P()).where(pol.status == P()).orderby(pol.title).orderby(pol.id)
+    policy_rows = conn.execute(qp.get_sql(), (company_id, "published")).fetchall()
+    emp = Table("employee")
+    qe = Q.from_(emp).select(emp.id, emp.full_name).where(emp.company_id == P()).orderby(emp.id)
+    employee_rows = conn.execute(qe.get_sql(), (company_id,)).fetchall()
+    ack = Table("policy_acknowledgment")
+    qa = Q.from_(ack).select(ack.policy_id, ack.employee_id, ack.employee_name).where(ack.company_id == P())
+    ack_rows = conn.execute(qa.get_sql(), (company_id,)).fetchall()
+    controls_by_result = {}
+    for r in control_rows:
+        key = r[2] if r[2] else "not_tested"
+        controls_by_result[key] = controls_by_result.get(key, 0) + 1
+    def _missing_evidence(value):
+        return value is None or (isinstance(value, str) and value.strip() == "")
+    controls_missing_evidence = 0
+    for r in control_rows:
+        if _missing_evidence(r[5]):
+            controls_missing_evidence += 1
+    tested_rows = [r for r in control_rows if (r[2] if r[2] else "not_tested") != "not_tested"]
+    tested_missing = 0
+    for r in tested_rows:
+        if _missing_evidence(r[5]):
+            tested_missing += 1
+    has_ineffective = False
+    for r in tested_rows:
+        if r[2] == "ineffective":
+            has_ineffective = True
+            break
+    required_policy_ids = []
+    for r in policy_rows:
+        try:
+            flag = int(r[2] or 0)
+        except (TypeError, ValueError):
+            flag = 1 if str(r[2]) == "1" else 0
+        if flag == 1:
+            required_policy_ids.append(r[0])
+    required_set = set(required_policy_ids)
+    employees = [(r[0], r[1] if r[1] else "") for r in employee_rows]
+    filtered_acks = [r for r in ack_rows if r[0] in required_set]
+    acked_id_set = set()
+    acked_name_set = set()
+    for r in filtered_acks:
+        pid = r[0]
+        eid = r[1]
+        ename = (r[2] or "").strip() if r[2] else ""
+        if eid:
+            acked_id_set.add((pid, eid))
+        if ename:
+            acked_name_set.add((pid, ename))
+    missing_pairs = []
+    for pid in required_policy_ids:
+        for eid, full in employees:
+            if (pid, eid) in acked_id_set:
+                continue
+            if (pid, (full or "").strip()) in acked_name_set:
+                continue
+            missing_pairs.append({"policy_id": pid, "employee_id": eid, "employee_name": full})
+    acknowledgment_gaps = len(missing_pairs)
+    if required_policy_ids and employees:
+        employees_required = len(employees)
+    elif required_policy_ids:
+        employees_required = 0
+    else:
+        employees_required = 0
+    required_acknowledgments = len(required_policy_ids) * len(employees)
+    acknowledgments_recorded = len(filtered_acks)
+    gap_codes = []
+    if not tested_rows:
+        gap_codes.append("no_tested_controls")
+    if tested_missing > 0:
+        gap_codes.append("missing_control_evidence")
+    if has_ineffective:
+        gap_codes.append("ineffective_control_present")
+    if acknowledgment_gaps > 0:
+        gap_codes.append("missing_policy_acknowledgment")
+    if tested_rows and not gap_codes:
+        readiness = "evidence_complete"
+    else:
+        readiness = "gaps_present"
+        if not gap_codes:
+            gap_codes.append("no_tested_controls")
+    evidence_rows = []
+    for r in control_rows:
+        evidence_rows.append({
+            "control_test_id": r[0],
+            "id": r[0],
+            "control_name": r[1],
+            "test_result": r[2],
+            "result": r[2],
+            "test_date": r[3],
+            "tester": r[4],
+            "evidence_reference": r[5],
+            "evidence": r[5],
+        })
+    ok({
+        "company_id": company_id,
+        "framework": framework,
+        "as_of_date": as_of_date,
+        "report_date": as_of_date,
+        "readiness": readiness,
+        "readiness_status": readiness,
+        "gap_codes": gap_codes,
+        "gaps": gap_codes,
+        "controls_by_result": dict(controls_by_result),
+        "controls_by_test_result": dict(controls_by_result),
+        "control_tests_by_result": dict(controls_by_result),
+        "total_controls": len(control_rows),
+        "tested_controls": len(tested_rows),
+        "controls_tested": len(tested_rows),
+        "controls_missing_evidence": controls_missing_evidence,
+        "missing_evidence_count": controls_missing_evidence,
+        "active_policies": len(policy_rows),
+        "active_policy_count": len(policy_rows),
+        "policies_requiring_acknowledgment": len(required_policy_ids),
+        "total_employees": len(employees),
+        "employees_required_to_acknowledge": employees_required,
+        "employees_required": employees_required,
+        "required_acknowledgments": required_acknowledgments,
+        "acknowledgments_recorded": acknowledgments_recorded,
+        "acknowledgment_count": acknowledgments_recorded,
+        "acknowledgment_gaps": acknowledgment_gaps,
+        "missing_acknowledgment_count": acknowledgment_gaps,
+        "evidence": evidence_rows,
+        "evidence_rows": evidence_rows,
+        "disclaimer": ATTESTATION_DISCLAIMER,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Action Router
 # ---------------------------------------------------------------------------
 ACTIONS = {
@@ -542,4 +703,5 @@ ACTIONS = {
     "compliance-complete-calendar-item": complete_calendar_item,
     "compliance-overdue-items-report": overdue_items_report,
     "compliance-dashboard": compliance_dashboard,
+    "compliance-attestation-report": compliance_attestation_report,
 }

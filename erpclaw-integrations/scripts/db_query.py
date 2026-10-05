@@ -3,7 +3,8 @@
 
 Integration connectors: manage connector configs, field mappings, sync logs,
 and webhook registrations for external platforms.
-Routes all actions across 9 domain modules (3 core + 6 connectors-v2).
+Routes all actions across 12 domain modules (3 core + 6 connectors-v2
++ bank statements + QuickBooks staging + offline bank feed).
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -44,6 +45,8 @@ from financial import ACTIONS as FINANCIAL_ACTIONS
 from productivity import ACTIONS as PRODUCTIVITY_ACTIONS
 from connv2_reports import ACTIONS as CONNV2_REPORTS_ACTIONS
 from bank import ACTIONS as BANK_ACTIONS
+from quickbooks import ACTIONS as QUICKBOOKS_ACTIONS
+from offline_bank_feed import ACTIONS as OFFLINE_BANK_FEED_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -64,6 +67,8 @@ ACTIONS.update(PRODUCTIVITY_ACTIONS)
 connv2_reports_filtered = {k: v for k, v in CONNV2_REPORTS_ACTIONS.items() if k != "status"}
 ACTIONS.update(connv2_reports_filtered)
 ACTIONS.update(BANK_ACTIONS)
+ACTIONS.update(QUICKBOOKS_ACTIONS)
+ACTIONS.update(OFFLINE_BANK_FEED_ACTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +257,16 @@ def main():
     parser.add_argument("--priority")
     parser.add_argument("--as-of")
     parser.add_argument("--user-id")
+
+    # Offline bank feed import domain (v1, local NetSuite/Xero CSV staging)
+    parser.add_argument("--provider")
+    parser.add_argument("--csv-path")
+
+    # QuickBooks trial balance import domain (v1, local staging only)
+    parser.add_argument("--source-label")
+    parser.add_argument("--as-of-date")
+    parser.add_argument("--records-json")
+    parser.add_argument("--batch-id")
 
     args = parser.parse_args()
     action = args.action

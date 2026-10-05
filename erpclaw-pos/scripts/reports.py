@@ -7,7 +7,7 @@ db_query.py router.
 """
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 import importlib.util
@@ -463,10 +463,341 @@ def cashier_performance(conn, args):
 # ---------------------------------------------------------------------------
 # Action Router
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# retail-volume-measurement
+# ---------------------------------------------------------------------------
+MEASUREMENT_SCOPE = "recorded_local_pos_rows"
+
+MEASUREMENT_NOTE = (
+    "Measured from already recorded local POS rows for one company and "
+    "date range. This report is not a throughput guarantee."
+)
+
+_MEASURE_TABLES = ("pos_transaction", "pos_transaction_item", "pos_payment")
+
+
+def _measure_date(value, flag):
+    try:
+        datetime.strptime(str(value), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        err(f"Invalid {flag} {value!r}; expected YYYY-MM-DD")
+    return str(value)
+
+
+def _measure_unavailable(company_id, from_date, to_date, location_id, missing):
+    ok({
+        "available": False,
+        "unavailable": True,
+        "measurement_scope": MEASUREMENT_SCOPE,
+        "company_id": company_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "location_id": location_id,
+        "reason": ("Retail volume measurement unavailable: "
+                   f"POS table(s) not installed: {', '.join(missing)}"),
+        "note": MEASUREMENT_NOTE,
+    })
+
+
+def _measure_missing_tables(conn):
+    try:
+        from erpclaw_lib import seam as _seam
+        return [t for t in _MEASURE_TABLES if not _seam.table_exists(t)]
+    except Exception:
+        pass
+    missing = []
+    for _t in _MEASURE_TABLES:
+        try:
+            conn.execute(
+                Q.from_(Table(_t)).select(Field("id")).limit(1).get_sql()
+            ).fetchone()
+        except Exception:
+            missing.append(_t)
+    return missing
+
+
+def _measure_location(conn, company_id, location_id):
+    """Resolve an optional location id to a POS scoping rule.
+
+    A location is a POS profile id; a warehouse id is also accepted and
+    scopes through the profiles parked in that warehouse. Returns
+    (mode, display_name) where mode is "profile", "warehouse", or None.
+    Refuses unknown locations and locations owned by another company.
+    """
+    if not location_id:
+        return None, None
+    prof = Table("pos_profile")
+    row = conn.execute(
+        Q.from_(prof).select(prof.id, prof.company_id, prof.name)
+        .where(prof.id == P()).get_sql(), (location_id,)).fetchone()
+    if row is not None:
+        if row["company_id"] != company_id:
+            err(f"Location {location_id} does not belong to company {company_id}")
+        return "profile", row["name"]
+    wh_row = None
+    try:
+        from erpclaw_lib import seam as _seam2
+        has_wh = _seam2.table_exists("warehouse")
+    except Exception:
+        has_wh = False
+    if has_wh:
+        wh_row = conn.execute(
+            Q.from_(Table("warehouse")).select(Field("id"), Field("company_id"))
+            .where(Field("id") == P()).get_sql(), (location_id,)).fetchone()
+    if wh_row is None:
+        err(f"Location {location_id} not found")
+    if wh_row["company_id"] != company_id:
+        err(f"Location {location_id} does not belong to company {company_id}")
+    return "warehouse", None
+
+
+def retail_volume_measurement(conn, args):
+    """Deterministic read-only measurement of recorded POS sales volume.
+
+    One company and one inclusive date range, with an optional location
+    id. Reports observed volume and exact money from already recorded
+    rows, including transaction count, line count, units, gross sales, discounts,
+    tax, refunds, net sales, and the first/last timestamps, with
+    deterministically sorted per-day and per-location breakdowns.
+    Reads only; never writes. All SQL is PyPika with bound parameters;
+    all quantities and money are Decimal.
+    """
+    company_id = getattr(args, "company_id", None)
+    from_date = getattr(args, "from_date", None) or getattr(args, "start_date", None)
+    to_date = getattr(args, "to_date", None) or getattr(args, "end_date", None)
+    location_id = (getattr(args, "location_id", None)
+                   or getattr(args, "pos_profile_id", None)
+                   or getattr(args, "warehouse_id", None))
+
+    if not company_id:
+        err("--company-id is required")
+    if not from_date:
+        err("--from-date is required")
+    if not to_date:
+        err("--to-date is required")
+    from_date = _measure_date(from_date, "--from-date")
+    to_date = _measure_date(to_date, "--to-date")
+    if from_date > to_date:
+        err(f"Invalid date range: --from-date {from_date} is after --to-date {to_date}")
+
+    company = conn.execute(
+        Q.from_(Table("company")).select(Field("id"))
+        .where(Field("id") == P()).get_sql(), (company_id,)).fetchone()
+    if not company:
+        err(f"Company {company_id} not found")
+
+    missing = _measure_missing_tables(conn)
+    if missing:
+        _measure_unavailable(company_id, from_date, to_date, location_id, missing)
+
+    location_mode, location_name = _measure_location(conn, company_id, location_id)
+
+    pt = Table("pos_transaction")
+    sess = Table("pos_session")
+
+    def _scoped(query, params, with_session):
+        query = (query.where(pt.company_id == P())
+                 .where(fn.Date(pt.created_at) >= P())
+                 .where(fn.Date(pt.created_at) <= P())
+                 .where(pt.status.isin(["submitted", "returned"])))
+        params = params + [company_id, from_date, to_date]
+        if location_mode == "profile":
+            query = query.where(sess.pos_profile_id == P())
+            params = params + [location_id]
+        elif location_mode == "warehouse":
+            wprof = Table("pos_profile")
+            if not with_session:
+                query = query.join(sess).on(pt.pos_session_id == sess.id)
+            query = (query.join(wprof).on(sess.pos_profile_id == wprof.id)
+                     .where(wprof.warehouse_id == P()))
+            params = params + [location_id]
+        return query, params
+
+    tq, tparams = _scoped(
+        Q.from_(pt).join(sess).on(pt.pos_session_id == sess.id)
+        .select(pt.id, pt.created_at, pt.subtotal, pt.discount_amount,
+                pt.tax_amount, pt.grand_total, pt.status,
+                sess.pos_profile_id),
+        [], True)
+    txn_rows = conn.execute(tq.get_sql(), tparams).fetchall()
+
+    ti = Table("pos_transaction_item")
+    lq, lparams = _scoped(
+        Q.from_(ti).join(pt).on(ti.pos_transaction_id == pt.id)
+        .join(sess).on(pt.pos_session_id == sess.id)
+        .select(ti.qty, ti.amount, ti.pos_transaction_id,
+                pt.status, pt.grand_total),
+        [], True)
+    line_rows = conn.execute(lq.get_sql(), lparams).fetchall()
+
+    # Money is exact text: classify in Python with Decimal, never float.
+    # A returned original stays a sale; only the signed return document
+    # (including -0.00) counts as the return, reported as a positive figure.
+    sales = [r for r in txn_rows
+             if not _is_return_document(r["status"], r["grand_total"])]
+    returns = [r for r in txn_rows
+               if _is_return_document(r["status"], r["grand_total"])]
+
+    sale_ids = {r["id"] for r in sales}
+    day_of = {r["id"]: str(r["created_at"])[:10] for r in txn_rows}
+    prof_of = {r["id"]: r["pos_profile_id"] for r in txn_rows}
+
+    gross = _round(sum((_dec(r["subtotal"]) for r in sales), Decimal("0")))
+    discounts = _round(sum((_dec(r["discount_amount"]) for r in sales), Decimal("0")))
+    tax = _round(sum((_dec(r["tax_amount"]) for r in sales), Decimal("0")))
+    refunds = _round(sum((abs(_dec(r["grand_total"])) for r in returns), Decimal("0")))
+    net = _round(gross - discounts + tax - refunds)
+
+    sale_lines = [r for r in line_rows
+                  if r["pos_transaction_id"] in sale_ids]
+    line_count = len(sale_lines)
+    units = _round(sum((_dec(r["qty"]) for r in sale_lines), Decimal("0")))
+
+    stamps = sorted(str(r["created_at"]) for r in sales)
+    if not stamps:
+        stamps = sorted(str(r["created_at"]) for r in returns)
+    first_ts = stamps[0] if stamps else None
+    last_ts = stamps[-1] if stamps else None
+
+    day_stats = {}
+    for r in sales:
+        entry = day_stats.setdefault(
+            day_of[r["id"]],
+            {"n": 0, "lines": 0, "units": Decimal("0"),
+             "gross": Decimal("0"), "discount": Decimal("0"), "tax": Decimal("0"), "ref": Decimal("0")})
+        entry["n"] += 1
+        entry["gross"] += _dec(r["subtotal"])
+        entry["discount"] += _dec(r["discount_amount"])
+        entry["tax"] += _dec(r["tax_amount"])
+    for r in returns:
+        entry = day_stats.setdefault(
+            day_of[r["id"]],
+            {"n": 0, "lines": 0, "units": Decimal("0"),
+             "gross": Decimal("0"), "discount": Decimal("0"), "tax": Decimal("0"), "ref": Decimal("0")})
+        entry["ref"] += abs(_dec(r["grand_total"]))
+    for r in sale_lines:
+        entry = day_stats[day_of[r["pos_transaction_id"]]]
+        entry["lines"] += 1
+        entry["units"] += _dec(r["qty"])
+    by_day = []
+    for day in sorted(day_stats):
+        entry = day_stats[day]
+        day_gross = _round(entry["gross"])
+        day_discount = _round(entry["discount"])
+        day_tax = _round(entry["tax"])
+        day_ref = _round(entry["ref"])
+        by_day.append({
+            "date": day,
+            "day": day,
+            "transaction_count": entry["n"],
+            "line_count": entry["lines"],
+            "units": str(_round(entry["units"])),
+            "gross_sales": str(day_gross),
+            "refunds": str(day_ref),
+            "net_sales": str(_round(day_gross - day_discount + day_tax - day_ref)),
+        })
+
+    prows = conn.execute(
+        Q.from_(Table("pos_profile")).select(Field("id"), Field("name"))
+        .where(Field("company_id") == P()).get_sql(), (company_id,)).fetchall()
+    names = {r["id"]: r["name"] for r in prows}
+    loc_stats = {}
+    for r in sales:
+        pid = prof_of[r["id"]]
+        entry = loc_stats.setdefault(
+            pid,
+            {"n": 0, "lines": 0, "units": Decimal("0"),
+             "gross": Decimal("0"), "discount": Decimal("0"), "tax": Decimal("0"), "ref": Decimal("0")})
+        entry["n"] += 1
+        entry["gross"] += _dec(r["subtotal"])
+        entry["discount"] += _dec(r["discount_amount"])
+        entry["tax"] += _dec(r["tax_amount"])
+    for r in returns:
+        pid = prof_of[r["id"]]
+        entry = loc_stats.setdefault(
+            pid,
+            {"n": 0, "lines": 0, "units": Decimal("0"),
+             "gross": Decimal("0"), "discount": Decimal("0"), "tax": Decimal("0"), "ref": Decimal("0")})
+        entry["ref"] += abs(_dec(r["grand_total"]))
+    for r in sale_lines:
+        entry = loc_stats[prof_of[r["pos_transaction_id"]]]
+        entry["lines"] += 1
+        entry["units"] += _dec(r["qty"])
+    by_location = []
+    for pid in sorted(loc_stats, key=lambda p: str(p)):
+        entry = loc_stats[pid]
+        loc_gross = _round(entry["gross"])
+        loc_discount = _round(entry["discount"])
+        loc_tax = _round(entry["tax"])
+        loc_ref = _round(entry["ref"])
+        by_location.append({
+            "location_id": pid,
+            "location_name": names.get(pid),
+            "transaction_count": entry["n"],
+            "line_count": entry["lines"],
+            "units": str(_round(entry["units"])),
+            "gross_sales": str(loc_gross),
+            "refunds": str(loc_ref),
+            "net_sales": str(_round(loc_gross - loc_discount + loc_tax - loc_ref)),
+        })
+
+    result = {
+        "available": True,
+        "measurement_scope": MEASUREMENT_SCOPE,
+        "company_id": company_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "location_id": location_id,
+        "location_name": location_name,
+        "transaction_count": len(sales),
+        "total_transactions": len(sales),
+        "line_count": line_count,
+        "total_lines": line_count,
+        "units": str(units),
+        "total_units": str(units),
+        "total_quantity": str(units),
+        "gross_sales": str(gross),
+        "total_gross": str(gross),
+        "discounts": str(discounts),
+        "total_discounts": str(discounts),
+        "discount_total": str(discounts),
+        "tax": str(tax),
+        "total_tax": str(tax),
+        "tax_total": str(tax),
+        "refunds": str(refunds),
+        "total_refunds": str(refunds),
+        "refund_total": str(refunds),
+        "total_returns": str(refunds),
+        "refund_count": len(returns),
+        "return_count": len(returns),
+        "net_sales": str(net),
+        "total_net": str(net),
+        "net_total": str(net),
+        "first_timestamp": first_ts,
+        "first_sale_at": first_ts,
+        "last_timestamp": last_ts,
+        "last_sale_at": last_ts,
+        "by_day": by_day,
+        "days": by_day,
+        "by_location": by_location,
+        "locations": by_location,
+        "throughput_guarantee": False,
+        "note": MEASUREMENT_NOTE,
+    }
+    ok(result)
+
+
+# ---------------------------------------------------------------------------
+# Action Router
+# ---------------------------------------------------------------------------
 ACTIONS = {
     "pos-cash-reconciliation": cash_reconciliation,
     "pos-daily-report": daily_report,
     "pos-hourly-sales": hourly_sales,
     "pos-top-items": top_items,
     "pos-cashier-performance": cashier_performance,
+    "pos-retail-volume-measurement": retail_volume_measurement,
+    "pos-retail-volume": retail_volume_measurement,
+    "pos-retail-volume-report": retail_volume_measurement,
+    "pos-measure-retail-volume": retail_volume_measurement,
 }

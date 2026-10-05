@@ -51,6 +51,7 @@ The foundation skill (erpclaw) keeps the runtime-essential parts of the OS:
 | Improvement loop | `os-log-improvement`, `os-list-improvements`, `os-review-improvement` |
 | Gap analysis + research | `os-detect-gaps`, `os-detect-schema-divergence`, `os-detect-stubs`, `os-suggest-modules`, `os-research-business-rule`, `os-get-implementation-guide` |
 | Robustness audit | `os-run-audit` |
+| Generated module validation | `os-validate-generated-module` |
 | Semantic checks | `os-semantic-check`, `os-semantic-rules-list` |
 | Web dashboard provisioning | `os-setup-web-dashboard` |
 | Status | `os-status` |

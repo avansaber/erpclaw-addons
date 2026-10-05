@@ -2,7 +2,7 @@
 """ERPClaw Compliance -- db_query.py (unified router)
 
 Compliance, audit, risk, and policy management for ERPClaw.
-Routes all actions across 4 domain modules: audit, risk, controls, policy.
+Routes all actions across 5 domain modules: audit, risk, controls, policy, screening.
 
 Usage: python3 db_query.py --action <action-name> [--flags ...]
 Output: JSON to stdout, exit 0 on success, exit 1 on error.
@@ -38,6 +38,7 @@ from audit import ACTIONS as AUDIT_ACTIONS
 from risk import ACTIONS as RISK_ACTIONS
 from controls import ACTIONS as CONTROLS_ACTIONS
 from policy import ACTIONS as POLICY_ACTIONS
+from screening import ACTIONS as SCREENING_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -50,6 +51,7 @@ ACTIONS.update(AUDIT_ACTIONS)
 ACTIONS.update(RISK_ACTIONS)
 ACTIONS.update(CONTROLS_ACTIONS)
 ACTIONS.update(POLICY_ACTIONS)
+ACTIONS.update(SCREENING_ACTIONS)
 
 
 def main():
@@ -111,6 +113,8 @@ def main():
     parser.add_argument("--evidence")
     parser.add_argument("--deficiency-type")
     parser.add_argument("--next-test-date")
+    parser.add_argument("--framework")
+    parser.add_argument("--as-of-date")
 
     # -- Calendar domain --
     parser.add_argument("--calendar-item-id")
@@ -130,6 +134,15 @@ def main():
     parser.add_argument("--employee-name")
     parser.add_argument("--employee-id")
     parser.add_argument("--ip-address")
+
+    # Exclusion screening domain
+    parser.add_argument("--party-type")
+    parser.add_argument("--party-id")
+    parser.add_argument("--candidate-identifier")
+    parser.add_argument("--list-source")
+    parser.add_argument("--list-version")
+    parser.add_argument("--excluded-identifiers")
+    parser.add_argument("--evidence-reference")
 
     args, unknown = parser.parse_known_args()
     check_unknown_args(parser, unknown)

@@ -26,6 +26,7 @@ Actions tested:
                 integration-error-rate-report
 """
 from decimal import Decimal
+import json
 
 import pytest
 from integration_helpers import (
@@ -888,3 +889,187 @@ class TestConnV2Reports:
         assert result["count"] == 5
         for row in result["rows"]:
             assert "error_rate_pct" in row
+
+
+# =============================================================================
+# QuickBooks trial balance import (v1): local staging only
+# =============================================================================
+
+def _qb_counts(conn):
+    batch = conn.execute(
+        "SELECT COUNT(*) FROM integration_quickbooks_batch").fetchone()[0]
+    lines = conn.execute(
+        "SELECT COUNT(*) FROM integration_quickbooks_line").fetchone()[0]
+    audits = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    return (batch, lines, audits)
+
+
+class TestQuickbooksTrialBalanceImport:
+    def test_import_quickbooks_trial_balance_verified(self, conn, env):
+        records = json.dumps([
+            {"account_name": "Cash", "debit": "500.00", "credit": "0.00"},
+            {"account_name": "Revenue", "debit": "0.00", "credit": "500.00"},
+        ])
+        result = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"],
+            source_label="March close",
+            as_of_date="2026-03-31",
+            records_json=records,
+        ))
+        assert is_ok(result), result
+        assert result["batch_id"]
+        assert result["line_count"] == 2
+        assert result["debit_total"] == "500.00"
+        assert result["credit_total"] == "500.00"
+        assert result["difference"] == "0.00"
+        assert result["batch_status"] == "verified"
+        assert result["document_status"] == "verified"
+        assert result["posted"] is False
+
+        stored = conn.execute(
+            "SELECT source, source_label, as_of_date, debit_total,"
+            " credit_total, difference, status FROM integration_quickbooks_batch"
+            " WHERE id = ?", (result["batch_id"],)).fetchone()
+        assert tuple(stored) == ("quickbooks", "March close", "2026-03-31",
+                                 "500.00", "500.00", "0.00", "verified")
+        assert (Decimal(stored["debit_total"]) - Decimal(stored["credit_total"])
+                == Decimal(stored["difference"]))
+
+    def test_import_quickbooks_trial_balance_out_of_balance(self, conn, env):
+        records = json.dumps([
+            {"account_name": "Cash", "debit": "500.00", "credit": "0.00"},
+            {"account_name": "Revenue", "debit": "0.00", "credit": "499.99"},
+        ])
+        result = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"],
+            source_label="Off by a cent",
+            as_of_date="2026-03-31",
+            records_json=records,
+        ))
+        assert is_ok(result), result
+        assert result["debit_total"] == "500.00"
+        assert result["credit_total"] == "499.99"
+        assert result["difference"] == "0.01"
+        assert result["batch_status"] == "out_of_balance"
+        assert result["document_status"] == "out_of_balance"
+        assert result["posted"] is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM gl_entry").fetchone()[0] == 0
+
+    def test_import_quickbooks_trial_balance_fractional(self, conn, env):
+        records = json.dumps([
+            {"account_name": "Cash", "account_number": "1010",
+             "debit": "100.10", "credit": "0.00"},
+            {"account_name": "Petty cash", "debit": "10.5", "credit": "0.00"},
+            {"account_name": "Revenue", "debit": "0.00", "credit": "110.60"},
+        ])
+        result = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"],
+            source_label="Fractional",
+            as_of_date="2026-03-31",
+            records_json=records,
+        ))
+        assert is_ok(result), result
+        assert result["debit_total"] == "110.60"
+        assert result["credit_total"] == "110.60"
+        assert result["difference"] == "0.00"
+        assert result["batch_status"] == "verified"
+        stored = [tuple(row) for row in conn.execute(
+            "SELECT account_name, account_number, debit, credit, sequence"
+            " FROM integration_quickbooks_line WHERE batch_id = ?"
+            " ORDER BY sequence", (result["batch_id"],)).fetchall()]
+        assert stored == [
+            ("Cash", "1010", "100.10", "0.00", 1),
+            ("Petty cash", None, "10.50", "0.00", 2),
+            ("Revenue", None, "0.00", "110.60", 3),
+        ]
+
+    def test_import_quickbooks_trial_balance_refusals(self, conn, env):
+        before = _qb_counts(conn)
+        bad_cases = [
+            "{not json",
+            "[]",
+            json.dumps([{"account_name": "Cash",
+                         "debit": "-5.00", "credit": "0.00"}]),
+            json.dumps([{"account_name": "Cash",
+                         "debit": "10.00", "credit": "10.00"}]),
+            json.dumps([{"debit": "1.00", "credit": "0.00"}]),
+            json.dumps([{"account_name": "   ",
+                         "debit": "1.00", "credit": "0.00"}]),
+            json.dumps("just a string"),
+        ]
+        for records in bad_cases:
+            result = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+                company_id=env["company_id"],
+                source_label="Bad batch",
+                as_of_date="2026-03-31",
+                records_json=records,
+            ))
+            assert is_error(result), (records, result)
+            assert _qb_counts(conn) == before, (records, result)
+
+    def test_import_quickbooks_trial_balance_refuses_bad_headers(self, conn, env):
+        before = _qb_counts(conn)
+        good = json.dumps([{"account_name": "Cash",
+                            "debit": "1.00", "credit": "0.00"}])
+        missing_label = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"], as_of_date="2026-03-31",
+            records_json=good,
+        ))
+        assert is_error(missing_label), missing_label
+        bad_date = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"], source_label="Bad date",
+            as_of_date="31-03-2026", records_json=good,
+        ))
+        assert is_error(bad_date), bad_date
+        unknown_company = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id="no-such-company", source_label="Bad company",
+            as_of_date="2026-03-31", records_json=good,
+        ))
+        assert is_error(unknown_company), unknown_company
+        assert _qb_counts(conn) == before
+
+    def test_get_quickbooks_import_company_scoped(self, conn, env):
+        records = json.dumps([
+            {"account_name": "Cash", "debit": "500.00", "credit": "0.00"},
+            {"account_name": "Revenue", "debit": "0.00", "credit": "500.00"},
+        ])
+        created = call_action(mod.integration_import_quickbooks_trial_balance, conn, ns(
+            company_id=env["company_id"],
+            source_label="Scoped batch",
+            as_of_date="2026-04-30",
+            records_json=records,
+        ))
+        assert is_ok(created), created
+
+        audits_before = conn.execute(
+            "SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        result = call_action(mod.integration_get_quickbooks_import, conn, ns(
+            batch_id=created["batch_id"], company_id=env["company_id"],
+        ))
+        assert is_ok(result), result
+        assert result["batch"]["source_label"] == "Scoped batch"
+        assert result["batch"]["as_of_date"] == "2026-04-30"
+        assert result["batch"]["debit_total"] == "500.00"
+        assert result["batch"]["credit_total"] == "500.00"
+        assert result["batch"]["difference"] == "0.00"
+        assert result["batch"]["status"] == "verified"
+        assert [line["account_name"] for line in result["lines"]] == [
+            "Cash", "Revenue"]
+        assert result["line_count"] == 2
+        assert result["posted"] is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_log").fetchone()[0] == audits_before
+
+        other_company = seed_company(conn)
+        seed_naming_series(conn, other_company)
+        foreign = call_action(mod.integration_get_quickbooks_import, conn, ns(
+            batch_id=created["batch_id"], company_id=other_company,
+        ))
+        assert is_error(foreign), foreign
+        assert "not found" in foreign["message"]
+        missing = call_action(mod.integration_get_quickbooks_import, conn, ns(
+            batch_id="no-such-batch", company_id=env["company_id"],
+        ))
+        assert is_error(missing), missing
+        assert "not found" in missing["message"]

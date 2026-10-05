@@ -2,8 +2,10 @@
 """ERPClaw Integrations schema extension -- adds integration tables to the shared database.
 
 Operator-facing connectors for syncing data with external platforms.
-17 tables: 9 core integration tables + 8 connectors-v2 tables
-(booking, delivery, realestate, financial, productivity).
+21 tables: 9 core integration tables + 8 connectors-v2 tables
+(booking, delivery, realestate, financial, productivity) + 2 QuickBooks
+trial-balance import staging tables + 2 offline bank feed import staging
+tables (NetSuite / Xero local CSV, v1).
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
@@ -569,6 +571,127 @@ PRODUCTIVITY_CONNECTOR = Table(
 Index("idx_cv2_pdc_company", PRODUCTIVITY_CONNECTOR.c.company_id)
 Index("idx_cv2_pdc_platform", PRODUCTIVITY_CONNECTOR.c.platform)
 Index("idx_cv2_pdc_status", PRODUCTIVITY_CONNECTOR.c.connector_status)
+
+# ===========================================================================
+# QUICKBOOKS TRIAL BALANCE IMPORT STAGING (v1)
+# ===========================================================================
+#
+# Local-only staging for a caller-supplied QuickBooks trial balance. Version 1
+# never calls QuickBooks, stores no credentials, and never posts staged rows
+# to the general ledger: the batch only proves whether debits and credits tie
+# (`verified` vs `out_of_balance`). Like the nine `integration_*` tables, both
+# tables carry `company_id` as a bare column. Money stays TEXT on every
+# backend; `sequence` is a per-batch line number (INTEGER, not money).
+
+# ---------------------------------------------------------------------------
+# 18. integration_quickbooks_batch
+# ---------------------------------------------------------------------------
+QB_BATCH = Table(
+    "integration_quickbooks_batch", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("company_id", Text, nullable=False),
+    Column("source", Text, nullable=False,
+           server_default=text("'quickbooks'")),
+    Column("source_label", Text, nullable=False),
+    Column("as_of_date", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    Column("debit_total", Text, nullable=False),
+    Column("credit_total", Text, nullable=False),
+    Column("difference", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    CheckConstraint(
+        "source IN ('quickbooks')",
+        name="ck_qb_batch_source"),
+    CheckConstraint(
+        "status IN ('verified','out_of_balance')",
+        name="ck_qb_batch_status"),
+)
+
+Index("idx_qb_batch_company", QB_BATCH.c.company_id)
+Index("idx_qb_batch_status", QB_BATCH.c.status)
+
+# ---------------------------------------------------------------------------
+# 19. integration_quickbooks_line
+# ---------------------------------------------------------------------------
+QB_LINE = Table(
+    "integration_quickbooks_line", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("batch_id", Text,
+           ForeignKey("integration_quickbooks_batch.id"), nullable=False),
+    Column("company_id", Text, nullable=False),
+    Column("account_name", Text, nullable=False),
+    Column("account_number", Text),
+    Column("debit", Text, nullable=False),
+    Column("credit", Text, nullable=False),
+    Column("sequence", Integer, nullable=False),
+)
+
+Index("idx_qb_line_batch", QB_LINE.c.batch_id)
+Index("idx_qb_line_company", QB_LINE.c.company_id)
+
+# ===========================================================================
+# OFFLINE BANK FEED IMPORT STAGING (v1)
+# ===========================================================================
+#
+# Local-only staging for a caller-supplied bank-feed CSV export from NetSuite
+# or Xero. Version 1 never signs in remotely, calls neither provider, and
+# never writes staged rows to the general ledger: an import batch only stages
+# exact Decimal-as-TEXT amounts plus one durable batch receipt. Like the nine
+# `integration_*` tables, both tables carry `company_id` as a bare column.
+# Money stays TEXT on every backend; `sequence` is the 1-based file order of
+# the row (INTEGER, not money), so stored order is deterministic. The
+# (company_id, provider, account_ref, external_id) UNIQUE makes a retry of an
+# identical provider plus account plus external ID idempotent: the duplicate
+# line is skipped, never staged twice.
+
+# ---------------------------------------------------------------------------
+# 20. integration_offline_bank_batch
+# ---------------------------------------------------------------------------
+OFFLINE_BANK_BATCH = Table(
+    "integration_offline_bank_batch", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("company_id", Text, nullable=False),
+    Column("provider", Text, nullable=False),
+    Column("account_ref", Text, nullable=False),
+    Column("file_path", Text),
+    Column("row_count", Integer, nullable=False,
+           server_default=text("0")),
+    Column("debit_total", Text, nullable=False),
+    Column("credit_total", Text, nullable=False),
+    Column("created_at", Text, nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "provider IN ('netsuite','xero')",
+        name="ck_offline_bank_batch_provider"),
+)
+
+Index("idx_ob_batch_company", OFFLINE_BANK_BATCH.c.company_id)
+Index("idx_ob_batch_provider", OFFLINE_BANK_BATCH.c.provider)
+
+# ---------------------------------------------------------------------------
+# 21. integration_offline_bank_line
+# ---------------------------------------------------------------------------
+OFFLINE_BANK_LINE = Table(
+    "integration_offline_bank_line", METADATA,
+    Column("id", Text, primary_key=True, nullable=True),
+    Column("batch_id", Text,
+           ForeignKey("integration_offline_bank_batch.id"), nullable=False),
+    Column("company_id", Text, nullable=False),
+    Column("provider", Text, nullable=False),
+    Column("account_ref", Text, nullable=False),
+    Column("txn_date", Text, nullable=False),
+    Column("description", Text),
+    Column("external_id", Text, nullable=False),
+    Column("amount", Text, nullable=False),
+    Column("sequence", Integer, nullable=False),
+    # Unnamed, as shipped elsewhere in this module: retries of an identical
+    # (company, provider, account, external ID) skip instead of doubling.
+    UniqueConstraint("company_id", "provider", "account_ref", "external_id"),
+)
+
+Index("idx_ob_line_batch", OFFLINE_BANK_LINE.c.batch_id)
+Index("idx_ob_line_company", OFFLINE_BANK_LINE.c.company_id)
 
 # ===========================================================================
 # PLAID / STRIPE / S3 -- config + scaffolding tables (all removed)

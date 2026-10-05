@@ -1,7 +1,7 @@
 ---
 name: erpclaw-pos
 version: 1.0.0
-description: Point of Sale -- 29 actions across 4 domains. POS profiles, register sessions, cart-based transactions, split payments, receipts, hold/resume, returns, discounts, and end-of-day reporting with cash reconciliation.
+description: Point of Sale -- 30 actions across 4 domains. POS profiles, register sessions, cart-based transactions, split payments, receipts, hold/resume, returns, discounts, and end-of-day reporting with cash reconciliation.
 author: AvanSaber
 homepage: https://github.com/avansaber/erpclaw-addons
 source: https://github.com/avansaber/erpclaw-addons
@@ -45,7 +45,7 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 --action pos-close-session --id {id} --closing-amount 250
 ```
 
-## All 29 Actions
+## All 30 Actions
 
 ### POS Profiles (4 actions)
 | Action | Description |
@@ -80,7 +80,7 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 | `pos-hold-transaction` | Hold transaction for later |
 | `pos-resume-transaction` | Resume held transaction |
 
-### Returns & Reports (8 actions)
+### Returns & Reports (9 actions)
 | Action | Description |
 |--------|-------------|
 | `pos-return-transaction` | Process return (credit note plus refund; --items, --refund-method, --pos-session-id; needs --user-confirmed) |
@@ -91,6 +91,7 @@ python3 {baseDir}/scripts/db_query.py --action pos-add-pos-profile --name "Main 
 | `pos-top-items` | Top selling items |
 | `pos-cashier-performance` | Cashier performance metrics |
 | `pos-cash-reconciliation` | Cash reconciliation with variance; a sale cancelled outside POS is listed under voids to finish |
+| `pos-retail-volume-measurement` / `pos-measure-retail-volume` / `pos-retail-volume` / `pos-retail-volume-report` | Retail volume measurement of recorded POS rows; read-only, not a throughput guarantee |
 
 ## Cross-Skill Integration
 - **erpclaw-selling:** submit-transaction creates sales_invoice

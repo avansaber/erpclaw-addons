@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ERPClaw-Growth v2 — Unified router for 115 actions across 4 domains.
+"""ERPClaw-Growth v2: Unified router for 116 actions across 4 domains.
 
 Routes --action to the correct domain script via os.execvp().
 Domains: crm, analytics, ai-engine, crm-adv.
@@ -13,7 +13,7 @@ import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Action → domain mapping (111 unique actions + 4 status aliases)
+# Action → domain mapping (112 unique actions + 4 status aliases)
 # Only collision: `status` in all 4 domains → routes to analytics.
 ACTION_MAP = {
     # === CRM (20 actions) ===
@@ -90,7 +90,10 @@ ACTION_MAP = {
     "export-crm-contacts": "erpclaw-crm",
     "export-crm-companies": "erpclaw-crm",
 
-    # === Analytics (26 actions) ===
+    # === CRM: Local wedge v1 (1 action) ===
+    "crm-account-brief": "erpclaw-crm",
+
+    # === Analytics (27 actions) ===
     "status": "erpclaw-analytics",
     "available-metrics": "erpclaw-analytics",
     "liquidity-ratios": "erpclaw-analytics",
@@ -120,6 +123,7 @@ ACTION_MAP = {
     # missing from this map, so the router returned "Unknown action". Restored
     # by the same dispatchability sweep as foundation's 27; L0 gate now guards.
     "analyze-query-performance": "erpclaw-analytics",
+    "imported-commerce-insights": "erpclaw-analytics",
 
     # === AI Engine (22 actions) ===
     "detect-anomalies": "erpclaw-ai-engine",
