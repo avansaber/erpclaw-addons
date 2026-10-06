@@ -3,7 +3,7 @@
 
 Usage: python3 db_query.py --action <action-name> [flags]
 
-Routes all 30 planning actions to scenario, forecast, and budget domain modules.
+Routes all planning actions to scenario, forecast, budget, and simulation domain modules.
 """
 import argparse
 import os
@@ -23,12 +23,14 @@ from erpclaw_lib.args import SafeArgumentParser
 from scenarios import ACTIONS as SCENARIO_ACTIONS
 from forecasts import ACTIONS as FORECAST_ACTIONS
 from budgets import ACTIONS as BUDGET_ACTIONS
+from simulation import ACTIONS as SIMULATION_ACTIONS
 
 # Merge all actions
 ACTIONS = {}
 ACTIONS.update(SCENARIO_ACTIONS)
 ACTIONS.update(FORECAST_ACTIONS)
 ACTIONS.update(BUDGET_ACTIONS)
+ACTIONS.update(SIMULATION_ACTIONS)
 
 
 def build_parser():
@@ -70,6 +72,14 @@ def build_parser():
     parser.add_argument("--forecast-line-id")
     parser.add_argument("--forecast-amount")
     parser.add_argument("--actual-amount")
+
+    # Business simulation flags (read-only 24-month forecast)
+    parser.add_argument("--start-month")
+    parser.add_argument("--starting-cash")
+    parser.add_argument("--monthly-revenue")
+    parser.add_argument("--monthly-expense")
+    parser.add_argument("--revenue-growth-rate")
+    parser.add_argument("--expense-growth-rate")
 
     # Budget flags
     parser.add_argument("--budget-id")

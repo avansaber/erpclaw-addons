@@ -85,6 +85,11 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `planning-calculate-variance` | `--forecast-id` | |
 | `planning-forecast-accuracy-report` | `--forecast-id` | |
 
+### Simulation (1 action)
+| Action | Required Flags | Optional Flags |
+|--------|---------------|----------------|
+| `planning-business-simulation-report` | `--company-id --start-month --starting-cash --monthly-revenue --monthly-expense` | `--revenue-growth-rate --expense-growth-rate` |
+
 ## Key Concepts (Tier 2)
 
 - **Budget Version**: A scenario with type 'budget'. Follows draft -> approved -> locked lifecycle.
@@ -92,12 +97,13 @@ python3 {baseDir}/scripts/db_query.py --action status
 - **Forecasts**: Time-series projections (rolling, static, driver_based). Track forecast vs actual variance.
 - **Variance**: Difference between planned and actual. Negative = under budget, positive = over budget.
 - **Budget-vs-Actual**: Compares budget lines against real GL entries by account name and period.
+- **Business Simulation**: Deterministic 24-month cash forecast from starting cash plus monthly revenue/expense with optional growth rates (percent; `-100%` to `+100%`). Read-only; no rows are stored.
 
 ## Technical Details (Tier 3)
 
 **Tables owned (4):** scenario, scenario_line, forecast, forecast_line
 
-**Script:** `scripts/db_query.py` routes to scenarios.py, forecasts.py, budgets.py domain modules
+**Script:** `scripts/db_query.py` routes to scenarios.py, forecasts.py, budgets.py, simulation.py domain modules
 
 **Data conventions:** Money = TEXT (Python Decimal), IDs = TEXT (UUID4), periods = YYYY-MM format
 
