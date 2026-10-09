@@ -1382,7 +1382,16 @@ def schedule_maintenance(conn, args):
     if not args.scheduled_date:
         err("--scheduled-date is required")
 
-    asset = _validate_asset_exists(conn, args.asset_id)
+    company_id = getattr(args, "company_id", None)
+    if company_id:
+        asset_t = Table("asset")
+        query = (Q.from_(asset_t).select(asset_t.star)
+                 .where(asset_t.id == P()).where(asset_t.company_id == P()))
+        asset = conn.execute(query.get_sql(), (args.asset_id, company_id)).fetchone()
+        if not asset:
+            err("Asset not found for the requested company")
+    else:
+        asset = _validate_asset_exists(conn, args.asset_id)
     asset_dict = row_to_dict(asset)
 
     maint_type = args.maintenance_type
@@ -1443,8 +1452,17 @@ def complete_maintenance(conn, args):
 
     mnt_t = Table("asset_maintenance")
     mnt_q = Q.from_(mnt_t).select(mnt_t.star).where(mnt_t.id == P())
-    maint = conn.execute(mnt_q.get_sql(), (args.maintenance_id,)).fetchone()
+    company_id = getattr(args, "company_id", None)
+    params = [args.maintenance_id]
+    if company_id:
+        owner = Table("asset")
+        mnt_q = (mnt_q.join(owner).on(mnt_t.asset_id == owner.id)
+                 .where(owner.company_id == P()))
+        params.append(company_id)
+    maint = conn.execute(mnt_q.get_sql(), tuple(params)).fetchone()
     if not maint:
+        if company_id:
+            err("Maintenance record not found for the requested company")
         err(f"Maintenance record {args.maintenance_id} not found")
 
     maint_dict = row_to_dict(maint)
@@ -1463,7 +1481,14 @@ def complete_maintenance(conn, args):
     else:
         is_capex = int(maint_dict.get("is_capex") or 0)
 
-    cost_dec = to_decimal(cost or "0")
+    try:
+        cost_dec = to_decimal(cost or "0")
+        if not cost_dec.is_finite() or cost_dec < 0:
+            err("--cost must be finite and non-negative")
+        cost_dec = round_currency(cost_dec)
+    except (InvalidOperation, ValueError):
+        err("--cost must be a finite amount that can be rounded to cents")
+    cost = str(cost_dec)
     gl_ids = []
     recompute = None
     branch = "opex"

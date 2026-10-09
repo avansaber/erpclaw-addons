@@ -16,7 +16,7 @@ Money convention: Decimal throughout, monthly currency rounding
 import os
 import re
 import sys
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
 
 try:
     import importlib.util
@@ -48,11 +48,18 @@ def _parse_money(raw, flag):
         err("Invalid %s %r: must be a Decimal string, not float" % (flag, raw))
     try:
         parsed = to_decimal(raw)
-    except (ValueError, TypeError, InvalidOperation):
+        if not parsed.is_finite():
+            err("Invalid %s %r: must be finite" % (flag, raw))
+        return round_currency(parsed)
+    except (ValueError, TypeError, DecimalException):
         err("Invalid %s %r: must be a valid Decimal" % (flag, raw))
-    if not parsed.is_finite():
-        err("Invalid %s %r: must be finite" % (flag, raw))
-    return round_currency(parsed)
+
+
+def _add_money(left, right):
+    """Refuse a currency sum that loses cents or cannot be represented."""
+    with localcontext() as context:
+        context.traps[Inexact] = True
+        return round_currency(left + right)
 
 
 def _parse_rate(raw, flag):
@@ -92,6 +99,13 @@ def _add_months(year, month, offset):
 
 
 def business_simulation_report(conn, args):
+    try:
+        _business_simulation_report(conn, args)
+    except DecimalException:
+        err("Simulation amounts exceed representable Decimal currency arithmetic")
+
+
+def _business_simulation_report(conn, args):
     company_id = getattr(args, "company_id", None)
     if not company_id:
         err("--company-id is required")
@@ -140,8 +154,8 @@ def business_simulation_report(conn, args):
         period = "%04d-%02d" % (y, m)
         revenue = round_currency(cur_rev)
         expense = round_currency(cur_exp)
-        net = revenue - expense
-        closing = opening + net
+        net = _add_money(revenue, -expense)
+        closing = _add_money(opening, net)
         row = {
             "month": period,
             "opening_cash": str(opening),
@@ -151,8 +165,8 @@ def business_simulation_report(conn, args):
             "closing_cash": str(closing),
         }
         months.append(row)
-        total_rev += revenue
-        total_exp += expense
+        total_rev = _add_money(total_rev, revenue)
+        total_exp = _add_money(total_exp, expense)
         if minimum_cash is None or closing < minimum_cash:
             minimum_cash = closing
         if closing < Decimal("0") and first_negative is None:
@@ -161,7 +175,7 @@ def business_simulation_report(conn, args):
         cur_rev = revenue * rev_factor
         cur_exp = expense * exp_factor
 
-    total_net = total_rev - total_exp
+    total_net = _add_money(total_rev, -total_exp)
     ok({
         "company_id": company_id,
         "start_month": start_month,

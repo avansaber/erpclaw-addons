@@ -7,7 +7,10 @@ and no writes.
 """
 from decimal import Decimal
 
+import pytest
+
 from planning_helpers import call_action, ns, is_ok, is_error, load_db_query, seed_company
+from erpclaw_lib.query import Q, Table
 
 
 def _mod():
@@ -169,3 +172,55 @@ class TestReadOnlyDeterminism:
             conn, _base(env["company_id"]))
         assert is_ok(result), result
         assert conn.total_changes == before
+
+
+def _books_snapshot(conn):
+    tables = ("company", "gl_entry", "journal_entry", "sales_invoice",
+              "payment_entry", "payment_ledger_entry", "audit_log",
+              "planning_scenario", "planning_scenario_line", "forecast", "forecast_line")
+    return {name: sorted(tuple(str(value) for value in row)
+                         for row in conn.execute(Q.from_(Table(name)).select("*").get_sql()))
+            for name in tables}
+
+
+@pytest.mark.parametrize("field", ["starting_cash", "monthly_revenue", "monthly_expense"])
+@pytest.mark.parametrize("amount", ["1E1000", "-1E1000"])
+def test_huge_finite_input_returns_json_error_and_preserves_books(conn, env, field, amount):
+    mod = _mod()
+    before, changes = _books_snapshot(conn), conn.total_changes
+    result = call_action(mod.ACTIONS["planning-business-simulation-report"], conn,
+                         _base(env["company_id"], **{field: amount}))
+    assert is_error(result), result
+    assert "Invalid" in result["message"]
+    assert "months" not in result
+    assert _books_snapshot(conn) == before
+    assert conn.total_changes == changes
+
+
+@pytest.mark.parametrize("inputs", [
+    {"starting_cash": "9E25", "monthly_revenue": "9E25", "monthly_expense": "0"},
+    {"monthly_revenue": "9E25", "monthly_expense": "-9E25"},
+    {"monthly_revenue": "9E24", "monthly_expense": "0"},
+    {"monthly_revenue": "9E24", "monthly_expense": "9E24",
+     "revenue_growth_rate": "100", "expense_growth_rate": "100"},
+])
+def test_unrepresentable_forecast_returns_whole_json_refusal(conn, env, inputs):
+    mod = _mod()
+    before, changes = _books_snapshot(conn), conn.total_changes
+    result = call_action(mod.ACTIONS["planning-business-simulation-report"], conn,
+                         _base(env["company_id"], **inputs))
+    assert is_error(result), result
+    assert result["message"] == "Simulation amounts exceed representable Decimal currency arithmetic"
+    assert "months" not in result
+    assert _books_snapshot(conn) == before
+    assert conn.total_changes == changes
+
+
+def test_large_representable_exact_forecast_is_not_arbitrarily_capped(conn, env):
+    mod = _mod()
+    result = call_action(mod.ACTIONS["planning-business-simulation-report"], conn,
+                         _base(env["company_id"], starting_cash="9E25",
+                               monthly_revenue="0.01", monthly_expense="0"))
+    assert is_ok(result), result
+    assert result["total_revenue"] == "0.24"
+    assert result["months"][-1]["closing_cash"] == "90000000000000000000000000.24"
